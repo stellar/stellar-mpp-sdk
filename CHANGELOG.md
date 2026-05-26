@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-05-26
+
+### Changed
+
+- **BREAKING:** Upgrade the `mppx` peer dependency to `^0.6.28` (from `^0.4.11`) — consumers must use mppx 0.6.x. No SDK API changes; the integration is source-compatible. Bump `zod` to `^4.4.3` (required by mppx 0.6) and add `viem ^2.51.0` (mppx 0.6 peer).
+- Upgrade TypeScript to 6.0.3.
+
+### Fixed
+
+- Resolve Dependabot alerts: bump `qs` and `ip-address` (via `express-rate-limit`), and clear the transitive `ws` advisory via viem 2.51.0.
+
 ## [0.5.1] - 2026-04-21
 
 ### Added
