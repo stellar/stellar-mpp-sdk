@@ -8,3 +8,7 @@ package-lock.json
 .env
 examples/.env.*
 !examples/.env.*.example
+
+# PR skill scratch
+NOTES_PR.md
+PR.local.md
