@@ -532,6 +532,16 @@ pnpm run format:check # Check formatting
 pnpm test             # Run tests (vitest)
 ```
 
+## Resources
+
+Background on the protocol this SDK implements and the framework it builds on:
+
+- [Machine Payments Protocol (MPP)](https://mpp.dev) — the HTTP 402-based protocol for machine-to-machine payments
+- [MPP specifications](https://github.com/tempoxyz/mpp-specs) — the protocol spec repository (intents, methods, and the HTTP Payment Authentication scheme)
+  - [draft-stellar-charge-00](https://paymentauth.org/draft-stellar-charge-00) ([source](https://github.com/tempoxyz/mpp-specs/blob/main/specs/methods/stellar/draft-stellar-charge-00.md)) — the `stellar` method / `charge` intent this SDK implements
+- [mppx](https://github.com/wevm/mppx) — the TypeScript MPP framework this SDK plugs into (`Method.from` / `.toClient` / `.toServer`); peer dependency
+- [one-way-channel](https://github.com/stellar-experimental/one-way-channel) — the Soroban contract backing the channel payment mode
+
 ## License
 
 MIT
