@@ -87,7 +87,7 @@ Client (Funder)                 Server (Recipient)                Stellar
 
 ## Prerequisites
 
-- [Node.js](https://nodejs.org/) 20+
+- [Node.js](https://nodejs.org/) 22+
 - [pnpm](https://pnpm.io/) 10.33+ (via [corepack](https://nodejs.org/api/corepack.html))
 
 ```bash
@@ -97,10 +97,10 @@ corepack enable
 ## Install
 
 ```bash
-npm install @stellar/mpp @stellar/stellar-sdk mppx
+npm install @stellar/mpp @stellar/stellar-sdk mppx viem
 ```
 
-`@stellar/stellar-sdk` and `mppx` are peer dependencies of `@stellar/mpp` — you must install compatible versions alongside it.
+`@stellar/stellar-sdk` and `mppx` are peer dependencies of `@stellar/mpp` — you must install compatible versions alongside it. `mppx` 0.6.x in turn requires `viem` (`>=2.50.4`) as a peer dependency, so install it too.
 
 Only import the subpath you need to keep your bundle small:
 
@@ -531,6 +531,16 @@ pnpm run lint         # Run ESLint
 pnpm run format:check # Check formatting
 pnpm test             # Run tests (vitest)
 ```
+
+## Resources
+
+Background on the protocol this SDK implements and the framework it builds on:
+
+- [Machine Payments Protocol (MPP)](https://mpp.dev) — the HTTP 402-based protocol for machine-to-machine payments
+- [MPP specifications](https://github.com/tempoxyz/mpp-specs) — the protocol spec repository (intents, methods, and the HTTP Payment Authentication scheme)
+  - [draft-stellar-charge-00](https://paymentauth.org/draft-stellar-charge-00) ([source](https://github.com/tempoxyz/mpp-specs/blob/main/specs/methods/stellar/draft-stellar-charge-00.md)) — the `stellar` method / `charge` intent this SDK implements
+- [mppx](https://github.com/wevm/mppx) — the TypeScript MPP framework this SDK plugs into (`Method.from` / `.toClient` / `.toServer`); peer dependency
+- [one-way-channel](https://github.com/stellar-experimental/one-way-channel) — the Soroban contract backing the channel payment mode
 
 ## License
 

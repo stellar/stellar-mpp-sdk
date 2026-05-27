@@ -1,11 +1,11 @@
 {
   "name": "@stellar/mpp",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Stellar blockchain payment method for the Machine Payments Protocol (MPP)",
   "type": "module",
   "packageManager": "pnpm@10.33.0",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "sideEffects": false,
   "main": "./dist/index.js",
@@ -63,11 +63,11 @@
     "format:check": "prettier --check ."
   },
   "dependencies": {
-    "zod": "^4.3.6"
+    "zod": "^4.4.3"
   },
   "peerDependencies": {
     "@stellar/stellar-sdk": "^15.0.1",
-    "mppx": "^0.4.11"
+    "mppx": "^0.6.28"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -77,15 +77,16 @@
     "@vitest/coverage-v8": "^4.1.4",
     "eslint": "^10.2.0",
     "express": "^5.2.1",
-    "express-rate-limit": "^8.3.2",
+    "express-rate-limit": "^8.5.2",
     "helmet": "^8.1.0",
-    "mppx": "^0.4.12",
+    "mppx": "^0.6.28",
     "pino": "^10.3.1",
     "pino-http": "^11.0.0",
     "prettier": "^3.8.2",
     "tsx": "^4.21.0",
-    "typescript": "^5.9.3",
+    "typescript": "^6.0.3",
     "typescript-eslint": "^8.58.1",
+    "viem": ">=2.50.4 <2.51.0 || >2.51.0",
     "vitest": "^4.1.4"
   },
   "pnpm": {
