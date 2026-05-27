@@ -65,7 +65,7 @@ importers:
         specifier: ^8.58.1
         version: 8.58.1(eslint@10.2.0)(typescript@6.0.3)
       viem:
-        specifier: ~2.50.4
+        specifier: '>=2.50.4 <2.51.0 || >2.51.0'
         version: 2.50.4(typescript@6.0.3)(zod@4.4.3)
       vitest:
         specifier: ^4.1.4

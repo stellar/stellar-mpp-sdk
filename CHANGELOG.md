@@ -11,13 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **BREAKING:** Upgrade the `mppx` peer dependency to `^0.6.28` (from `^0.4.11`) — consumers must use mppx 0.6.x. No SDK API changes; the integration is source-compatible. Bump `zod` to `^4.4.3` (required by mppx 0.6) and add `viem ~2.50.4` (mppx 0.6 peer) ([#46](https://github.com/stellar/stellar-mpp-sdk/pull/46))
+- **BREAKING:** Upgrade the `mppx` peer dependency to `^0.6.28` (from `^0.4.11`) — consumers must use mppx 0.6.x. No SDK API changes; the integration is source-compatible. Bump `zod` to `^4.4.3` (required by mppx 0.6) and add `viem` (mppx 0.6 peer) ([#46](https://github.com/stellar/stellar-mpp-sdk/pull/46))
 - **BREAKING:** Require Node.js `>=22` (from `>=20`). mppx 0.6 pulls transitive dependencies (`incur`, `@scalar/openapi-types`) that require Node 22 ([#46](https://github.com/stellar/stellar-mpp-sdk/pull/46))
 - Upgrade TypeScript to 6.0.3 ([#46](https://github.com/stellar/stellar-mpp-sdk/pull/46))
 
 ### Fixed
 
 - Resolve Dependabot alerts: bump `qs` and `ip-address` (via `express-rate-limit`), and clear the transitive `ws` advisory via viem 2.50.4 ([#46](https://github.com/stellar/stellar-mpp-sdk/pull/46))
+
+### Security
+
+- Constrain the `viem` range to `>=2.50.4 <2.51.0 || >2.51.0`. viem 2.51.0 resolves its `ox` dependency from a non-registry `pkg.pr.new` preview tarball — a mutable, unaudited source unfit for a published SDK's lockfile. The range excludes only 2.51.0 while still allowing 2.50.x patches and future clean releases ([#46](https://github.com/stellar/stellar-mpp-sdk/pull/46))
 
 ## [0.5.1] - 2026-04-21
 
