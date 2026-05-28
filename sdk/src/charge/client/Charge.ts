@@ -163,19 +163,20 @@ export function charge(parameters: charge.Parameters) {
         // Sign only the Soroban authorization entries — do NOT sign the
         // transaction envelope (the server will do that after rebuilding).
         const envelope = prepared.toEnvelope()
-        const v1 = envelope.v1()
-        for (const op of v1.tx().operations()) {
-          const body = op.body()
-          if (body.switch().value !== StellarXdr.OperationType.invokeHostFunction().value) {
+        if (envelope.type !== 'envelopeTypeTx') {
+          throw new StellarMppError('Expected a v1 transaction envelope.', {
+            envelopeType: envelope.type,
+          })
+        }
+        for (const op of envelope.v1.tx.operations) {
+          const body = op.body
+          if (body.type !== 'invokeHostFunction') {
             continue
           }
-          const authEntries = body.invokeHostFunctionOp().auth()
+          const authEntries = body.invokeHostFunctionOp.auth
           for (let i = 0; i < authEntries.length; i++) {
             const entry = authEntries[i]
-            if (
-              entry.credentials().switch().value ===
-              StellarXdr.SorobanCredentialsType.sorobanCredentialsAddress().value
-            ) {
+            if (entry.credentials.type === 'sorobanCredentialsAddress') {
               authEntries[i] = await authorizeEntry(
                 entry,
                 clientKP,
@@ -186,7 +187,7 @@ export function charge(parameters: charge.Parameters) {
           }
         }
 
-        const signedXdr = envelope.toXDR('base64')
+        const signedXdr = envelope.toXdr('base64')
         onProgress?.({ type: 'signed', transaction: signedXdr })
 
         const source = `did:pkh:${network}:${clientKP.publicKey()}`
@@ -229,7 +230,7 @@ export function charge(parameters: charge.Parameters) {
       onProgress?.({ type: 'signing' })
       prepared.sign(clientKP)
 
-      const signedXdr = prepared.toXDR()
+      const signedXdr = prepared.toXdr()
       onProgress?.({ type: 'signed', transaction: signedXdr })
 
       const source = `did:pkh:${network}:${clientKP.publicKey()}`

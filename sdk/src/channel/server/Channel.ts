@@ -484,7 +484,7 @@ export function channel(parameters: channel.Parameters) {
     // before broadcasting it.
     let openTx: Transaction | FeeBumpTransaction
     try {
-      openTx = TransactionBuilder.fromXDR(txXdr, networkPassphrase)
+      openTx = TransactionBuilder.fromXdr(txXdr, networkPassphrase)
     } catch (err) {
       throw new ChannelVerificationError(`${LOG_PREFIX} Invalid open transaction XDR.`, {
         error: err instanceof Error ? err.message : String(err),
@@ -567,7 +567,13 @@ export function channel(parameters: channel.Parameters) {
       throw new ChannelVerificationError(`${LOG_PREFIX} prepare_commitment returned no value.`, {})
     }
 
-    const commitmentBytes = returnValue.bytes()
+    if (returnValue.type !== 'scvBytes') {
+      throw new ChannelVerificationError(
+        `${LOG_PREFIX} prepare_commitment returned unexpected type, expected bytes.`,
+        { type: returnValue.type },
+      )
+    }
+    const commitmentBytes = returnValue.value.value
     const valid = commitmentKP.verify(Buffer.from(commitmentBytes), signatureBytes)
 
     if (!valid) {

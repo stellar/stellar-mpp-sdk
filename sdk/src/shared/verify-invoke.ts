@@ -29,17 +29,29 @@ export function verifyInvokeContractOp(
     })
   }
 
-  const opBody = tx.toEnvelope().v1().tx().operations()[0].body()
-  const hostFn = opBody.invokeHostFunctionOp().hostFunction()
-
-  if (hostFn.switch().value !== xdr.HostFunctionType.hostFunctionTypeInvokeContract().value) {
-    throw new StellarMppError(`${logPrefix} Host function is not a contract invocation.`, {
-      hostFunctionType: hostFn.switch().name,
+  const envelope = tx.toEnvelope()
+  if (envelope.type !== 'envelopeTypeTx') {
+    throw new StellarMppError(`${logPrefix} Expected a v1 transaction envelope.`, {
+      envelopeType: envelope.type,
     })
   }
 
-  const invokeArgs = hostFn.invokeContract()
-  const contractAddress = Address.fromScAddress(invokeArgs.contractAddress()).toString()
+  const opBody = envelope.v1.tx.operations[0].body
+  if (opBody.type !== 'invokeHostFunction') {
+    throw new StellarMppError(`${logPrefix} Transaction does not contain a Soroban invocation.`, {
+      operationType: opBody.type,
+    })
+  }
+
+  const hostFn = opBody.invokeHostFunctionOp.hostFunction
+  if (hostFn.type !== 'hostFunctionTypeInvokeContract') {
+    throw new StellarMppError(`${logPrefix} Host function is not a contract invocation.`, {
+      hostFunctionType: hostFn.type,
+    })
+  }
+
+  const invokeArgs = hostFn.invokeContract
+  const contractAddress = Address.fromScAddress(invokeArgs.contractAddress).toString()
 
   return { contractAddress, invokeArgs }
 }

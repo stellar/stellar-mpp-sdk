@@ -106,7 +106,12 @@ export async function getChannelState(
       `Failed to simulate refund_waiting_period on channel ${channelAddress}: missing return value`,
     )
   }
-  const refundWaitingPeriod = waitingPeriodVal.u32()
+  if (waitingPeriodVal.type !== 'scvU32') {
+    throw new StellarMppError(
+      `Expected scvU32 for refund_waiting_period, got ${waitingPeriodVal.type}`,
+    )
+  }
+  const refundWaitingPeriod = waitingPeriodVal.value
   const token = Address.fromScVal(tokenVal!).toString()
   const from = Address.fromScVal(fromVal!).toString()
   const to = Address.fromScVal(toVal!).toString()
@@ -166,7 +171,7 @@ async function readCloseEffectiveAtLedger(
     new xdr.LedgerKeyContractData({
       contract: contractId.toScAddress(),
       key: xdr.ScVal.scvLedgerKeyContractInstance(),
-      durability: xdr.ContractDataDurability.persistent(),
+      durability: xdr.ContractDataDurability.persistent,
     }),
   )
 
@@ -177,22 +182,26 @@ async function readCloseEffectiveAtLedger(
 
   const entry = response.entries[0]
   const ledgerData = entry.val
-  const contractData = ledgerData?.contractData?.()
-  if (!contractData) return null
-  const instance = contractData.val?.()?.instance?.()
-  if (!instance) return null
-  const storage = instance.storage()
+  if (ledgerData?.type !== 'contractData') return null
+  const contractData = ledgerData.contractData
+  const instanceVal = contractData.val
+  if (instanceVal.type !== 'scvContractInstance') return null
+  const instance = instanceVal.instance
+  const storage = instance.storage
 
   if (!storage) return null
 
   // Search for the CloseEffectiveAtLedger key in the instance storage map.
   // Soroban encodes simple enum variants as ScVal::Vec([ScVal::Symbol(name)])
   for (const entry of storage) {
-    const key = entry.key()
+    const key = entry.key
     // Check if this key matches DataKey::CloseEffectiveAtLedger
     if (isEnumVariant(key, 'CloseEffectiveAtLedger')) {
-      const val = entry.val()
-      return val.u32()
+      const val = entry.val
+      if (val.type !== 'scvU32') {
+        throw new StellarMppError(`Expected scvU32 for CloseEffectiveAtLedger, got ${val.type}`)
+      }
+      return val.value
     }
   }
 
@@ -202,10 +211,10 @@ async function readCloseEffectiveAtLedger(
 /** Check if an ScVal is a Soroban enum variant with the given name. */
 function isEnumVariant(scVal: xdr.ScVal, name: string): boolean {
   try {
-    if (scVal.switch().value === xdr.ScValType.scvVec().value) {
-      const vec = scVal.vec()!
-      if (vec.length === 1 && vec[0].switch().value === xdr.ScValType.scvSymbol().value) {
-        return vec[0].sym().toString() === name
+    if (scVal.type === 'scvVec') {
+      const vec = scVal.value
+      if (vec && vec.length === 1 && vec[0].type === 'scvSymbol') {
+        return vec[0].value === name
       }
     }
   } catch {

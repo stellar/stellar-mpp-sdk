@@ -146,7 +146,12 @@ export function channel(parameters: channel.Parameters) {
         throw new StellarMppError('prepare_commitment returned no value')
       }
 
-      const commitmentBytes = returnValue.bytes()
+      if (returnValue.type !== 'scvBytes') {
+        throw new StellarMppError(
+          `prepare_commitment returned unexpected type, expected bytes. Got ${returnValue.type}.`,
+        )
+      }
+      const commitmentBytes = returnValue.value.value
 
       onProgress?.({ type: 'signing' })
 

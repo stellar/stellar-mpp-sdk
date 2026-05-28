@@ -9,36 +9,34 @@ import { StellarMppError } from './errors.js'
  * regardless of the host representation.
  */
 export function scValToBigInt(val: xdr.ScVal): bigint {
-  const switchValue = val.switch().value
-  // scvU32 = 3
-  if (switchValue === xdr.ScValType.scvU32().value) {
-    return BigInt(val.u32())
+  switch (val.type) {
+    // scvU32 = 3
+    case 'scvU32':
+      return BigInt(val.value)
+    // scvI32 = 4
+    case 'scvI32':
+      return BigInt(val.value)
+    // scvU64 = 5
+    case 'scvU64':
+      return val.value
+    // scvI64 = 6
+    case 'scvI64':
+      return val.value
+    // scvU128 = 9
+    case 'scvU128': {
+      const parts = val.value
+      const hi = parts.hi
+      const lo = parts.lo & 0xffffffffffffffffn
+      return (hi << 64n) | lo
+    }
+    // scvI128 = 10
+    case 'scvI128': {
+      const parts = val.value
+      const hi = parts.hi
+      const lo = parts.lo & 0xffffffffffffffffn
+      return (hi << 64n) | lo
+    }
+    default:
+      throw new StellarMppError(`Cannot convert ScVal type ${val.type} to BigInt`)
   }
-  // scvI32 = 4
-  if (switchValue === xdr.ScValType.scvI32().value) {
-    return BigInt(val.i32())
-  }
-  // scvU64 = 5
-  if (switchValue === xdr.ScValType.scvU64().value) {
-    return BigInt(val.u64().toString())
-  }
-  // scvI64 = 6
-  if (switchValue === xdr.ScValType.scvI64().value) {
-    return BigInt(val.i64().toString())
-  }
-  // scvU128 = 9
-  if (switchValue === xdr.ScValType.scvU128().value) {
-    const parts = val.u128()
-    const hi = BigInt(parts.hi().toString())
-    const lo = BigInt(parts.lo().toString()) & 0xffffffffffffffffn
-    return (hi << 64n) | lo
-  }
-  // scvI128 = 10
-  if (switchValue === xdr.ScValType.scvI128().value) {
-    const parts = val.i128()
-    const hi = BigInt(parts.hi().toString())
-    const lo = BigInt(parts.lo().toString()) & 0xffffffffffffffffn
-    return (hi << 64n) | lo
-  }
-  throw new StellarMppError(`Cannot convert ScVal type ${switchValue} to BigInt`)
 }
