@@ -516,7 +516,7 @@ packages:
     engines: {node: '>=20.0.0', pnpm: '>=9.0.0'}
 
   '@stellar/stellar-sdk@file:vendor/stellar-sdk-class-xdr-c7eb18e.tgz':
-    resolution: {integrity: sha512-Dxdy8YtX/yhQRVzvJ5TCaNSAdgfzV0DLiYjmOoAipUfc54GgYkU8A3WiLp+KTccLB+wM/L4GLzsquPBBRatKxQ==, tarball: file:vendor/stellar-sdk-class-xdr-c7eb18e.tgz}
+    resolution: {integrity: sha512-ZWzStu1TaM/fC9FBcj2W7JIcHFDyW9mbONPsrTRwdRNSP3xIz+ofiU5CH2OppOOCvtpUHge+IC8KWMR2M9wDvg==, tarball: file:vendor/stellar-sdk-class-xdr-c7eb18e.tgz}
     version: 15.0.1
     engines: {node: '>=20.0.0'}
     hasBin: true
