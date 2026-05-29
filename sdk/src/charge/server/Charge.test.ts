@@ -299,7 +299,7 @@ describe('charge push-mode sender verification (hash-theft attack prevention)', 
 
     mockGetTransaction.mockResolvedValueOnce({
       status: 'SUCCESS',
-      envelopeXdr: tx.toXDR(),
+      envelopeXdr: tx.toXdr(),
     })
 
     const attackerKey = Keypair.random().publicKey()
@@ -345,7 +345,7 @@ describe('charge push-mode sender verification (hash-theft attack prevention)', 
 
     mockGetTransaction.mockResolvedValueOnce({
       status: 'SUCCESS',
-      envelopeXdr: tx.toXDR(),
+      envelopeXdr: tx.toXdr(),
     })
 
     const challenge = Challenge.from({
@@ -504,7 +504,7 @@ describe('charge push-mode verification', () => {
 
     mockGetTransaction.mockResolvedValueOnce({
       status: 'SUCCESS',
-      envelopeXdr: wrongAmountTx.toXDR(),
+      envelopeXdr: wrongAmountTx.toXdr(),
     })
 
     const cred = makeHashCredential({
@@ -535,7 +535,7 @@ describe('charge push-mode verification', () => {
 
     mockGetTransaction.mockResolvedValueOnce({
       status: 'SUCCESS',
-      envelopeXdr: tx.toXDR(),
+      envelopeXdr: tx.toXdr(),
     })
 
     const cred = makeHashCredential({
@@ -566,7 +566,7 @@ describe('charge push-mode verification', () => {
 
     mockGetTransaction.mockResolvedValueOnce({
       status: 'SUCCESS',
-      envelopeXdr: tx.toXDR(),
+      envelopeXdr: tx.toXdr(),
     })
 
     const cred = makeHashCredential({
@@ -875,6 +875,7 @@ function buildTransferTx(opts: {
   to: string
   amount: bigint
   currency: string
+  fee?: string
 }) {
   const account = new Account(opts.source, '0')
   const contract = new Contract(opts.currency)
@@ -885,7 +886,7 @@ function buildTransferTx(opts: {
     nativeToScVal(opts.amount, { type: 'i128' }),
   )
   return new TransactionBuilder(account, {
-    fee: '100',
+    fee: opts.fee ?? '100',
     networkPassphrase: NETWORK_PASSPHRASE,
   })
     .addOperation(transferOp)
@@ -924,16 +925,16 @@ function makeMockTransferEvent(from: string, to: string, amount: bigint, contrac
   const amountScVal = nativeToScVal(amount, { type: 'i128' })
 
   return {
-    event: () => ({
-      type: () => ({ name: 'contract' }),
-      contractId: () => Address.fromString(contract).toBuffer().subarray(0, 32),
-      body: () => ({
-        v0: () => ({
-          topics: () => [{ sym: () => ({ toString: () => 'transfer' }) }, fromScVal, toScVal],
-          data: () => amountScVal,
-        }),
-      }),
-    }),
+    event: {
+      type: { name: 'contract' },
+      contractId: new xdr.ContractId(Address.fromString(contract).toBuffer().subarray(0, 32)),
+      body: {
+        v0: {
+          topics: [xdr.ScVal.scvSymbol('transfer'), fromScVal, toScVal],
+          data: amountScVal,
+        },
+      },
+    },
   }
 }
 
@@ -958,7 +959,7 @@ describe('charge transaction verification', () => {
       .build()
     tx.sign(PAYER)
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -1001,7 +1002,7 @@ describe('charge transaction verification', () => {
       },
     })
     const cred = Object.assign(
-      Credential.from({ challenge, payload: { type: 'transaction', transaction: tx.toXDR() } }),
+      Credential.from({ challenge, payload: { type: 'transaction', transaction: tx.toXdr() } }),
       { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
     )
 
@@ -1029,7 +1030,7 @@ describe('charge transaction verification', () => {
     tx.sign(actualPayer)
 
     // Credential claims PAYER as source, but tx `from` is actualPayer — mismatch
-    const cred = Object.assign(makeTransactionCredential(tx.toXDR()), {
+    const cred = Object.assign(makeTransactionCredential(tx.toXdr()), {
       source: `did:pkh:stellar:testnet:${PAYER.publicKey()}`,
     })
     const method = charge({
@@ -1054,7 +1055,7 @@ describe('charge transaction verification', () => {
     })
     tx.sign(PAYER)
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -1076,7 +1077,7 @@ describe('charge transaction verification', () => {
     })
     tx.sign(PAYER)
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -1099,7 +1100,7 @@ describe('charge transaction verification', () => {
     })
     tx.sign(PAYER)
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -1120,7 +1121,7 @@ describe('charge transaction verification', () => {
       currency: USDC_SAC_TESTNET,
     })
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     // No feePayer configured
     const method = charge({
       recipient: RECIPIENT,
@@ -1198,7 +1199,7 @@ describe('charge transaction verification', () => {
       },
     })
     const cred = Object.assign(
-      Credential.from({ challenge, payload: { type: 'transaction', transaction: tx.toXDR() } }),
+      Credential.from({ challenge, payload: { type: 'transaction', transaction: tx.toXdr() } }),
       { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
     )
 
@@ -1246,7 +1247,7 @@ describe('charge transaction verification', () => {
       },
     })
     const cred = Object.assign(
-      Credential.from({ challenge, payload: { type: 'transaction', transaction: tx.toXDR() } }),
+      Credential.from({ challenge, payload: { type: 'transaction', transaction: tx.toXdr() } }),
       { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
     )
 
@@ -1279,7 +1280,7 @@ describe('charge transaction verification', () => {
     mockSendTransaction.mockResolvedValueOnce({ hash: 'verified-tx-hash', status: 'PENDING' })
     mockGetTransaction.mockResolvedValueOnce({ status: 'SUCCESS' })
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -1322,8 +1323,8 @@ describe('charge transaction verification', () => {
     mockSendTransaction.mockResolvedValueOnce({ hash: 'feebump-pull-hash', status: 'PENDING' })
     mockGetTransaction.mockResolvedValueOnce({ status: 'SUCCESS' })
 
-    // Use toEnvelope().toXDR('base64') to get the FeeBump envelope XDR correctly
-    const cred = makeTransactionCredential(feeBumpTx.toEnvelope().toXDR('base64'))
+    // Use toEnvelope().toXdr('base64') to get the FeeBump envelope XDR correctly
+    const cred = makeTransactionCredential(feeBumpTx.toEnvelope().toXdr('base64'))
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -1360,7 +1361,7 @@ describe('charge transaction verification', () => {
     })
     mockSendTransaction.mockRejectedValueOnce(new Error('RPC down'))
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -1390,7 +1391,7 @@ describe('charge transaction verification', () => {
     mockSendTransaction.mockResolvedValueOnce({ hash: 'unconfirmed-hash', status: 'PENDING' })
     mockGetTransaction.mockResolvedValue({ status: 'FAILED', resultXdr: 'tx_failed' })
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -1419,7 +1420,7 @@ describe('charge transaction verification', () => {
     })
     mockSendTransaction.mockResolvedValueOnce({ hash: 'error-hash', status: 'ERROR' })
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -1448,7 +1449,7 @@ describe('charge transaction verification', () => {
     })
     mockSendTransaction.mockResolvedValueOnce({ hash: 'dup-hash', status: 'DUPLICATE' })
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -1477,7 +1478,7 @@ describe('charge transaction verification', () => {
     })
     mockSendTransaction.mockResolvedValueOnce({ hash: 'retry-hash', status: 'TRY_AGAIN_LATER' })
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -1517,7 +1518,7 @@ describe('charge transaction verification', () => {
     })
     const cred = Credential.from({
       challenge,
-      payload: { type: 'transaction', transaction: tx.toXDR() },
+      payload: { type: 'transaction', transaction: tx.toXdr() },
     })
 
     // First call fails (wrong recipient)
@@ -1555,7 +1556,7 @@ describe('charge simulation event validation', () => {
       transactionData: new SorobanDataBuilder(),
     })
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -1582,7 +1583,7 @@ describe('charge simulation event validation', () => {
       transactionData: new SorobanDataBuilder(),
     })
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -1605,16 +1606,16 @@ describe('charge simulation event validation', () => {
     tx.sign(PAYER)
 
     const nonTransferEvent = {
-      event: () => ({
-        type: () => ({ name: 'contract' }),
-        contractId: () => null,
-        body: () => ({
-          v0: () => ({
-            topics: () => [{ sym: () => ({ toString: () => 'mint' }) }],
-            data: () => nativeToScVal(0n, { type: 'i128' }),
-          }),
-        }),
-      }),
+      event: {
+        type: { name: 'contract' },
+        contractId: null,
+        body: {
+          v0: {
+            topics: [xdr.ScVal.scvSymbol('mint')],
+            data: nativeToScVal(0n, { type: 'i128' }),
+          },
+        },
+      },
     }
 
     mockSimulateTransaction.mockResolvedValueOnce({
@@ -1623,7 +1624,7 @@ describe('charge simulation event validation', () => {
       transactionData: new SorobanDataBuilder(),
     })
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -1650,16 +1651,16 @@ describe('charge simulation event validation', () => {
     const amountScVal = nativeToScVal(10000000n, { type: 'i128' })
 
     const eventWithNoContractId = {
-      event: () => ({
-        type: () => ({ name: 'contract' }),
-        contractId: () => null,
-        body: () => ({
-          v0: () => ({
-            topics: () => [{ sym: () => ({ toString: () => 'transfer' }) }, fromScVal, toScVal],
-            data: () => amountScVal,
-          }),
-        }),
-      }),
+      event: {
+        type: { name: 'contract' },
+        contractId: null,
+        body: {
+          v0: {
+            topics: [xdr.ScVal.scvSymbol('transfer'), fromScVal, toScVal],
+            data: amountScVal,
+          },
+        },
+      },
     }
 
     mockSimulateTransaction.mockResolvedValueOnce({
@@ -1668,7 +1669,7 @@ describe('charge simulation event validation', () => {
       transactionData: new SorobanDataBuilder(),
     })
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -1700,7 +1701,7 @@ describe('charge simulation event validation', () => {
       transactionData: new SorobanDataBuilder(),
     })
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -1740,7 +1741,7 @@ describe('charge transaction structure validation', () => {
       .build()
     tx.sign(PAYER)
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -1771,7 +1772,7 @@ describe('charge transaction structure validation', () => {
       .build()
     tx.sign(PAYER)
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -1798,7 +1799,7 @@ describe('charge transaction structure validation', () => {
       .build()
     tx.sign(PAYER)
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -1830,7 +1831,7 @@ describe('charge SAC invocation validation (fail-closed)', () => {
       .build()
     tx.sign(PAYER)
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -1855,7 +1856,7 @@ describe('charge server signing address protection', () => {
     })
     tx.sign(PAYER)
 
-    const cred = Object.assign(makeTransactionCredential(tx.toXDR()), {
+    const cred = Object.assign(makeTransactionCredential(tx.toXdr()), {
       source: `did:pkh:stellar:testnet:${PAYER.publicKey()}`,
     })
 
@@ -1889,7 +1890,7 @@ describe('charge server signing address protection', () => {
     mockSendTransaction.mockResolvedValueOnce({ hash: 'ok-hash', status: 'PENDING' })
     mockGetTransaction.mockResolvedValueOnce({ status: 'SUCCESS' })
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -1908,18 +1909,16 @@ describe('charge sponsored path fee cap', () => {
   it('caps the rebuilt transaction fee to maxFeeBumpStroops', async () => {
     const signerKp = Keypair.random()
 
+    // Build with an inflated fee so the rebuilt tx must be capped to maxFeeBumpStroops.
     const tx = buildTransferTx({
       source: ALL_ZEROS,
       from: PAYER.publicKey(),
       to: RECIPIENT,
       amount: 10000000n,
       currency: USDC_SAC_TESTNET,
+      fee: '2147483647',
     })
-
-    // Inflate the fee via XDR manipulation
-    const envelope = tx.toEnvelope()
-    envelope.v1().tx().fee(2147483647)
-    const bloatedXdr = envelope.toXDR('base64')
+    const bloatedXdr = tx.toEnvelope().toXdr('base64')
 
     mockGetAccount.mockResolvedValueOnce(new Account(signerKp.publicKey(), '100'))
     mockGetLatestLedger.mockResolvedValueOnce({ sequence: 1000 })
@@ -1996,7 +1995,7 @@ describe('charge sponsored path expired challenge', () => {
     const cred = Object.assign(
       Credential.from({
         challenge,
-        payload: { type: 'transaction', transaction: tx.toXDR() },
+        payload: { type: 'transaction', transaction: tx.toXdr() },
       }),
       { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
     )
@@ -2031,15 +2030,8 @@ describe('charge validateAuthEntries (sponsored path)', () => {
       amount: 10000000n,
       currency: USDC_SAC_TESTNET,
     })
-    const invokeContractArgs = tx
-      .toEnvelope()
-      .v1()
-      .tx()
-      .operations()[0]
-      .body()
-      .invokeHostFunctionOp()
-      .hostFunction()
-      .invokeContract()
+    const invokeContractArgs =
+      tx.toEnvelope().v1.tx.operations[0].body.invokeHostFunctionOp.hostFunction.invokeContract
     return new xdr.SorobanAuthorizedInvocation({
       function:
         xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(invokeContractArgs),
@@ -2049,16 +2041,24 @@ describe('charge validateAuthEntries (sponsored path)', () => {
 
   /** Builds a sponsored transaction XDR with the given auth entries injected. */
   function buildSponsoredTxWithAuth(authEntries: xdr.SorobanAuthorizationEntry[]) {
-    const tx = buildTransferTx({
-      source: ALL_ZEROS,
-      from: PAYER.publicKey(),
-      to: RECIPIENT,
-      amount: 10000000n,
-      currency: USDC_SAC_TESTNET,
+    const account = new Account(ALL_ZEROS, '0')
+    const contract = new Contract(USDC_SAC_TESTNET)
+    const transferOp = contract.call(
+      'transfer',
+      new Address(PAYER.publicKey()).toScVal(),
+      new Address(RECIPIENT).toScVal(),
+      nativeToScVal(10000000n, { type: 'i128' }),
+    )
+    const hostFunction = transferOp.body.invokeHostFunctionOp.hostFunction
+    const op = Operation.invokeHostFunction({ func: hostFunction, auth: authEntries })
+    const tx = new TransactionBuilder(account, {
+      fee: '100',
+      networkPassphrase: NETWORK_PASSPHRASE,
     })
-    const envelope = tx.toEnvelope()
-    envelope.v1().tx().operations()[0].body().invokeHostFunctionOp().auth(authEntries)
-    return envelope.toXDR('base64')
+      .addOperation(op)
+      .setTimeout(180)
+      .build()
+    return tx.toEnvelope().toXdr('base64')
   }
 
   /** Creates a sponsored-path credential (feePayer: true in methodDetails). */
@@ -2106,7 +2106,7 @@ describe('charge validateAuthEntries (sponsored path)', () => {
       credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
         new xdr.SorobanAddressCredentials({
           address: new Address(signerKp.publicKey()).toScAddress(),
-          nonce: xdr.Int64.fromString('0'),
+          nonce: 0n,
           signatureExpirationLedger: 1010,
           signature: xdr.ScVal.scvVoid(),
         }),
@@ -2135,7 +2135,7 @@ describe('charge validateAuthEntries (sponsored path)', () => {
       credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
         new xdr.SorobanAddressCredentials({
           address: new Address(PAYER.publicKey()).toScAddress(),
-          nonce: xdr.Int64.fromString('0'),
+          nonce: 0n,
           signatureExpirationLedger: 99999,
           signature: xdr.ScVal.scvVoid(),
         }),
@@ -2166,7 +2166,7 @@ describe('charge validateAuthEntries (sponsored path)', () => {
       credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
         new xdr.SorobanAddressCredentials({
           address: new Address(PAYER.publicKey()).toScAddress(),
-          nonce: xdr.Int64.fromString('0'),
+          nonce: 0n,
           signatureExpirationLedger: 1010,
           signature: xdr.ScVal.scvVoid(),
         }),
@@ -2205,7 +2205,7 @@ describe('charge validateAuthEntries (sponsored path)', () => {
       credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
         new xdr.SorobanAddressCredentials({
           address: new Address(PAYER.publicKey()).toScAddress(),
-          nonce: xdr.Int64.fromString('0'),
+          nonce: 0n,
           signatureExpirationLedger: 1010,
           signature: xdr.ScVal.scvVoid(),
         }),
@@ -2235,23 +2235,25 @@ describe('charge operation-level source validation', () => {
   it('rejects unsponsored tx with operation source matching the server signing address', async () => {
     const serverKp = Keypair.random()
 
-    const tx = buildTransferTx({
-      source: PAYER.publicKey(),
-      from: PAYER.publicKey(),
-      to: RECIPIENT,
-      amount: 10000000n,
-      currency: USDC_SAC_TESTNET,
+    // Build a transfer op whose operation-level source is the server signer address.
+    const account = new Account(PAYER.publicKey(), '0')
+    const contract = new Contract(USDC_SAC_TESTNET)
+    const transferOp = contract.call(
+      'transfer',
+      new Address(PAYER.publicKey()).toScVal(),
+      new Address(RECIPIENT).toScVal(),
+      nativeToScVal(10000000n, { type: 'i128' }),
+    )
+    const hostFunction = transferOp.body.invokeHostFunctionOp.hostFunction
+    const op = Operation.invokeHostFunction({ func: hostFunction, source: serverKp.publicKey() })
+    const tx = new TransactionBuilder(account, {
+      fee: '100',
+      networkPassphrase: NETWORK_PASSPHRASE,
     })
-    // Inject the server signer address as the operation-level source via XDR
-    const envelope = tx.toEnvelope()
-    envelope
-      .v1()
-      .tx()
-      .operations()[0]
-      .sourceAccount(xdr.MuxedAccount.keyTypeEd25519(serverKp.rawPublicKey()))
-    const txXdr = envelope.toXDR('base64')
-
-    tx.sign(PAYER)
+      .addOperation(op)
+      .setTimeout(180)
+      .build()
+    const txXdr = tx.toEnvelope().toXdr('base64')
 
     const cred = Object.assign(makeTransactionCredential(txXdr), {
       source: `did:pkh:stellar:testnet:${PAYER.publicKey()}`,
@@ -2287,7 +2289,7 @@ describe('charge simulation multiple-event rejection', () => {
       transactionData: new SorobanDataBuilder(),
     })
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -2321,7 +2323,7 @@ describe('charge transfer argument count validation', () => {
       .build()
     tx.sign(PAYER)
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -2357,7 +2359,7 @@ describe('charge push-mode FeeBump envelope', () => {
     // Return the FeeBump envelope as the on-chain result (base64 string)
     mockGetTransaction.mockResolvedValueOnce({
       status: 'SUCCESS',
-      envelopeXdr: feeBumpTx.toEnvelope().toXDR('base64'),
+      envelopeXdr: feeBumpTx.toEnvelope().toXdr('base64'),
     })
 
     const method = charge({
@@ -2488,7 +2490,7 @@ describe('charge receipt externalId', () => {
       },
     })
     const cred = Object.assign(
-      Credential.from({ challenge, payload: { type: 'transaction', transaction: tx.toXDR() } }),
+      Credential.from({ challenge, payload: { type: 'transaction', transaction: tx.toXdr() } }),
       { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
     )
 
@@ -2557,7 +2559,7 @@ describe('charge sponsored path sequence number', () => {
     const cred = Object.assign(
       Credential.from({
         challenge,
-        payload: { type: 'transaction', transaction: tx.toXDR() },
+        payload: { type: 'transaction', transaction: tx.toXdr() },
       }),
       { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
     )
@@ -2607,7 +2609,7 @@ describe('charge TOCTOU: hash replay across instances sharing a store', () => {
             () =>
               r({
                 status: 'SUCCESS',
-                envelopeXdr: tx.toXDR(),
+                envelopeXdr: tx.toXdr(),
               }),
             50,
           ),
@@ -2692,7 +2694,7 @@ describe('charge TOCTOU: hash replay across instances sharing a store', () => {
             () =>
               r({
                 status: 'SUCCESS',
-                envelopeXdr: txToReturn.toXDR(),
+                envelopeXdr: txToReturn.toXdr(),
               }),
             50,
           )

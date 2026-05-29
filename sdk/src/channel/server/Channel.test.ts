@@ -23,7 +23,7 @@ vi.mock('@stellar/stellar-sdk', async (importOriginal) => {
       },
       {
         ...OriginalTransactionBuilder,
-        fromXDR: (...args: unknown[]) => mockFromXDR(...args),
+        fromXdr: (...args: unknown[]) => mockFromXDR(...args),
       },
     ),
     rpc: {
@@ -65,28 +65,29 @@ const CHANNEL_ADDRESS = 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC52
 /** Build a mock Transaction that passes open-XDR validation. */
 function mockOpenTx(contractAddress: string = CHANNEL_ADDRESS) {
   const scAddress = Address.fromString(contractAddress).toScAddress()
-  const invokeContractSwitch = xdr.HostFunctionType.hostFunctionTypeInvokeContract()
   return {
     operations: [{ type: 'invokeHostFunction' }],
     toEnvelope: () => ({
-      v1: () => ({
-        tx: () => ({
-          operations: () => [
+      type: 'envelopeTypeTx',
+      v1: {
+        tx: {
+          operations: [
             {
-              body: () => ({
-                invokeHostFunctionOp: () => ({
-                  hostFunction: () => ({
-                    switch: () => invokeContractSwitch,
-                    invokeContract: () => ({
-                      contractAddress: () => scAddress,
-                    }),
-                  }),
-                }),
-              }),
+              body: {
+                type: 'invokeHostFunction',
+                invokeHostFunctionOp: {
+                  hostFunction: {
+                    type: 'hostFunctionTypeInvokeContract',
+                    invokeContract: {
+                      contractAddress: scAddress,
+                    },
+                  },
+                },
+              },
             },
           ],
-        }),
-      }),
+        },
+      },
     }),
   }
 }
@@ -166,7 +167,10 @@ function successSimResult(commitmentBytes: Buffer) {
   return {
     result: {
       retval: {
-        bytes: () => commitmentBytes,
+        type: 'scvBytes',
+        value: {
+          value: commitmentBytes,
+        },
       },
     },
     transactionData: 'mock',

@@ -14,51 +14,41 @@ describe('scValToBigInt', () => {
   })
 
   it('converts scvU64', () => {
-    const val = xdr.ScVal.scvU64(new xdr.Uint64(1_000_000))
+    const val = xdr.ScVal.scvU64(1_000_000n)
     expect(scValToBigInt(val)).toBe(1_000_000n)
   })
 
   it('converts scvI64', () => {
-    const val = xdr.ScVal.scvI64(new xdr.Int64(-500))
+    const val = xdr.ScVal.scvI64(-500n)
     expect(scValToBigInt(val)).toBe(-500n)
   })
 
   it('converts scvU128', () => {
-    const val = xdr.ScVal.scvU128(
-      new xdr.UInt128Parts({ hi: new xdr.Uint64(1), lo: new xdr.Uint64(1) }),
-    )
+    const val = xdr.ScVal.scvU128(new xdr.Uint128Parts({ hi: 1n, lo: 1n }))
     expect(scValToBigInt(val)).toBe((1n << 64n) | 1n)
   })
 
   it('converts scvI128 with hi=0', () => {
-    const val = xdr.ScVal.scvI128(
-      new xdr.Int128Parts({ hi: new xdr.Int64(0), lo: new xdr.Uint64(99) }),
-    )
+    const val = xdr.ScVal.scvI128(new xdr.Int128Parts({ hi: 0n, lo: 99n }))
     expect(scValToBigInt(val)).toBe(99n)
   })
 
   it('converts scvI128 with non-zero hi (large SAC amounts)', () => {
     // Verifies hi << 64 | lo is computed correctly for large token amounts.
     // Before the fix, inconsistent implementations could produce wrong results.
-    const val = xdr.ScVal.scvI128(
-      new xdr.Int128Parts({ hi: new xdr.Int64(1), lo: new xdr.Uint64(99) }),
-    )
+    const val = xdr.ScVal.scvI128(new xdr.Int128Parts({ hi: 1n, lo: 99n }))
     // 1 * 2^64 + 99
     expect(scValToBigInt(val)).toBe((1n << 64n) + 99n)
   })
 
   it('converts scvU128 with non-zero hi (large amounts)', () => {
     // Verifies u128 with significant hi bits also decodes correctly
-    const val = xdr.ScVal.scvU128(
-      new xdr.UInt128Parts({ hi: new xdr.Uint64(2), lo: new xdr.Uint64(0) }),
-    )
+    const val = xdr.ScVal.scvU128(new xdr.Uint128Parts({ hi: 2n, lo: 0n }))
     expect(scValToBigInt(val)).toBe(2n << 64n)
   })
 
   it('converts scvU128 zero', () => {
-    const val = xdr.ScVal.scvU128(
-      new xdr.UInt128Parts({ hi: new xdr.Uint64(0), lo: new xdr.Uint64(0) }),
-    )
+    const val = xdr.ScVal.scvU128(new xdr.Uint128Parts({ hi: 0n, lo: 0n }))
     expect(scValToBigInt(val)).toBe(0n)
   })
 

@@ -94,10 +94,10 @@ function buildMockPrepareTxAuthEntry() {
     new Address(RECIPIENT).toScVal(),
     nativeToScVal(100000n, { type: 'i128' }),
   )
-  authorizeInvocation(
-    TEST_KEYPAIR,
-    1000,
-    new xdr.SorobanAuthorizedInvocation({
+  authorizeInvocation({
+    signer: TEST_KEYPAIR,
+    validUntilLedgerSeq: 1000,
+    invocation: new xdr.SorobanAuthorizedInvocation({
       function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(
         new xdr.InvokeContractArgs({
           contractAddress: contract.address().toScAddress(),
@@ -111,8 +111,9 @@ function buildMockPrepareTxAuthEntry() {
       ),
       subInvocations: [],
     }),
-  ).then((auth) => {
-    transferOp.body().invokeHostFunctionOp().auth().push(auth)
+    networkPassphrase: 'Test SDF Network ; September 2015',
+  }).then((auth) => {
+    transferOp.body.invokeHostFunctionOp.auth.push(auth)
   })
   return new TransactionBuilder(account, {
     fee: '100',
@@ -253,10 +254,8 @@ describe('charge createCredential', () => {
     // Decode the credential and transaction
     const token = credential.replace(/^Payment\s+/, '')
     const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
-    const tx = TransactionBuilder.fromXDR(
-      decoded.payload.transaction,
-      NETWORK_PASSPHRASE[STELLAR_TESTNET],
-    ) as Transaction
+    const envelope = xdr.TransactionEnvelope.fromXdr(decoded.payload.transaction, 'base64')
+    const tx = new Transaction(envelope, NETWORK_PASSPHRASE[STELLAR_TESTNET])
     const op = tx.operations[0] as Operation.InvokeHostFunction
 
     // Should still be a valid transaction payload, but an unsigned envelope
@@ -271,25 +270,23 @@ describe('charge createCredential', () => {
     expect(op.auth?.length).toBe(1)
     const auth = op.auth![0]
     expect(auth).toBeDefined()
-    expect(auth.rootInvocation().subInvocations().length).toBe(0)
+    expect(auth.rootInvocation.subInvocations.length).toBe(0)
 
     // The address credential should be valid
-    const cred = auth.credentials()
-    expect(cred.switch().name).toBe('sorobanCredentialsAddress')
-    expect(Address.fromScAddress(cred.address().address()).toString()).toBe(
-      TEST_KEYPAIR.publicKey(),
-    )
-    expect(cred.address().signature()).toBeDefined()
-    expect(cred.address().nonce()).toBeDefined()
-    expect(cred.address().signatureExpirationLedger()).toBeDefined()
+    const cred = auth.credentials
+    expect(cred.type).toBe('sorobanCredentialsAddress')
+    expect(Address.fromScAddress(cred.address.address).toString()).toBe(TEST_KEYPAIR.publicKey())
+    expect(cred.address.signature).toBeDefined()
+    expect(cred.address.nonce).toBeDefined()
+    expect(cred.address.signatureExpirationLedger).toBeDefined()
 
     // The authorized function invocation should be valid
-    const func = auth.rootInvocation().function().contractFn()
-    expect(Address.fromScAddress(func.contractAddress()).toString()).toBe(USDC_SAC_TESTNET)
-    expect(func.functionName().toString()).toBe('transfer')
+    const func = auth.rootInvocation.function.contractFn
+    expect(Address.fromScAddress(func.contractAddress).toString()).toBe(USDC_SAC_TESTNET)
+    expect(func.functionName.toString()).toBe('transfer')
 
     // The authorized function args should be valid
-    const args = func.args()
+    const args = func.args
     expect(args.length).toBe(3)
     expect(scValToNative(args[0])).toBe(TEST_KEYPAIR.publicKey())
     expect(scValToNative(args[1])).toBe(RECIPIENT)

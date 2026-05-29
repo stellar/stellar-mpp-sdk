@@ -44,8 +44,8 @@ function makeI128ScVal(amount: bigint): xdr.ScVal {
   const hi = amount >> 64n
   return xdr.ScVal.scvI128(
     new xdr.Int128Parts({
-      lo: xdr.Uint64.fromString(lo.toString()),
-      hi: xdr.Int64.fromString(hi.toString()),
+      lo: BigInt(lo.toString()),
+      hi: BigInt(hi.toString()),
     }),
   )
 }
@@ -86,15 +86,15 @@ function makeLedgerEntryWithCloseEffective(ledgerValue: number) {
   ]
 
   const instance = new xdr.ScContractInstance({
-    executable: xdr.ContractExecutable.contractExecutableWasm(Buffer.alloc(32)),
+    executable: xdr.ContractExecutable.contractExecutableWasm(new xdr.Hash(Buffer.alloc(32))),
     storage,
   })
 
   const contractData = new xdr.ContractDataEntry({
-    ext: xdr.ExtensionPoint.fromXDR(Buffer.alloc(4, 0), 'raw'),
+    ext: xdr.ExtensionPoint.fromXdr(Buffer.alloc(4, 0), 'raw'),
     contract: Address.fromString(CHANNEL_ADDRESS).toScAddress(),
     key: xdr.ScVal.scvLedgerKeyContractInstance(),
-    durability: xdr.ContractDataDurability.persistent(),
+    durability: xdr.ContractDataDurability.persistent,
     val: xdr.ScVal.scvContractInstance(instance),
   })
 
@@ -105,15 +105,15 @@ function makeLedgerEntryWithCloseEffective(ledgerValue: number) {
 
 function makeLedgerEntryWithoutCloseEffective() {
   const instance = new xdr.ScContractInstance({
-    executable: xdr.ContractExecutable.contractExecutableWasm(Buffer.alloc(32)),
+    executable: xdr.ContractExecutable.contractExecutableWasm(new xdr.Hash(Buffer.alloc(32))),
     storage: [],
   })
 
   const contractData = new xdr.ContractDataEntry({
-    ext: xdr.ExtensionPoint.fromXDR(Buffer.alloc(4, 0), 'raw'),
+    ext: xdr.ExtensionPoint.fromXdr(Buffer.alloc(4, 0), 'raw'),
     contract: Address.fromString(CHANNEL_ADDRESS).toScAddress(),
     key: xdr.ScVal.scvLedgerKeyContractInstance(),
-    durability: xdr.ContractDataDurability.persistent(),
+    durability: xdr.ContractDataDurability.persistent,
     val: xdr.ScVal.scvContractInstance(instance),
   })
 

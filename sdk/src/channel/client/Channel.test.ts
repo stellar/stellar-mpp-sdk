@@ -55,7 +55,10 @@ function successSimResult(commitmentBytes: Buffer) {
   return {
     result: {
       retval: {
-        bytes: () => commitmentBytes,
+        type: 'scvBytes',
+        value: {
+          value: commitmentBytes,
+        },
       },
     },
     transactionData: 'mock',

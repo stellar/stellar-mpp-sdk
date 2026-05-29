@@ -8,7 +8,6 @@ import {
   authorizeEntry,
   nativeToScVal,
   rpc,
-  xdr as StellarXdr,
 } from '@stellar/stellar-sdk'
 import { Credential, Method } from 'mppx'
 import { z } from 'zod/mini'
