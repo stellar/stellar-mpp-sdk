@@ -111,7 +111,7 @@ Mppx.create({
         }
 
         // Pull mode: send fee-bumped XDR for server to broadcast as-is
-        const feeBumpXdr = feeBumpTx.toXDR()
+        const feeBumpXdr = feeBumpTx.toXdr()
         console.log(`[${ts()}] ✅ Sending fee-bumped XDR (${feeBumpXdr.length} bytes)`)
 
         return Credential.serialize({
