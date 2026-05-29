@@ -60,7 +60,12 @@ if (!rpc.Api.isSimulationSuccess(simResult)) {
   process.exit(1)
 }
 
-const commitmentBytes = simResult.result!.retval.bytes()
+const retval = simResult.result!.retval
+if (retval.type !== 'scvBytes') {
+  console.error(`❌ prepare_commitment did not return bytes (got ${retval.type})`)
+  process.exit(1)
+}
+const commitmentBytes = retval.value.value
 console.log(`   Commitment: ${Buffer.from(commitmentBytes).toString('hex').slice(0, 40)}...`)
 
 // Step 2: Sign the commitment with the ed25519 key
