@@ -93,8 +93,11 @@
     "overrides": {
       "axios": "^1.16.0",
       "vite": "^7.3.2",
-      "@stellar/stellar-sdk": "file:./vendor/stellar-sdk-class-xdr-c7eb18e.tgz"
-    }
+      "@stellar/stellar-sdk": "github:stellar/js-stellar-sdk#c7eb18e68ed68493b4b8b5614dc106a691cb9bd2"
+    },
+    "onlyBuiltDependencies": [
+      "@stellar/stellar-sdk"
+    ]
   },
   "license": "MIT",
   "publishConfig": {

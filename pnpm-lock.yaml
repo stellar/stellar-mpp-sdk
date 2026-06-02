@@ -7,15 +7,15 @@ settings:
 overrides:
   axios: ^1.16.0
   vite: ^7.3.2
-  '@stellar/stellar-sdk': file:./vendor/stellar-sdk-class-xdr-c7eb18e.tgz
+  '@stellar/stellar-sdk': github:stellar/js-stellar-sdk#c7eb18e68ed68493b4b8b5614dc106a691cb9bd2
 
 importers:
 
   .:
     dependencies:
       '@stellar/stellar-sdk':
-        specifier: file:vendor/stellar-sdk-class-xdr-c7eb18e.tgz
-        version: file:vendor/stellar-sdk-class-xdr-c7eb18e.tgz
+        specifier: github:stellar/js-stellar-sdk#c7eb18e68ed68493b4b8b5614dc106a691cb9bd2
+        version: https://codeload.github.com/stellar/js-stellar-sdk/tar.gz/c7eb18e68ed68493b4b8b5614dc106a691cb9bd2
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -515,8 +515,8 @@ packages:
     resolution: {integrity: sha512-+NmNa7Tk5BI5XFdy/6xGTqAN4J9a9KgCrCGhj2uEUTCBhLkch0M+QbKzNH8zEnejWe0p8w+0q5hUVX6L3OzoVA==}
     engines: {node: '>=20.0.0', pnpm: '>=9.0.0'}
 
-  '@stellar/stellar-sdk@file:vendor/stellar-sdk-class-xdr-c7eb18e.tgz':
-    resolution: {integrity: sha512-ZWzStu1TaM/fC9FBcj2W7JIcHFDyW9mbONPsrTRwdRNSP3xIz+ofiU5CH2OppOOCvtpUHge+IC8KWMR2M9wDvg==, tarball: file:vendor/stellar-sdk-class-xdr-c7eb18e.tgz}
+  '@stellar/stellar-sdk@https://codeload.github.com/stellar/js-stellar-sdk/tar.gz/c7eb18e68ed68493b4b8b5614dc106a691cb9bd2':
+    resolution: {tarball: https://codeload.github.com/stellar/js-stellar-sdk/tar.gz/c7eb18e68ed68493b4b8b5614dc106a691cb9bd2}
     version: 15.0.1
     engines: {node: '>=20.0.0'}
     hasBin: true
@@ -1897,7 +1897,7 @@ snapshots:
 
   '@stellar/js-xdr@4.0.0': {}
 
-  '@stellar/stellar-sdk@file:vendor/stellar-sdk-class-xdr-c7eb18e.tgz':
+  '@stellar/stellar-sdk@https://codeload.github.com/stellar/js-stellar-sdk/tar.gz/c7eb18e68ed68493b4b8b5614dc106a691cb9bd2':
     dependencies:
       '@noble/ed25519': 3.1.0
       '@noble/hashes': 2.2.0

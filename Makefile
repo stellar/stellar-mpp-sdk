@@ -4,8 +4,11 @@
 help: ## Show this help message
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z_-]+:.*##/ { printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
-install: ## Install dependencies
-	pnpm install
+install: ## Install dependencies (class-XDR @stellar/stellar-sdk builds from its git branch)
+	@tmp=$$(mktemp -d); git -C "$$tmp" init -q; \
+	  GIT_DIR="$$tmp/.git" GIT_WORK_TREE="$$tmp" pnpm install; \
+	  rc=$$?; rm -rf "$$tmp"; exit $$rc
+	node scripts/patch-classxdr-esm.mjs
 
 build: ## Compile TypeScript → dist/
 	pnpm run build

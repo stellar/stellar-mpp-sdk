@@ -6,11 +6,16 @@ and migrates the whole MPP SDK to its new API.
 
 ## 1. The replacement work
 
-- **Install strategy.** The SDK's `prepare`/`setup` step can't run inside pnpm's
-  git-fetch sandbox (`git config` → "not in a git directory"), so the branch can't
-  install it straight from GitHub. Instead the SDK was cloned, built, and packed,
-  then **vendored as a prebuilt tarball** (`vendor/…tgz`) pinned via a pnpm
-  `overrides` entry — reproducible `pnpm install` for anyone checking out the branch.
+- **Install strategy.** `@stellar/stellar-sdk` is pinned via a pnpm `overrides`
+  entry to the upstream class-XDR commit (`github:stellar/js-stellar-sdk#c7eb18e`)
+  and **built from git** — no vendored blob. Two snags make that branch awkward to
+  install directly, both handled by the `make install` target (the project's standard
+  entrypoint, which `make check`/CI use): (1) its `prepare` runs `setup`
+  (`git config blame.ignoreRevsFile …`) which dies "not in a git directory" inside
+  pnpm's build sandbox — so `make install` points `GIT_DIR` at a throwaway repo so
+  that write succeeds; (2) the inlined-js-xdr ESM marker (see fix #3 below) is applied
+  post-install by `scripts/patch-classxdr-esm.mjs`. (A bare `pnpm install` builds the
+  SDK but skips these two steps — use `make install` on this branch.)
 - **Code migration.** ~192 XDR call sites across **~34 files** (8 source, ~13 test,
   examples). Driven largely by **parallel sub-agents** (one per file/group) with a
   shared cheat-sheet and a "typecheck/tests to zero" requirement; each agent's diff
@@ -34,8 +39,9 @@ and migrates the whole MPP SDK to its new API.
      ESM source under `lib/esm/node_modules/.pnpm/…` (a documented stopgap until js-xdr
      ships ESM). Plain Node resolves these via the SDK's root `type:module`, but
      tsx/esbuild's nearest-`package.json` walk stops at the js-xdr boundary and treats
-     them as CJS, breaking named imports. Fixed by adding a `{"type":"module"}` marker
-     at the inlined js-xdr root in the vendored tarball.
+     them as CJS, breaking named imports. Fixed by `scripts/patch-classxdr-esm.mjs`
+     (run from `make install`), which drops a `{"type":"module"}` marker at each
+     inlined js-xdr package root.
 
 ## 2. Verification — everything passes
 
