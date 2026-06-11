@@ -12,7 +12,3 @@ tmp/
 
 # Local-only security-review and planning scratch — never shipped in the repo
 h1/
-NOTES_PR.md
-docs/security-review-*.md
-docs/superpowers/plans/
-docs/signed-push-migration.md
