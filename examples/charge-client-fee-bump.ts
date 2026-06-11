@@ -93,7 +93,7 @@ Mppx.create({
         const source = `did:pkh:${network}:${keypair.publicKey()}`
 
         if (mode === 'push') {
-          // Client broadcasts the fee-bumped tx; server verifies the on-chain hash
+          // Client broadcasts the fee-bumped tx; server verifies the signed hash credential
           console.log(`[${ts()}] 📡 Broadcasting fee-bumped tx...`)
           const result = await server.sendTransaction(feeBumpTx)
           if (result.status !== 'PENDING') {
@@ -103,9 +103,17 @@ Mppx.create({
           await pollTransaction(server, result.hash, {})
           console.log(`[${ts()}] 🎉 Confirmed: ${result.hash}`)
 
+          // Prove control of the payer account: sign "{challenge.id}:{hash}"
+          // (lowercase hash) with the payer key so the server can authenticate
+          // the credential's source.
+          const canonicalHash = result.hash.toLowerCase()
+          const sourceSignature = Buffer.from(
+            keypair.sign(Buffer.from(`${challenge.id}:${canonicalHash}`)),
+          ).toString('hex')
+
           return Credential.serialize({
             challenge,
-            payload: { type: 'hash' as const, hash: result.hash },
+            payload: { type: 'signedHash' as const, hash: result.hash, sourceSignature },
             source,
           })
         }

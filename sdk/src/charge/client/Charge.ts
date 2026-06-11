@@ -107,12 +107,40 @@ export function charge(parameters: charge.Parameters) {
 
       const effectiveMode = context?.mode ?? defaultMode
       const isServerSponsored = request.methodDetails?.feePayer === true
+      const advertizedCredentialTypes = request.methodDetails?.credentialTypes
 
       if (isServerSponsored && effectiveMode === 'push') {
         throw new StellarMppError(
           'Push mode is not supported for server-sponsored transactions. ' +
             "The server must submit sponsored transactions. Use mode: 'pull' (default).",
         )
+      }
+
+      // ── Fail-fast credential type validation ────────────────────────────────
+      // Before building/broadcasting, verify the server accepts the intended credential type.
+      // This prevents fund loss in push mode where the client broadcasts before getting feedback.
+
+      if (effectiveMode === 'push') {
+        // Push mode REQUIRES the server to advertise signedHash support
+        if (!advertizedCredentialTypes || !advertizedCredentialTypes.includes('signedHash')) {
+          throw new StellarMppError(
+            'Server does not accept secure push credentials (signedHash). ' +
+              'Either upgrade the server to support signedHash, ' +
+              'or switch to pull mode (default). ' +
+              'Do not fall back to legacy unsigned hash mode.',
+          )
+        }
+      } else {
+        // Pull mode: REQUIRES the server to advertise transaction support
+        // (legacy servers without credentialTypes field implicitly support transaction)
+        if (advertizedCredentialTypes && !advertizedCredentialTypes.includes('transaction')) {
+          throw new StellarMppError(
+            'Server does not accept pull mode credentials (transaction). ' +
+              'This server only accepts: ' +
+              advertizedCredentialTypes.join(', ') +
+              '. Switch to an advertised credential type or upgrade the server.',
+          )
+        }
       }
 
       const expiresTimestamp: number | undefined = challenge.expires
@@ -253,9 +281,18 @@ export function charge(parameters: charge.Parameters) {
 
         onProgress?.({ type: 'paid', hash: result.hash })
 
+        // Sign the canonical hash and challenge ID to prove control of the payer
+        const canonicalHash = result.hash.toLowerCase()
+        const bindingMessage = Buffer.from(`${challenge.id}:${canonicalHash}`)
+        const sourceSignature = Buffer.from(clientKP.sign(bindingMessage)).toString('hex')
+
         return Credential.serialize({
           challenge,
-          payload: { type: 'hash' as const, hash: result.hash },
+          payload: {
+            type: 'signedHash' as const,
+            hash: result.hash,
+            sourceSignature,
+          },
           source,
         })
       }

@@ -3,6 +3,7 @@ import {
   Address,
   Contract,
   Keypair,
+  Memo,
   Operation,
   TransactionBuilder,
   authorizeInvocation,
@@ -296,7 +297,12 @@ describe('charge createCredential', () => {
     expect(scValToNative(args[2])).toBe(100000n)
   })
 
-  it('broadcasts and produces hash credential in push mode', async () => {
+  it('broadcasts and produces signedHash credential with sourceSignature in push mode when server advertises signedHash', async () => {
+    mockGetAccount.mockClear()
+    mockPrepareTransaction.mockClear()
+    mockSendTransaction.mockClear()
+    mockGetTransaction.mockClear()
+
     const account = new Account(TEST_KEYPAIR.publicKey(), '0')
     mockGetAccount.mockResolvedValueOnce(account)
     const mockTx = buildMockPreparedTx()
@@ -310,7 +316,12 @@ describe('charge createCredential', () => {
       mode: 'push',
       onProgress: (e) => events.push(e),
     })
-    const challenge = mockChallenge()
+    const challenge = mockChallenge({
+      methodDetails: {
+        network: 'stellar:testnet',
+        credentialTypes: ['transaction', 'signedHash', 'hash'],
+      },
+    })
 
     const credential = await method.createCredential({
       challenge: challenge as any,
@@ -323,11 +334,242 @@ describe('charge createCredential', () => {
     expect(types).toContain('confirming')
     expect(types).toContain('paid')
 
-    // Decode to verify hash payload
+    // Decode to verify signedHash payload and sourceSignature
     const token = credential.replace(/^Payment\s+/, '')
     const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
-    expect(decoded.payload.type).toBe('hash')
+    expect(decoded.payload.type).toBe('signedHash')
     expect(decoded.payload.hash).toBe('push-tx-hash-abc')
+
+    // Verify sourceSignature is a valid 64-byte (128 hex char) signature
+    expect(decoded.payload.sourceSignature).toMatch(/^[0-9a-f]{128}$/i)
+
+    // Verify the signature is correct: sign "{challenge.id}:{canonicalHash}"
+    const expectedSig = Buffer.from(
+      TEST_KEYPAIR.sign(Buffer.from(`${challenge.id}:push-tx-hash-abc`)),
+    ).toString('hex')
+    expect(decoded.payload.sourceSignature).toBe(expectedSig)
+  })
+
+  it('throws in push mode when server does NOT advertise signedHash', async () => {
+    mockGetAccount.mockClear()
+    mockPrepareTransaction.mockClear()
+    mockSendTransaction.mockClear()
+    mockGetTransaction.mockClear()
+
+    const method = charge({
+      keypair: TEST_KEYPAIR,
+      mode: 'push',
+    })
+    const challenge = mockChallenge({
+      methodDetails: {
+        network: 'stellar:testnet',
+        credentialTypes: ['transaction', 'hash'],
+      },
+    })
+
+    // Should throw BEFORE any RPC calls (before building/broadcasting)
+    await expect(
+      method.createCredential({ challenge: challenge as any, context: {} as any }),
+    ).rejects.toThrow('signedHash')
+
+    // Verify sendTransaction was never called (fund safety check)
+    expect(mockSendTransaction).not.toHaveBeenCalled()
+  })
+
+  it('throws in push mode when credentialTypes is absent (legacy server)', async () => {
+    mockGetAccount.mockClear()
+    mockPrepareTransaction.mockClear()
+    mockSendTransaction.mockClear()
+    mockGetTransaction.mockClear()
+
+    const method = charge({
+      keypair: TEST_KEYPAIR,
+      mode: 'push',
+    })
+    const challenge = mockChallenge({
+      methodDetails: {
+        network: 'stellar:testnet',
+        // No credentialTypes field
+      },
+    })
+
+    // Should throw BEFORE any RPC calls
+    await expect(
+      method.createCredential({ challenge: challenge as any, context: {} as any }),
+    ).rejects.toThrow('signedHash')
+
+    // Verify sendTransaction was never called
+    expect(mockSendTransaction).not.toHaveBeenCalled()
+  })
+
+  it('proceeds in pull mode when credentialTypes includes transaction', async () => {
+    const account = new Account(TEST_KEYPAIR.publicKey(), '0')
+    mockGetAccount.mockResolvedValueOnce(account)
+    const mockTx = buildMockPreparedTx()
+    mockPrepareTransaction.mockResolvedValueOnce(await mockTx)
+
+    const method = charge({
+      keypair: TEST_KEYPAIR,
+      mode: 'pull',
+    })
+    const challenge = mockChallenge({
+      methodDetails: {
+        network: 'stellar:testnet',
+        credentialTypes: ['transaction', 'signedHash'],
+      },
+    })
+
+    const credential = await method.createCredential({
+      challenge: challenge as any,
+      context: {} as any,
+    })
+
+    // Should produce a transaction credential
+    const token = credential.replace(/^Payment\s+/, '')
+    const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
+    expect(decoded.payload.type).toBe('transaction')
+  })
+
+  it('throws in pull mode when credentialTypes does NOT include transaction', async () => {
+    const method = charge({
+      keypair: TEST_KEYPAIR,
+      mode: 'pull',
+    })
+    const challenge = mockChallenge({
+      methodDetails: {
+        network: 'stellar:testnet',
+        credentialTypes: ['signedHash', 'hash'],
+      },
+    })
+
+    // Should throw before signing
+    await expect(
+      method.createCredential({ challenge: challenge as any, context: {} as any }),
+    ).rejects.toThrow('transaction')
+  })
+
+  it('proceeds in pull mode when credentialTypes is absent (legacy server)', async () => {
+    const account = new Account(TEST_KEYPAIR.publicKey(), '0')
+    mockGetAccount.mockResolvedValueOnce(account)
+    const mockTx = buildMockPreparedTx()
+    mockPrepareTransaction.mockResolvedValueOnce(await mockTx)
+
+    const method = charge({
+      keypair: TEST_KEYPAIR,
+      mode: 'pull',
+    })
+    const challenge = mockChallenge({
+      methodDetails: {
+        network: 'stellar:testnet',
+        // No credentialTypes: legacy servers default to supporting transaction
+      },
+    })
+
+    const credential = await method.createCredential({
+      challenge: challenge as any,
+      context: {} as any,
+    })
+
+    // Should produce a transaction credential (legacy behavior)
+    const token = credential.replace(/^Payment\s+/, '')
+    const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
+    expect(decoded.payload.type).toBe('transaction')
+  })
+
+  it('never emits type:hash in any code path', async () => {
+    // Test pull mode
+    {
+      const account = new Account(TEST_KEYPAIR.publicKey(), '0')
+      mockGetAccount.mockResolvedValueOnce(account)
+      const mockTx = buildMockPreparedTx()
+      mockPrepareTransaction.mockResolvedValueOnce(await mockTx)
+
+      const method = charge({ keypair: TEST_KEYPAIR, mode: 'pull' })
+      const challenge = mockChallenge()
+
+      const credential = await method.createCredential({
+        challenge: challenge as any,
+        context: {} as any,
+      })
+
+      const token = credential.replace(/^Payment\s+/, '')
+      const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
+      expect(decoded.payload.type).not.toBe('hash')
+    }
+
+    // Reset mocks
+    mockGetAccount.mockClear()
+    mockPrepareTransaction.mockClear()
+    mockSendTransaction.mockClear()
+    mockGetTransaction.mockClear()
+
+    // Test push mode
+    {
+      const account = new Account(TEST_KEYPAIR.publicKey(), '0')
+      mockGetAccount.mockResolvedValueOnce(account)
+      const mockTx = buildMockPreparedTx()
+      mockPrepareTransaction.mockResolvedValueOnce(await mockTx)
+      mockSendTransaction.mockResolvedValueOnce({ hash: 'push-tx-hash-xyz' })
+      mockGetTransaction.mockResolvedValueOnce({ status: 'SUCCESS' })
+
+      const method = charge({ keypair: TEST_KEYPAIR, mode: 'push' })
+      const challenge = mockChallenge({
+        methodDetails: {
+          network: 'stellar:testnet',
+          credentialTypes: ['transaction', 'signedHash'],
+        },
+      })
+
+      const credential = await method.createCredential({
+        challenge: challenge as any,
+        context: {} as any,
+      })
+
+      const token = credential.replace(/^Payment\s+/, '')
+      const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
+      expect(decoded.payload.type).not.toBe('hash')
+      expect(decoded.payload.type).toBe('signedHash')
+    }
+  })
+
+  it('does not add a transaction memo in push mode (Soroban transactions cannot have memos)', async () => {
+    mockGetAccount.mockClear()
+    mockPrepareTransaction.mockClear()
+    mockSendTransaction.mockClear()
+    mockGetTransaction.mockClear()
+
+    const account = new Account(TEST_KEYPAIR.publicKey(), '0')
+    mockGetAccount.mockResolvedValueOnce(account)
+
+    let capturedTransaction: any
+    mockPrepareTransaction.mockImplementation((tx: any) => {
+      capturedTransaction = tx
+      return Promise.resolve(tx)
+    })
+
+    mockSendTransaction.mockResolvedValueOnce({ hash: 'push-tx-hash-no-memo', status: 'PENDING' })
+    mockGetTransaction.mockResolvedValueOnce({ status: 'SUCCESS' })
+
+    const method = charge({
+      keypair: TEST_KEYPAIR,
+      mode: 'push',
+    })
+    const challenge = mockChallenge({
+      methodDetails: {
+        network: 'stellar:testnet',
+        credentialTypes: ['transaction', 'signedHash'],
+      },
+    })
+
+    await method.createCredential({
+      challenge: challenge as any,
+      context: {} as any,
+    })
+
+    // Verify the transaction has no memo (Soroban rejects memos)
+    expect(capturedTransaction).toBeDefined()
+    // TransactionBuilder uses Memo.none() by default, not undefined
+    expect(capturedTransaction.memo.type).toBe('none')
   })
 
   it('uses pubnet DID component for public network', async () => {
