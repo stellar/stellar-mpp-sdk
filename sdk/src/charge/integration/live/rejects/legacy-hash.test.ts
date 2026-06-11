@@ -65,13 +65,12 @@ describe('legacy hash credential rejection (rejectUnsignedPush: true)', () => {
     ])
   }, 30_000)
 
-  it('strict server rejects legacy hash credential without consuming hash', async () => {
-    // Create strict server method (rejectUnsignedPush: true)
+  it('default server rejects legacy hash credential without consuming hash', async () => {
+    // Create default server method (rejectUnsignedPush: true is now the default)
     const serverMethod = serverCharge({
       recipient: TEST_RECIPIENT,
       currency: XLM_SAC_TESTNET,
       store: Store.memory(),
-      rejectUnsignedPush: true,
     })
 
     // Build a real SEP-41 transfer on-chain

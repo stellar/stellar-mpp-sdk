@@ -85,7 +85,7 @@ export function charge(parameters: charge.Parameters) {
     pollMaxConcurrent = DEFAULT_POLL_MAX_CONCURRENT,
     pollTimeoutMs = DEFAULT_POLL_TIMEOUT_MS,
     recipient,
-    rejectUnsignedPush = false,
+    rejectUnsignedPush = true,
     rpcUrl,
     simulationTimeoutMs = DEFAULT_SIMULATION_TIMEOUT_MS,
     store,
@@ -1142,12 +1142,12 @@ export declare namespace charge {
     /**
      * Whether to reject legacy unsigned push-mode credentials (type="hash").
      *
-     * In 0.7, unsigned push is accepted by default (default: `false`) to maintain
-     * backward compatibility with pre-0.7 clients. Logs each acceptance so operators
-     * can track when unsigned traffic drains. Set to `true` to reject and force
-     * clients to upgrade to `signedHash` or use server-sponsored flow.
+     * In 0.8+, unsigned push is rejected by default (default: `true`) as the secure
+     * default. Set to `false` to re-enable the deprecated legacy-accept window and
+     * logs each acceptance so operators can track when unsigned traffic drains.
+     * Clients should upgrade to `signedHash` or use server-sponsored flow.
      *
-     * @defaultValue `false`
+     * @defaultValue `true`
      */
     rejectUnsignedPush?: boolean
     /** Logger instance (pino and console compatible API). Defaults to a no-op logger. */
