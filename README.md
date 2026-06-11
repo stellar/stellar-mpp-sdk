@@ -422,13 +422,12 @@ Payment channels allow many off-chain micro-payments with minimal on-chain trans
 **How it works:**
 
 - The client signs cumulative commitment amounts off-chain using the ed25519 commitment key
+- The client should pin the channel contract with `allowedChannels` so it only signs for trusted channel addresses
 - The server verifies signatures by simulating `prepare_commitment` on the channel contract and checking the ed25519 signature
-- A `Store` is required on the server to track cumulative amounts across requests
+- An atomic `Store` is required on the server to track cumulative amounts across requests
 - The server can call `close()` on-chain at any time to settle accumulated payments
 
-**Opening a channel via the SDK:**
-
-The SDK also supports opening a channel through the MPP 402 flow using the `open` action. The client builds the deploy transaction externally (e.g., `stellar contract deploy --send=no`), then passes it as `openTransaction` context alongside an initial commitment. The server verifies the commitment signature and broadcasts the deploy transaction on-chain. See [`examples/channel-open.ts`](examples/channel-open.ts) for a complete example.
+The channel contract is deployed out-of-band (e.g. with the `stellar` CLI) before any payments; the SDK handles off-chain vouchers and on-chain close, not channel deployment.
 
 **On-chain close (server-side):**
 

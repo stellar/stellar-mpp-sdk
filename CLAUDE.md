@@ -9,7 +9,7 @@ Stellar MPP SDK — a TypeScript SDK implementing Stellar blockchain payment met
 - **Charge**: One-time on-chain SEP-41 token transfers with pull/push credential modes
 - **Channel**: Off-chain payment commitments via one-way payment channel contracts (batch settlement on close)
 
-Built on the `mppx` framework. Peer dependencies: `@stellar/stellar-sdk` (^14.6.1) and `mppx` (^0.4.11).
+Built on the `mppx` framework. Peer dependencies: `@stellar/stellar-sdk` (^15.1.0) and `mppx` (^0.6.29).
 
 ## Terminology
 
@@ -58,7 +58,7 @@ Charge has 6 combinations from 3 axes: **push vs pull**, **sponsored vs unsponso
 | 5    | pull | sponsored   | no      | server         | server (envelope signer) |
 | 6    | pull | sponsored   | yes     | server         | fee bump key             |
 
-- **Push** (`type: 'hash'`): Client broadcasts the tx on-chain, sends the tx hash to the server. Server polls the chain to verify.
+- **Push** (`type: 'signedHash'`): Client broadcasts the tx on-chain, sends a hash credential containing the tx hash and a payer-bound signature to the server. Server verifies the signature and polls the chain to verify the tx. Legacy unsigned `type: 'hash'` is deprecated and receive-only.
 - **Pull** (`type: 'transaction'`): Client sends signed tx XDR to the server. Server verifies and broadcasts.
 - **Sponsored** (`feePayer` configured on server): Server rebuilds the tx with its own source account, signs the envelope, and pays the network fee. Client tx uses `ALL_ZEROS` as source.
 - **FeeBump**: The tx is wrapped in a `FeeBumpTransaction` so a separate key pays the network fee.
@@ -66,7 +66,7 @@ Charge has 6 combinations from 3 axes: **push vs pull**, **sponsored vs unsponso
 ### Key Patterns
 
 - **mppx integration**: Methods defined via `Method.from()`, adapted with `.toClient()` / `.toServer()`.
-- **Serialization + claim**: Servers use a Promise-based `verifyLock` plus a synchronous `claimOrThrow` (from `shared/claim.ts`) to prevent replay races on store get/put.
+- **Replay protection**: Servers claim challenges and tx hashes via atomic `store.update()` compare-and-set (a `Store.AtomicStore` is required and validated at construction), so each is consumed exactly once without a get-then-put race.
 - **Contract simulation**: Uses Soroban RPC `simulateTransaction` for read-only verification — SEP-41 transfer validation, `prepare_commitment` for commitment bytes, and channel state queries.
 - **Configurable defaults**: Server/client functions accept optional parameters with defaults from `shared/defaults.ts`.
 - **Store key naming**: `stellar:{intent}:{type}:{id}` (e.g., `stellar:charge:challenge:abc123`).

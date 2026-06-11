@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-11
+
+### Security
+
+- Harden charge and channel payment verification ([#47](https://github.com/stellar/stellar-mpp-sdk/pull/47))
+  - Add a payer-bound `signedHash` push credential (tx hash + `sourceSignature` over `"{challenge.id}:{hash}"`), verified against the key controlling the on-chain transfer's `from`.
+  - Advertise accepted credential types via `methodDetails.credentialTypes` so clients detect unsupported settlement modes before paying; sponsored (`feePayer`) servers advertise pull mode only.
+  - Keep legacy unsigned `hash` push accepted by default (with a deprecation warning per acceptance) for backward compatibility; add a `rejectUnsignedPush` server option to refuse it.
+  - Require an atomic store (one providing `update()` compare-and-set) for both charge and channel servers, validated at construction with a clear error.
+  - Channel: require explicit commitment pinning on the client, reject credentials during the on-chain close settling window, and add an opt-in per-funder fee budget.
+
+### Changed
+
+- Tighten the dependency supply chain ([#47](https://github.com/stellar/stellar-mpp-sdk/pull/47))
+  - Add a 7-day `minimumReleaseAge` pnpm setting as a supply-chain guard.
+  - Upgrade all dependencies to the newest versions satisfying it.
+  - Tighten the `@stellar/stellar-sdk` and `mppx` peer ranges to the tested versions.
+
+### Removed
+
+- **BREAKING:** Remove the non-functional channel `open` MPP action ([#47](https://github.com/stellar/stellar-mpp-sdk/pull/47))
+  - Drop the `open` credential action, the server-side open settlement path, and the `examples/channel-open.ts` example.
+  - The one-way-channel contract is created by its constructor at deploy time and has no on-chain open entrypoint, so the MPP open path was dead code. Deploy the channel out-of-band (e.g. with the `stellar` CLI); off-chain vouchers and on-chain close are unchanged.
+
 ## [0.6.0] - 2026-05-26
 
 ### Changed
@@ -87,7 +111,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Env parsing primitives for Stellar-aware configuration
 - Shared utilities: fee bump wrapping, transaction polling with backoff, Soroban simulation, unit conversion, keypair resolution
 
-[Unreleased]: https://github.com/stellar/stellar-mpp-sdk/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/stellar/stellar-mpp-sdk/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/stellar/stellar-mpp-sdk/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/stellar/stellar-mpp-sdk/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/stellar/stellar-mpp-sdk/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/stellar/stellar-mpp-sdk/compare/v0.4.0...v0.5.0
