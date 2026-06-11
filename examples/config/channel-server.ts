@@ -38,4 +38,20 @@ export class Env {
   static get logLevel(): string {
     return parseOptional('LOG_LEVEL', 'info')!
   }
+
+  /**
+   * Optional fee payer for on-chain settlement (close via MPP credentials).
+   *
+   * `CHANNEL_ENVELOPE_SIGNER_SECRET` sources and signs the settlement envelope;
+   * `CHANNEL_FEE_BUMP_SIGNER_SECRET` optionally wraps it in a FeeBumpTransaction.
+   * When unset, the server only handles off-chain vouchers (no on-chain settlement).
+   */
+  static get feePayer(): { envelopeSigner: string; feeBumpSigner?: string } | undefined {
+    const envelopeSigner = process.env.CHANNEL_ENVELOPE_SIGNER_SECRET
+    if (!envelopeSigner) {
+      return undefined
+    }
+    const feeBumpSigner = process.env.CHANNEL_FEE_BUMP_SIGNER_SECRET
+    return { envelopeSigner, ...(feeBumpSigner ? { feeBumpSigner } : {}) }
+  }
 }

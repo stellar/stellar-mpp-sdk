@@ -1,11 +1,15 @@
 import { Keypair } from '@stellar/stellar-sdk'
 import { Challenge, Credential, Store } from 'mppx'
 import { describe, expect, it } from 'vitest'
-import { channel as serverChannel } from './server/Channel.js'
-import { channel as clientChannel } from './client/Channel.js'
+import { channel as serverChannel } from '../../../server/Channel.js'
+import { channel as clientChannel } from '../../../client/Channel.js'
+
+// Happy-path integration tests: server/client construction, the no-credential
+// 402 challenge, store-backed cumulative tracking, and credential serialization.
+// These assert valid flows succeed (accepts) and need no on-chain RPC.
 
 const COMMITMENT_KEY = Keypair.random()
-const CHANNEL_ADDRESS = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM'
+const CHANNEL_ADDRESS = 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526'
 
 function mockChallenge(overrides: Record<string, unknown> = {}) {
   return Challenge.from({
@@ -59,7 +63,10 @@ describe('channel server creation', () => {
 
 describe('channel client creation', () => {
   it('creates method with commitmentKey', () => {
-    const method = clientChannel({ commitmentKey: COMMITMENT_KEY })
+    const method = clientChannel({
+      commitmentKey: COMMITMENT_KEY,
+      allowedChannels: [CHANNEL_ADDRESS],
+    })
     expect(method.name).toBe('stellar')
     expect(method.intent).toBe('channel')
     expect(typeof method.createCredential).toBe('function')
@@ -69,6 +76,7 @@ describe('channel client creation', () => {
     const events: unknown[] = []
     const method = clientChannel({
       commitmentKey: COMMITMENT_KEY,
+      allowedChannels: [CHANNEL_ADDRESS],
       onProgress: (e) => events.push(e),
     })
     expect(typeof method.createCredential).toBe('function')
@@ -115,13 +123,12 @@ describe('channel credential serialization', () => {
     expect(serialized).toContain('Payment')
   })
 
-  it('credential schema accepts open action payload', () => {
+  it('credential schema accepts close action payload', () => {
     const challenge = mockChallenge()
     const serialized = Credential.serialize({
       challenge,
       payload: {
-        action: 'open',
-        transaction: 'AAAA...base64xdr...',
+        action: 'close',
         amount: '1000000',
         signature: 'a'.repeat(128),
       },

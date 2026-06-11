@@ -78,30 +78,6 @@ describe('channel method schema', () => {
     expect(result.amount).toBe('5000000')
   })
 
-  it('credential payload accepts open action with transaction', () => {
-    const validSig = 'a'.repeat(128)
-    const result = channel.schema.credential.payload.parse({
-      action: 'open',
-      transaction: 'AAAA...base64xdr...',
-      amount: '1000000',
-      signature: validSig,
-    })
-    expect(result.action).toBe('open')
-    expect(result.transaction).toBe('AAAA...base64xdr...')
-    expect(result.amount).toBe('1000000')
-    expect(result.signature).toBe(validSig)
-  })
-
-  it('credential payload rejects open action without transaction', () => {
-    expect(() =>
-      channel.schema.credential.payload.parse({
-        action: 'open',
-        amount: '1000000',
-        signature: 'a'.repeat(128),
-      }),
-    ).toThrow()
-  })
-
   it('credential payload rejects non-numeric amount', () => {
     expect(() =>
       channel.schema.credential.payload.parse({
@@ -142,24 +118,16 @@ describe('channel method schema', () => {
     ).toThrow()
   })
 
-  it('credential payload rejects oversized transaction XDR in open action', () => {
+  it('credential payload rejects the removed "open" action', () => {
+    // The MPP open path was removed: the channel contract is deployed
+    // out-of-band, so no client may drive an on-chain open via a credential.
     expect(() =>
       channel.schema.credential.payload.parse({
         action: 'open',
-        transaction: 'A'.repeat(8193),
+        transaction: 'AAAA',
         amount: '1000000',
         signature: 'a'.repeat(128),
       }),
     ).toThrow()
-  })
-
-  it('credential payload accepts transaction XDR at the size limit in open action', () => {
-    const result = channel.schema.credential.payload.parse({
-      action: 'open',
-      transaction: 'A'.repeat(8192),
-      amount: '1000000',
-      signature: 'a'.repeat(128),
-    })
-    expect(result.action).toBe('open')
   })
 })

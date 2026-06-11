@@ -66,7 +66,21 @@ FUNDER="${DEMO_ID}-funder"
 RECIPIENT="${DEMO_ID}-recipient"
 DEPOSIT=10000000  # 1 XLM initial deposit (in stroops)
 PORT=${PORT:-3002}
-CLOSE_AMOUNT=2000000  # 0.2 XLM — cumulative from 2 payments of 0.1 XLM
+# Close path to exercise on-chain settlement:
+#   mpp      — drive the close through the MPP 402 credential flow (server settles)
+#   operator — call the standalone operator close() admin function directly
+CLOSE_MODE="${CLOSE_MODE:-mpp}"
+if [ "$CLOSE_MODE" = "operator" ]; then
+  CLOSE_STEP_DESC="Operator called close() directly to settle on-chain"
+  CLOSE_TX_DESC="broadcast by the operator close() admin function"
+else
+  CLOSE_STEP_DESC="Client sent an MPP action:'close' credential; the server validated it, set the settling marker, and broadcast the close"
+  CLOSE_TX_DESC="broadcast by the server via the MPP credential flow"
+fi
+VOUCHER_CUMULATIVE=2000000  # 0.2 XLM — cumulative after 2 off-chain payments of 0.1 XLM
+# Final settlement commitment. The server enforces a strictly-increasing cumulative,
+# so the MPP close must settle ABOVE the last off-chain voucher cumulative.
+CLOSE_AMOUNT=3000000  # 0.3 XLM — final closing commitment settled on-chain
 
 echo "Demo ID: $DEMO_ID"
 echo ""
@@ -164,9 +178,13 @@ if command -v lsof &>/dev/null && lsof -ti:$PORT &>/dev/null; then
   sleep 1
 fi
 
-echo "  Starting channel server on port $PORT..."
+# The recipient account sources and signs the on-chain close envelope (feePayer).
+RECIPIENT_SECRET=$(stellar keys show "$RECIPIENT")
+
+echo "  Starting channel server on port $PORT (with feePayer for on-chain settlement)..."
 CHANNEL_CONTRACT="$CONTRACT" \
 COMMITMENT_PUBKEY="$COMMITMENT_PKEY" \
+CHANNEL_ENVELOPE_SIGNER_SECRET="$RECIPIENT_SECRET" \
 PORT=$PORT \
 npx tsx examples/channel-server.ts &
 SERVER_PID=$!
@@ -184,36 +202,58 @@ echo ""
 echo "  Running channel client (2 off-chain payments)..."
 echo ""
 
+CHANNEL_CONTRACT="$CONTRACT" \
 COMMITMENT_SECRET="$COMMITMENT_SKEY" \
 SERVER_URL="http://localhost:$PORT" \
 npx tsx examples/channel-client.ts
 
 echo ""
-
-# Stop server
-kill $SERVER_PID 2>/dev/null || true
-wait $SERVER_PID 2>/dev/null || true
-trap - EXIT
-
-echo "  ✔ Server stopped. Off-chain phase complete."
-echo "  Cumulative committed: $CLOSE_AMOUNT stroops ($(echo "scale=1; $CLOSE_AMOUNT / 10000000" | bc) XLM)"
+echo "  ✔ Off-chain phase complete (cumulative: $VOUCHER_CUMULATIVE stroops)."
+if [ "$CLOSE_MODE" = "operator" ]; then
+  echo "    Settling on-chain via the standalone operator close() function."
+else
+  echo "    Server kept running for on-chain settlement via the MPP close credential."
+fi
 echo ""
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Step 5: On-chain settlement — close the channel
 # ══════════════════════════════════════════════════════════════════════════════
 
-echo "═══ Step 5: On-chain settlement — closing channel ═══"
+if [ "$CLOSE_MODE" = "operator" ]; then
+  echo "═══ Step 5: On-chain settlement — closing channel (operator close()) ═══"
+  echo ""
+
+  # Call the standalone operator close() admin function directly (no MPP credential).
+  # This is the server-side reconciliation path: it signs the commitment and
+  # broadcasts the close itself, bypassing the 402 flow and the settling marker.
+  CHANNEL_CONTRACT="$CONTRACT" \
+  COMMITMENT_SECRET="$COMMITMENT_SKEY" \
+  CLOSE_SECRET="$RECIPIENT_SECRET" \
+  AMOUNT="$CLOSE_AMOUNT" \
+  npx tsx examples/channel-close.ts
+else
+  echo "═══ Step 5: On-chain settlement — closing channel (via MPP credential) ═══"
+  echo ""
+
+  # Drive the close through the MPP 402 flow: the client sends an action:'close'
+  # credential and the server (with its configured feePayer) validates it, sets the
+  # per-channel settling marker, and broadcasts the close on-chain. This exercises
+  # doVerifyClose and the settling-window protection — unlike the standalone close().
+  CHANNEL_CONTRACT="$CONTRACT" \
+  COMMITMENT_SECRET="$COMMITMENT_SKEY" \
+  CLOSE_AMOUNT="$CLOSE_AMOUNT" \
+  SERVER_URL="http://localhost:$PORT" \
+  npx tsx examples/channel-close-mpp.ts
+fi
+
 echo ""
 
-RECIPIENT_SECRET=$(stellar keys show "$RECIPIENT")
-
-CHANNEL_CONTRACT="$CONTRACT" \
-COMMITMENT_SECRET="$COMMITMENT_SKEY" \
-CLOSE_SECRET="$RECIPIENT_SECRET" \
-AMOUNT="$CLOSE_AMOUNT" \
-npx tsx examples/channel-close.ts
-
+# Stop server now that settlement is complete
+kill $SERVER_PID 2>/dev/null || true
+wait $SERVER_PID 2>/dev/null || true
+trap - EXIT
+echo "  ✔ Server stopped. Settlement complete."
 echo ""
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -255,7 +295,7 @@ cat << SUMMARY
   What happened:
     1. Funder deployed channel contract with $DEPOSIT stroops deposit
     2. Client made 2 off-chain payments (0.1 XLM each) — no on-chain tx
-    3. Recipient closed channel for $CLOSE_AMOUNT stroops on-chain
+    3. $CLOSE_STEP_DESC ($CLOSE_AMOUNT stroops)
        → $CLOSE_AMOUNT transferred to recipient
        → remainder auto-refunded to funder
 
@@ -263,7 +303,7 @@ cat << SUMMARY
     • Contract upload (uploadWasm)
     • Contract deploy (__constructor) with $DEPOSIT stroops transfer
   And on the recipient's account:
-    • Channel close (close) — the settlement transaction
+    • Channel close (close) — $CLOSE_TX_DESC
 
 ═══════════════════════════════════════════════════════════════════
 SUMMARY

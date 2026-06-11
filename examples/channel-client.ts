@@ -5,7 +5,7 @@
  * off-chain commitment updates — no on-chain transaction per payment.
  *
  * Usage:
- *   COMMITMENT_SECRET=73b5... npx tsx examples/channel-client.ts
+ *   CHANNEL_CONTRACT=C... COMMITMENT_SECRET=73b5... npx tsx examples/channel-client.ts
  */
 
 import { Keypair } from '@stellar/stellar-sdk'
@@ -23,6 +23,7 @@ Mppx.create({
   methods: [
     stellar.channel({
       commitmentKey,
+      allowedChannels: [Env.channelContract],
       onProgress(event) {
         const ts = new Date().toISOString().slice(11, 23)
         switch (event.type) {

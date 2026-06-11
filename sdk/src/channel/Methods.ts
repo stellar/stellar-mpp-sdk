@@ -1,6 +1,5 @@
 import { Method } from 'mppx'
 import { z } from 'zod/mini'
-import { DEFAULT_MAX_XDR_LENGTH } from '../shared/defaults.js'
 
 /**
  * Stellar one-way payment channel intent.
@@ -17,16 +16,6 @@ export const channel = Method.from({
   schema: {
     credential: {
       payload: z.union([
-        z.object({
-          /** Action discriminator — open the channel on-chain. */
-          action: z.literal('open'),
-          /** Signed channel-open transaction XDR (base64). */
-          transaction: z.string().check(z.maxLength(DEFAULT_MAX_XDR_LENGTH)),
-          /** Initial commitment amount in base units (stroops). */
-          amount: z.string().check(z.regex(/^\d+$/)),
-          /** Ed25519 signature over the initial commitment bytes (128 hex chars). */
-          signature: z.string().check(z.regex(/^[0-9a-f]{128}$/i)),
-        }),
         z.object({
           /** Action discriminator — pay a voucher. */
           action: z.literal('voucher'),

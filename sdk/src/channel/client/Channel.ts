@@ -45,6 +45,8 @@ export function channel(parameters: channel.Parameters) {
     rpcUrl,
     simulationTimeoutMs = DEFAULT_SIMULATION_TIMEOUT_MS,
     store = Store.memory(),
+    allowedChannels,
+    allowUnpinnedChannel = false,
   } = parameters
 
   if (!parameters.store) {
@@ -52,6 +54,19 @@ export function channel(parameters: channel.Parameters) {
       '[stellar:channel:client] No persistent store provided — ' +
         'cumulative anti-reset protection will not survive process restarts. ' +
         'Pass a persistent Store for production use.',
+    )
+  }
+
+  if (!allowedChannels || allowedChannels.length === 0) {
+    if (!allowUnpinnedChannel) {
+      throw new StellarMppError(
+        'Channel pinning is required. Pass allowedChannels with the contract address(es) you are willing to sign for, or explicitly set allowUnpinnedChannel=true to accept the configuration tradeoff.',
+      )
+    }
+
+    console.warn(
+      '[stellar:channel:client] Channel pinning is disabled (allowUnpinnedChannel=true) — ' +
+        'the server-selected channel may not match the one you intended to use.',
     )
   }
 
@@ -65,27 +80,27 @@ export function channel(parameters: channel.Parameters) {
     context: z.object({
       /** Override the cumulative amount to commit. */
       cumulativeAmount: z.optional(z.string()),
-      /** Credential action: 'voucher' (default), 'close', or 'open'. */
-      action: z.optional(z.enum(['voucher', 'close', 'open'])),
-      /** Signed channel-open transaction XDR (base64). Required when action is 'open'. */
-      openTransaction: z.optional(z.string()),
+      /** Credential action: 'voucher' (default) or 'close'. */
+      action: z.optional(z.enum(['voucher', 'close'])),
     }),
     async createCredential({ challenge, context }) {
       const { request } = challenge
       const { amount, channel: channelAddress } = request
       const network = resolveNetworkId(request.methodDetails?.network)
 
+      // Enforce channel pinning: reject if the server-provided channel is not in the allowed list.
+      if (allowedChannels && allowedChannels.length > 0) {
+        if (!allowedChannels.includes(channelAddress)) {
+          throw new StellarMppError(
+            `Channel address mismatch: server advertised "${channelAddress}" ` +
+              `but allowedChannels only permits: [${allowedChannels.join(', ')}]`,
+          )
+        }
+      }
+
       // The server tells us the cumulative amount via methodDetails,
       // or the caller can override via context.
       const action = context?.action ?? 'voucher'
-
-      // For open actions, default cumulative amount to the requested amount
-      // (first payment). The caller must also provide the signed open tx XDR.
-      if (action === 'open') {
-        if (!context?.openTransaction) {
-          throw new StellarMppError('openTransaction is required when action is "open".')
-        }
-      }
 
       // Read locally tracked cumulative from store (if provided).
       // The client tracks the last signed cumulative independently of the
@@ -171,7 +186,6 @@ export function channel(parameters: channel.Parameters) {
         challenge,
         payload: {
           action,
-          ...(action === 'open' ? { transaction: context!.openTransaction! } : {}),
           amount: cumulativeAmount.toString(),
           signature: sigHex,
         },
@@ -206,14 +220,33 @@ export declare namespace channel {
      * When provided, the client persists the last signed cumulative amount
      * and uses it as the baseline for subsequent commitments, taking the
      * maximum of the locally tracked value and the server-reported value.
-     * This prevents a malicious or compromised server from resetting the
-     * client's cumulative baseline to inflate the signed commitment.
+     * This keeps the client's cumulative baseline aligned with the highest
+     * value it has already signed.
      *
      * Defaults to an in-memory store — protection is active within the
      * process lifetime but does not survive restarts. Pass a persistent
      * store for production use.
      */
     store?: Store.Store
+    /**
+     * List of allowed channel contract addresses (C...).
+     *
+     * The client enforces that any channel advertised by the server in the
+     * commitment challenge matches one of the addresses in this list.
+     *
+     * Channel pinning is required by default. To disable it, explicitly set
+     * `allowUnpinnedChannel: true`.
+     */
+    allowedChannels?: string[]
+    /**
+     * Explicitly disable channel pinning.
+     *
+     * Unsafe: when enabled, the client will sign commitments for whatever
+     * channel address the server advertises. Prefer `allowedChannels`.
+     *
+     * @default false
+     */
+    allowUnpinnedChannel?: boolean
     /** Callback invoked at each lifecycle stage. */
     onProgress?: (event: ProgressEvent) => void
   }

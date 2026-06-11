@@ -24,6 +24,14 @@ const { channel } = await import('./Channel.js')
 const TEST_KEYPAIR = Keypair.random()
 const CHANNEL_ADDRESS = 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526'
 
+function makeMethod(overrides: Record<string, unknown> = {}) {
+  return channel({
+    commitmentKey: TEST_KEYPAIR,
+    allowUnpinnedChannel: true,
+    ...overrides,
+  } as Parameters<typeof channel>[0])
+}
+
 // Default mock: getAccount returns a valid account stub
 mockGetAccount.mockResolvedValue({
   accountId: () => TEST_KEYPAIR.publicKey(),
@@ -66,25 +74,38 @@ function successSimResult(commitmentBytes: Buffer) {
 
 describe('stellar client channel', () => {
   it('creates a client method with correct name and intent', () => {
-    const method = channel({ commitmentKey: TEST_KEYPAIR })
+    const method = makeMethod()
     expect(method.name).toBe('stellar')
     expect(method.intent).toBe('channel')
   })
 
   it('accepts commitmentSecret parameter', () => {
-    const method = channel({ commitmentSecret: TEST_KEYPAIR.secret() })
+    const method = channel({
+      commitmentSecret: TEST_KEYPAIR.secret(),
+      allowUnpinnedChannel: true,
+    } as Parameters<typeof channel>[0])
     expect(method.name).toBe('stellar')
   })
 
   it('has createCredential function', () => {
-    const method = channel({ commitmentKey: TEST_KEYPAIR })
+    const method = makeMethod()
     expect(typeof method.createCredential).toBe('function')
   })
 
   it('throws if neither commitmentKey nor commitmentSecret is provided', () => {
-    expect(() => channel({} as Parameters<typeof channel>[0])).toThrow(
+    expect(() => channel({ allowUnpinnedChannel: true } as Parameters<typeof channel>[0])).toThrow(
       'Either commitmentKey or commitmentSecret must be provided.',
     )
+  })
+
+  it('requires channel pinning by default unless explicitly opted out', () => {
+    expect(() => channel({ commitmentKey: TEST_KEYPAIR })).toThrow('Channel pinning is required')
+
+    const method = channel({
+      commitmentKey: TEST_KEYPAIR,
+      allowUnpinnedChannel: true,
+    } as Parameters<typeof channel>[0])
+    expect(method.name).toBe('stellar')
   })
 })
 
@@ -95,7 +116,7 @@ describe('channel createCredential voucher', () => {
     const commitmentBytes = Buffer.from('test-commitment-bytes')
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
-    const method = channel({ commitmentKey: TEST_KEYPAIR })
+    const method = makeMethod()
     const challenge = mockChallenge()
 
     const credential = await method.createCredential({
@@ -116,7 +137,7 @@ describe('channel createCredential voucher', () => {
     const commitmentBytes = Buffer.from('cumulative-test')
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
-    const method = channel({ commitmentKey: TEST_KEYPAIR })
+    const method = makeMethod()
     const challenge = mockChallenge({
       amount: '500000',
       methodDetails: {
@@ -137,11 +158,33 @@ describe('channel createCredential voucher', () => {
     expect(decoded.payload.amount).toBe('2500000')
   })
 
+  it('produces a close credential with action "close" when requested via context', async () => {
+    const commitmentBytes = Buffer.from('close-action-test')
+    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
+
+    const method = makeMethod()
+    const challenge = mockChallenge()
+
+    const credential = await method.createCredential({
+      challenge: challenge as any,
+      context: { action: 'close', cumulativeAmount: '3000000' } as any,
+    })
+
+    const token = credential.replace(/^Payment\s+/, '')
+    const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
+
+    expect(decoded.payload.action).toBe('close')
+    expect(decoded.payload.amount).toBe('3000000')
+    expect(decoded.payload.signature).toMatch(/^[0-9a-f]{128}$/)
+    // Close credentials must not carry an open-only transaction field.
+    expect(decoded.payload.transaction).toBeUndefined()
+  })
+
   it('allows overriding cumulative amount via context', async () => {
     const commitmentBytes = Buffer.from('override-test')
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
-    const method = channel({ commitmentKey: TEST_KEYPAIR })
+    const method = makeMethod()
     const challenge = mockChallenge()
 
     const credential = await method.createCredential({
@@ -158,7 +201,7 @@ describe('channel createCredential voucher', () => {
     const commitmentBytes = Buffer.from('verify-sig-test')
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
-    const method = channel({ commitmentKey: TEST_KEYPAIR })
+    const method = makeMethod()
     const challenge = mockChallenge()
 
     const credential = await method.createCredential({
@@ -180,8 +223,7 @@ describe('channel createCredential voucher', () => {
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const events: unknown[] = []
-    const method = channel({
-      commitmentKey: TEST_KEYPAIR,
+    const method = makeMethod({
       onProgress: (e) => events.push(e),
     })
     const challenge = mockChallenge()
@@ -201,96 +243,13 @@ describe('channel createCredential voucher', () => {
   })
 })
 
-// ── createCredential open action ───────────────────────────────────────────
-
-describe('channel createCredential open action', () => {
-  it('throws when action is open but openTransaction is missing', async () => {
-    const method = channel({ commitmentKey: TEST_KEYPAIR })
-    const challenge = mockChallenge()
-
-    await expect(
-      method.createCredential({
-        challenge: challenge as any,
-        context: { action: 'open' } as any,
-      }),
-    ).rejects.toThrow('openTransaction is required when action is "open".')
-  })
-
-  it('includes transaction in payload when action is open', async () => {
-    const commitmentBytes = Buffer.from('open-commitment')
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
-
-    const method = channel({ commitmentKey: TEST_KEYPAIR })
-    const challenge = mockChallenge()
-
-    const credential = await method.createCredential({
-      challenge: challenge as any,
-      context: {
-        action: 'open',
-        openTransaction: 'MOCK_TX_XDR_BASE64',
-      } as any,
-    })
-
-    const token = credential.replace(/^Payment\s+/, '')
-    const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
-    expect(decoded.payload.action).toBe('open')
-    expect(decoded.payload.transaction).toBe('MOCK_TX_XDR_BASE64')
-    expect(decoded.payload.signature).toMatch(/^[0-9a-f]{128}$/)
-  })
-
-  it('produces a close credential with correct action', async () => {
-    const commitmentBytes = Buffer.from('close-commitment')
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
-
-    const method = channel({ commitmentKey: TEST_KEYPAIR })
-    const challenge = mockChallenge()
-
-    const credential = await method.createCredential({
-      challenge: challenge as any,
-      context: { action: 'close' } as any,
-    })
-
-    const token = credential.replace(/^Payment\s+/, '')
-    const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
-    expect(decoded.payload.action).toBe('close')
-  })
-
-  it('defaults cumulative to requested amount for open action', async () => {
-    const commitmentBytes = Buffer.from('open-default-amount')
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
-
-    const method = channel({ commitmentKey: TEST_KEYPAIR })
-    const challenge = mockChallenge({
-      amount: '5000000',
-      methodDetails: {
-        reference: crypto.randomUUID(),
-        network: 'stellar:testnet',
-        cumulativeAmount: '0', // no previous cumulative for open
-      },
-    })
-
-    const credential = await method.createCredential({
-      challenge: challenge as any,
-      context: {
-        action: 'open',
-        openTransaction: 'TX_XDR',
-      } as any,
-    })
-
-    const token = credential.replace(/^Payment\s+/, '')
-    const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
-    // 0 + 5000000 = 5000000
-    expect(decoded.payload.amount).toBe('5000000')
-  })
-})
-
 describe('client-side cumulative tracking (store)', () => {
   it('persists signed cumulative to store after signing', async () => {
     const commitmentBytes = Buffer.from('store-persist-test')
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const store = Store.memory()
-    const method = channel({ commitmentKey: TEST_KEYPAIR, store })
+    const method = makeMethod({ store })
     const challenge = mockChallenge()
 
     await method.createCredential({ challenge: challenge as any, context: {} as any })
@@ -314,8 +273,8 @@ describe('client-side cumulative tracking (store)', () => {
       amount: '5000000',
     })
 
-    const method = channel({ commitmentKey: TEST_KEYPAIR, store })
-    // Server reports only 2000000 (reset attack — would normally be 5000000)
+    const method = makeMethod({ store })
+    // Server reports 2000000 even though the locally tracked value is 5000000.
     const challenge = mockChallenge({
       amount: '1000000',
       methodDetails: {
@@ -341,7 +300,7 @@ describe('client-side cumulative tracking (store)', () => {
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const store = Store.memory() // empty — no prior local state
-    const method = channel({ commitmentKey: TEST_KEYPAIR, store })
+    const method = makeMethod({ store })
     const challenge = mockChallenge({
       amount: '500000',
       methodDetails: {
@@ -375,7 +334,7 @@ describe('client-side cumulative tracking (store)', () => {
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
-    const method = channel({ commitmentKey: TEST_KEYPAIR }) // no explicit store
+    const method = makeMethod() // no explicit store
 
     // First call: server reports cumulative 0, amount 1000000 → signs 1000000
     const challenge1 = mockChallenge({
@@ -388,13 +347,13 @@ describe('client-side cumulative tracking (store)', () => {
     })
     await method.createCredential({ challenge: challenge1 as any, context: {} as any })
 
-    // Second call: server tries to reset cumulative to 0 (attack)
+    // Second call reports cumulative 0 instead of the previously tracked value.
     const challenge2 = mockChallenge({
       amount: '500000',
       methodDetails: {
         reference: crypto.randomUUID(),
         network: 'stellar:testnet',
-        cumulativeAmount: '0', // reset attack
+        cumulativeAmount: '0', // lower than the locally tracked value
       },
     })
     const credential2 = await method.createCredential({
@@ -413,7 +372,7 @@ describe('client-side cumulative tracking (store)', () => {
     const commitmentBytes = Buffer.from('no-store-compat-test')
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
-    const method = channel({ commitmentKey: TEST_KEYPAIR }) // defaults to Store.memory()
+    const method = makeMethod() // defaults to Store.memory()
     const challenge = mockChallenge({
       amount: '500000',
       methodDetails: {
@@ -437,7 +396,7 @@ describe('client-side cumulative tracking (store)', () => {
 
 describe('network validation', () => {
   it('throws on unsupported network identifier', async () => {
-    const method = channel({ commitmentKey: TEST_KEYPAIR })
+    const method = makeMethod()
     const challenge = mockChallenge({
       methodDetails: {
         reference: crypto.randomUUID(),
@@ -452,7 +411,7 @@ describe('network validation', () => {
   })
 
   it('throws on old-style network shorthand', async () => {
-    const method = channel({ commitmentKey: TEST_KEYPAIR })
+    const method = makeMethod()
     const challenge = mockChallenge({
       methodDetails: {
         reference: crypto.randomUUID(),
@@ -464,5 +423,95 @@ describe('network validation', () => {
     await expect(
       method.createCredential({ challenge: challenge as any, context: {} as any }),
     ).rejects.toThrow('Unsupported Stellar network identifier: "testnet"')
+  })
+})
+
+describe('channel pinning (allowedChannels)', () => {
+  it('rejects channel address not in allowedChannels list', async () => {
+    mockSimulateTransaction.mockClear()
+
+    const method = channel({
+      commitmentKey: TEST_KEYPAIR,
+      allowedChannels: ['CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF46W'],
+    })
+    const challenge = mockChallenge({
+      channel: CHANNEL_ADDRESS, // different from allowed channel
+    })
+
+    await expect(
+      method.createCredential({ challenge: challenge as any, context: {} as any }),
+    ).rejects.toThrow('Channel address mismatch')
+
+    // Verify simulate was never called (rejection happens before simulation)
+    expect(mockSimulateTransaction).not.toHaveBeenCalled()
+  })
+
+  it('accepts channel address in allowedChannels list', async () => {
+    mockSimulateTransaction.mockClear()
+    const commitmentBytes = Buffer.from('pinning-accept-test')
+    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
+
+    const method = channel({
+      commitmentKey: TEST_KEYPAIR,
+      allowedChannels: [CHANNEL_ADDRESS],
+    })
+    const challenge = mockChallenge()
+
+    const credential = await method.createCredential({
+      challenge: challenge as any,
+      context: {} as any,
+    })
+
+    const token = credential.replace(/^Payment\s+/, '')
+    const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
+    expect(decoded.payload.signature).toMatch(/^[0-9a-f]{128}$/)
+
+    // Verify simulate was called
+    expect(mockSimulateTransaction).toHaveBeenCalled()
+  })
+
+  it('accepts channel address when explicitly opting out of pinning', async () => {
+    const commitmentBytes = Buffer.from('pinning-no-pin-test')
+    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
+
+    const method = makeMethod()
+    const challenge = mockChallenge()
+
+    const credential = await method.createCredential({
+      challenge: challenge as any,
+      context: {} as any,
+    })
+
+    const token = credential.replace(/^Payment\s+/, '')
+    const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
+    expect(decoded.payload.signature).toMatch(/^[0-9a-f]{128}$/)
+  })
+
+  it('emits warning only when allowUnpinnedChannel=true', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    warnSpy.mockClear()
+
+    makeMethod()
+
+    const allWarnings = warnSpy.mock.calls
+    const allWarningsText = allWarnings.map((call) => String(call[0]))
+
+    expect(allWarningsText.some((text) => text.includes('allowUnpinnedChannel=true'))).toBe(true)
+    warnSpy.mockRestore()
+  })
+
+  it('rejects when allowedChannels is set but channel is not in the list', async () => {
+    mockSimulateTransaction.mockClear()
+
+    const allowed = ['CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF46W']
+    const method = channel({
+      commitmentKey: TEST_KEYPAIR,
+      allowedChannels: allowed,
+    })
+    const challenge = mockChallenge()
+
+    await expect(
+      method.createCredential({ challenge: challenge as any, context: {} as any }),
+    ).rejects.toThrow('Channel address mismatch')
   })
 })
