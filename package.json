@@ -1,6 +1,6 @@
 {
   "name": "@stellar/mpp",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Stellar blockchain payment method for the Machine Payments Protocol (MPP)",
   "type": "module",
   "packageManager": "pnpm@10.33.0",

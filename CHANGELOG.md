@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **BREAKING:** Reject unsigned push charge credentials by default ([#47](https://github.com/stellar/stellar-mpp-sdk/pull/47))
+  - `rejectUnsignedPush` now defaults to `true`; secure `signedHash` push is the only push type accepted by default.
+  - Operators still serving pre-signature clients can re-enable the legacy window with `rejectUnsignedPush: false`.
+  - Push credentials require a `sourceSignature` that proves control of the account funding the on-chain transfer, so a push payment can only be redeemed by its actual payer.
+
 ## [0.7.0] - 2026-06-11
 
 ### Security
