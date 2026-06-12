@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Require an atomic store (one providing `update()` compare-and-set) for both charge and channel servers, validated at construction with a clear error.
   - Channel: require explicit commitment pinning on the client, verify the simulated commitment matches the pinned channel, intended amount, network, and domain before signing, reject credentials during the on-chain close settling window, add an opt-in per-funder fee budget, and warn at startup when a fee-bump signer is configured without one.
   - Channel: document that the server store's `update()` must be a linearizable compare-and-set (a get-then-put or eventually-consistent backend is not sufficient for multi-process deployments), with single- and multi-process reference implementations.
+  - Charge: document the same linearizable compare-and-set store requirement (store JSDoc and README), and strengthen the cross-process replay test to assert exactly one acceptance and one rejection.
 
 ### Changed
 

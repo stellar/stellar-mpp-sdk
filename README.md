@@ -396,6 +396,8 @@ stellar.charge({
 })
 ```
 
+Replay protection depends on `store.update()` being a linearizable compare-and-set, the same requirement as the channel server (see [Store requirement](#one-way-payment-channels) below). `Store.memory()` is a correct single-process reference; multi-process deployments (multiple pods behind a load balancer) need a backend whose `update()` maps to a genuine atomic CAS and a single shared store across all instances — a per-instance `Store.memory()`, a plain get-then-put against a shared cache, or an eventually-consistent backend is **not** sufficient.
+
 ### Logger
 
 Pass a `logger` to charge or channel servers for structured debug and warning output. The `Logger` interface is compatible with [pino](https://github.com/pinojs/pino) out of the box:

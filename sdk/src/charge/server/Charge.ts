@@ -1118,13 +1118,25 @@ export declare namespace charge {
     /**
      * Replay protection store for challenge and tx hash deduplication.
      *
-     * Required — all replay protection depends on this store. Must be an
-     * atomic store providing `update()` for cross-process replay protection.
-     * Use `Store.memory()` for development and single-process deployments.
-     * In production, pass a persistent atomic store (e.g. backed by Redis or
-     * PostgreSQL) so that consumed hashes and challenges survive restarts
-     * and are visible across all server instances with atomic compare-and-set
-     * semantics.
+     * Required — all replay protection depends on this store. Without it,
+     * a confirmed payment could be accepted more than once.
+     *
+     * `update()` must be a **linearizable compare-and-set**: the callback must
+     * observe the latest committed value and its write must commit (or abort) as
+     * one indivisible step, even under concurrent callers across processes. The
+     * constructor verifies that `update()` exists but cannot verify that the
+     * backend implements it correctly — a store that emulates `update()` with a
+     * separate get-then-put, or one backed by an eventually-consistent datastore,
+     * passes the type check while silently dropping the guarantee in multi-process
+     * deployments.
+     *
+     * Reference implementations:
+     * - Single process: `Store.memory()`.
+     * - Multi-process (e.g. multiple pods behind a load balancer): a single shared
+     *   backend whose `update()` maps to a genuine atomic CAS, such as a Redis Lua
+     *   script or a PostgreSQL conditional `UPDATE … WHERE`. A per-instance
+     *   `Store.memory()` or a plain get-then-put against a shared cache is not
+     *   sufficient.
      */
     store: Store.AtomicStore
     /** Maximum fee in stroops for the inner transaction and fee bump. @defaultValue `10_000_000` (1 XLM) */
