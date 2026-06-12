@@ -429,10 +429,19 @@ Payment channels allow many off-chain micro-payments with minimal on-chain trans
 - The client should pin the channel contract with `allowedChannels` so it only signs for trusted channel addresses
 - Before signing, the client verifies the simulated commitment matches the pinned channel, the intended cumulative amount, the expected network, and the channel domain separator
 - The server verifies signatures by simulating `prepare_commitment` on the channel contract and checking the ed25519 signature
-- An atomic `Store` is required on the server to track cumulative amounts across requests
+- An atomic `Store` is required on the server to track cumulative amounts and channel lifecycle state across requests
 - The server can call `close()` on-chain at any time to settle accumulated payments
 
 The channel contract is deployed out-of-band (e.g. with the `stellar` CLI) before any payments; the SDK handles off-chain vouchers and on-chain close, not channel deployment.
+
+**Store requirement — `update()` must be a linearizable compare-and-set.**
+
+The channel server's monotonic-amount and lifecycle guarantees depend on `store.update()` performing an _atomic, linearizable_ read-modify-write: the callback must observe the latest committed value and its write must commit (or abort) as one indivisible step, even across concurrent processes. The constructor verifies that `update()` exists, but it cannot verify that your backend implements it correctly — a store that emulates `update()` with a separate get-then-put, or one backed by an eventually-consistent datastore, will satisfy the type check while silently dropping the guarantee in multi-process deployments.
+
+- **Single process:** `Store.memory()` is a correct reference implementation.
+- **Multi-process (multiple pods behind a load balancer):** use a backend whose `update()` maps to a genuine atomic CAS — e.g. a Redis Lua script, or a PostgreSQL conditional `UPDATE … WHERE`. A plain get-then-put against a shared cache is **not** sufficient.
+
+During an on-chain close the channel enters a fail-closed `settling` state and stops accepting credentials. If settlement throws (including an ambiguous timeout where the close may still have landed), the state is intentionally left in place rather than reopened — operators should monitor for stale `settling` markers and reconcile against on-chain state before clearing them.
 
 **On-chain close (server-side):**
 
