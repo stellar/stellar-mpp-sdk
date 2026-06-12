@@ -13,6 +13,7 @@ import { DEFAULT_SIMULATION_TIMEOUT_MS } from '../../shared/defaults.js'
 import { StellarMppError } from '../../shared/errors.js'
 import { simulateCall } from '../../shared/simulate.js'
 import { resolveNetworkId } from '../../shared/validation.js'
+import { assertCommitmentBinds } from '../commitment.js'
 import { channel as ChannelMethod } from '../Methods.js'
 
 /**
@@ -163,6 +164,15 @@ export function channel(parameters: channel.Parameters) {
 
       const commitmentBytes = returnValue.bytes()
 
+      // The simulation result is not authenticated, so confirm the commitment
+      // we are about to sign matches the channel, amount and network we
+      // intended before signing it.
+      assertCommitmentBinds(commitmentBytes, {
+        channel: channelAddress,
+        amount: cumulativeAmount,
+        network,
+      })
+
       onProgress?.({ type: 'signing' })
 
       // Sign the commitment bytes with the ed25519 commitment key
@@ -233,6 +243,10 @@ export declare namespace channel {
      *
      * The client enforces that any channel advertised by the server in the
      * commitment challenge matches one of the addresses in this list.
+     *
+     * As a second layer, the client verifies the simulated commitment matches
+     * the pinned channel, the intended cumulative amount, the expected network,
+     * and the channel domain separator before signing.
      *
      * Channel pinning is required by default. To disable it, explicitly set
      * `allowUnpinnedChannel: true`.

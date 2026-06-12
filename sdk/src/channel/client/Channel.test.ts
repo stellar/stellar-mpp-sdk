@@ -1,4 +1,4 @@
-import { Keypair } from '@stellar/stellar-sdk'
+import { Address, Keypair, Networks, hash, nativeToScVal, xdr } from '@stellar/stellar-sdk'
 import { Challenge, Store } from 'mppx'
 import { describe, expect, it, vi } from 'vitest'
 
@@ -70,6 +70,47 @@ function successSimResult(commitmentBytes: Buffer) {
   }
 }
 
+/**
+ * Builds commitment bytes exactly as the one-way-channel contract's
+ * `prepare_commitment` does: the XDR of an `ScVal::Map` with four
+ * alphabetically-sorted entries (amount, channel, domain, network). Used to
+ * mock a well-formed simulation result that the client's byte-binding check
+ * accepts.
+ */
+function buildCommitment(opts: {
+  amount: bigint
+  channel?: string
+  networkPassphrase?: string
+  domain?: string
+}): Buffer {
+  const {
+    amount,
+    channel = CHANNEL_ADDRESS,
+    networkPassphrase = Networks.TESTNET,
+    domain = 'chancmmt',
+  } = opts
+  const networkId = hash(Buffer.from(networkPassphrase))
+  const map = xdr.ScVal.scvMap([
+    new xdr.ScMapEntry({
+      key: nativeToScVal('amount', { type: 'symbol' }),
+      val: nativeToScVal(amount, { type: 'i128' }),
+    }),
+    new xdr.ScMapEntry({
+      key: nativeToScVal('channel', { type: 'symbol' }),
+      val: new Address(channel).toScVal(),
+    }),
+    new xdr.ScMapEntry({
+      key: nativeToScVal('domain', { type: 'symbol' }),
+      val: nativeToScVal(domain, { type: 'symbol' }),
+    }),
+    new xdr.ScMapEntry({
+      key: nativeToScVal('network', { type: 'symbol' }),
+      val: xdr.ScVal.scvBytes(networkId),
+    }),
+  ])
+  return map.toXDR()
+}
+
 // ── Construction tests ─────────────────────────────────────────────────────
 
 describe('stellar client channel', () => {
@@ -113,7 +154,7 @@ describe('stellar client channel', () => {
 
 describe('channel createCredential voucher', () => {
   it('signs commitment and produces a valid voucher credential', async () => {
-    const commitmentBytes = Buffer.from('test-commitment-bytes')
+    const commitmentBytes = buildCommitment({ amount: 1_000_000n })
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const method = makeMethod()
@@ -134,7 +175,7 @@ describe('channel createCredential voucher', () => {
   })
 
   it('computes cumulative amount from previous + requested', async () => {
-    const commitmentBytes = Buffer.from('cumulative-test')
+    const commitmentBytes = buildCommitment({ amount: 2_500_000n })
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const method = makeMethod()
@@ -159,7 +200,7 @@ describe('channel createCredential voucher', () => {
   })
 
   it('produces a close credential with action "close" when requested via context', async () => {
-    const commitmentBytes = Buffer.from('close-action-test')
+    const commitmentBytes = buildCommitment({ amount: 3_000_000n })
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const method = makeMethod()
@@ -181,7 +222,7 @@ describe('channel createCredential voucher', () => {
   })
 
   it('allows overriding cumulative amount via context', async () => {
-    const commitmentBytes = Buffer.from('override-test')
+    const commitmentBytes = buildCommitment({ amount: 9_999_999n })
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const method = makeMethod()
@@ -198,7 +239,7 @@ describe('channel createCredential voucher', () => {
   })
 
   it('produces a valid ed25519 signature', async () => {
-    const commitmentBytes = Buffer.from('verify-sig-test')
+    const commitmentBytes = buildCommitment({ amount: 1_000_000n })
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const method = makeMethod()
@@ -219,7 +260,7 @@ describe('channel createCredential voucher', () => {
   })
 
   it('fires onProgress events in order', async () => {
-    const commitmentBytes = Buffer.from('progress-test')
+    const commitmentBytes = buildCommitment({ amount: 1_000_000n })
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const events: unknown[] = []
@@ -245,7 +286,7 @@ describe('channel createCredential voucher', () => {
 
 describe('client-side cumulative tracking (store)', () => {
   it('persists signed cumulative to store after signing', async () => {
-    const commitmentBytes = Buffer.from('store-persist-test')
+    const commitmentBytes = buildCommitment({ amount: 1_000_000n })
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const store = Store.memory()
@@ -264,7 +305,7 @@ describe('client-side cumulative tracking (store)', () => {
   })
 
   it('uses locally tracked cumulative over lower server-reported value', async () => {
-    const commitmentBytes = Buffer.from('local-over-server-test')
+    const commitmentBytes = buildCommitment({ amount: 6_000_000n })
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const store = Store.memory()
@@ -296,7 +337,7 @@ describe('client-side cumulative tracking (store)', () => {
   })
 
   it('uses server-reported cumulative when no local state exists (first connection)', async () => {
-    const commitmentBytes = Buffer.from('first-connection-test')
+    const commitmentBytes = buildCommitment({ amount: 3_500_000n })
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const store = Store.memory() // empty — no prior local state
@@ -330,9 +371,12 @@ describe('client-side cumulative tracking (store)', () => {
   })
 
   it('default in-memory store prevents cumulative reset across calls', async () => {
-    const commitmentBytes = Buffer.from('default-store-reset-test')
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
+    mockSimulateTransaction.mockResolvedValueOnce(
+      successSimResult(buildCommitment({ amount: 1_000_000n })),
+    )
+    mockSimulateTransaction.mockResolvedValueOnce(
+      successSimResult(buildCommitment({ amount: 1_500_000n })),
+    )
 
     const method = makeMethod() // no explicit store
 
@@ -369,7 +413,7 @@ describe('client-side cumulative tracking (store)', () => {
   })
 
   it('defaults to in-memory store when store is omitted', async () => {
-    const commitmentBytes = Buffer.from('no-store-compat-test')
+    const commitmentBytes = buildCommitment({ amount: 2_500_000n })
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const method = makeMethod() // defaults to Store.memory()
@@ -448,7 +492,7 @@ describe('channel pinning (allowedChannels)', () => {
 
   it('accepts channel address in allowedChannels list', async () => {
     mockSimulateTransaction.mockClear()
-    const commitmentBytes = Buffer.from('pinning-accept-test')
+    const commitmentBytes = buildCommitment({ amount: 1_000_000n })
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const method = channel({
@@ -471,7 +515,7 @@ describe('channel pinning (allowedChannels)', () => {
   })
 
   it('accepts channel address when explicitly opting out of pinning', async () => {
-    const commitmentBytes = Buffer.from('pinning-no-pin-test')
+    const commitmentBytes = buildCommitment({ amount: 1_000_000n })
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const method = makeMethod()
@@ -513,5 +557,58 @@ describe('channel pinning (allowedChannels)', () => {
     await expect(
       method.createCredential({ challenge: challenge as any, context: {} as any }),
     ).rejects.toThrow('Channel address mismatch')
+  })
+})
+
+describe('commitment byte-binding', () => {
+  it('refuses to sign when the simulated commitment encodes a different amount than intended', async () => {
+    // The client intends to sign cumulative 1000000, but the simulation
+    // returns a commitment for a different amount; it must refuse to sign.
+    mockSimulateTransaction.mockResolvedValueOnce(
+      successSimResult(buildCommitment({ amount: 999_999_999n })),
+    )
+
+    const method = makeMethod()
+    const challenge = mockChallenge() // requests amount 1000000
+
+    await expect(
+      method.createCredential({ challenge: challenge as any, context: {} as any }),
+    ).rejects.toThrow(/amount mismatch/i)
+  })
+
+  it('refuses to sign when the simulated commitment encodes a different channel', async () => {
+    mockSimulateTransaction.mockResolvedValueOnce(
+      successSimResult(
+        buildCommitment({
+          amount: 1_000_000n,
+          channel: 'CAYGVE5AUQQ2XNXWOXHH5VPGRHYX4APUAOWA4VOBI3VGMOYJ2IJ6VJG5',
+        }),
+      ),
+    )
+
+    const method = makeMethod()
+    const challenge = mockChallenge() // pinned/advertised channel is CHANNEL_ADDRESS
+
+    await expect(
+      method.createCredential({ challenge: challenge as any, context: {} as any }),
+    ).rejects.toThrow(/channel mismatch/i)
+  })
+
+  it('signs when the simulated commitment binds to the intended channel and amount', async () => {
+    mockSimulateTransaction.mockResolvedValueOnce(
+      successSimResult(buildCommitment({ amount: 1_000_000n })),
+    )
+
+    const method = makeMethod()
+    const challenge = mockChallenge()
+
+    const credential = await method.createCredential({
+      challenge: challenge as any,
+      context: {} as any,
+    })
+
+    const token = credential.replace(/^Payment\s+/, '')
+    const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
+    expect(decoded.payload.signature).toMatch(/^[0-9a-f]{128}$/)
   })
 })

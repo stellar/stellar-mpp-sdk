@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Advertise accepted credential types via `methodDetails.credentialTypes` so clients detect unsupported settlement modes before paying; sponsored (`feePayer`) servers advertise pull mode only.
   - Keep legacy unsigned `hash` push accepted by default (with a deprecation warning per acceptance) for backward compatibility; add a `rejectUnsignedPush` server option to refuse it.
   - Require an atomic store (one providing `update()` compare-and-set) for both charge and channel servers, validated at construction with a clear error.
-  - Channel: require explicit commitment pinning on the client, reject credentials during the on-chain close settling window, and add an opt-in per-funder fee budget.
+  - Channel: require explicit commitment pinning on the client, verify the simulated commitment matches the pinned channel, intended amount, network, and domain before signing, reject credentials during the on-chain close settling window, and add an opt-in per-funder fee budget.
 
 ### Changed
 

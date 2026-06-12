@@ -423,6 +423,7 @@ Payment channels allow many off-chain micro-payments with minimal on-chain trans
 
 - The client signs cumulative commitment amounts off-chain using the ed25519 commitment key
 - The client should pin the channel contract with `allowedChannels` so it only signs for trusted channel addresses
+- Before signing, the client verifies the simulated commitment matches the pinned channel, the intended cumulative amount, the expected network, and the channel domain separator
 - The server verifies signatures by simulating `prepare_commitment` on the channel contract and checking the ed25519 signature
 - An atomic `Store` is required on the server to track cumulative amounts across requests
 - The server can call `close()` on-chain at any time to settle accumulated payments
