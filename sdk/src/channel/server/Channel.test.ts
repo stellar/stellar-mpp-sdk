@@ -300,6 +300,52 @@ describe('stellar server channel', () => {
       expect.stringContaining('checkOnChainState is disabled'),
     )
   })
+
+  it('warns when a fee-bump signer is configured without a feeBudget', () => {
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+
+    channel({
+      channel: CHANNEL_ADDRESS,
+      checkOnChainState: false,
+      commitmentKey: COMMITMENT_KEY.publicKey(),
+      feePayer: { envelopeSigner: Keypair.random(), feeBumpSigner: Keypair.random() },
+      store: Store.memory(),
+      logger,
+    })
+
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('feeBudget'))
+  })
+
+  it('does not warn about feeBudget when one is configured', () => {
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+
+    channel({
+      channel: CHANNEL_ADDRESS,
+      checkOnChainState: false,
+      commitmentKey: COMMITMENT_KEY.publicKey(),
+      feePayer: { envelopeSigner: Keypair.random(), feeBumpSigner: Keypair.random() },
+      feeBudget: { maxStroops: 20_000_000, windowMs: 60_000 },
+      store: Store.memory(),
+      logger,
+    })
+
+    expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('feeBudget'))
+  })
+
+  it('does not warn about feeBudget when no fee-bump signer is configured', () => {
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+
+    channel({
+      channel: CHANNEL_ADDRESS,
+      checkOnChainState: false,
+      commitmentKey: COMMITMENT_KEY.publicKey(),
+      feePayer: { envelopeSigner: Keypair.random() },
+      store: Store.memory(),
+      logger,
+    })
+
+    expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('feeBudget'))
+  })
 })
 
 describe('stellar server channel verification', () => {

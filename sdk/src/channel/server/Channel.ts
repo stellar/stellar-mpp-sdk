@@ -147,6 +147,12 @@ export function channel(parameters: channel.Parameters) {
     )
   }
 
+  if (feeBumpKP && !feeBudget) {
+    logger.warn(
+      `${LOG_PREFIX} A fee-bump signer is configured without a feeBudget — sponsor fee spending per funder is not capped. Set feeBudget to bound settlement fee usage in fee-sponsoring deployments.`,
+    )
+  }
+
   logger.info(
     `${LOG_PREFIX} Initialized. Multi-process deployments require an atomic store.update() compare-and-set implementation for replay protection.`,
   )
@@ -754,6 +760,9 @@ export function channel(parameters: channel.Parameters) {
  * Transfers the committed amount to the recipient and auto-refunds
  * the remaining balance to the funder. This is a server-side
  * administrative operation.
+ *
+ * Note: this standalone helper is not routed through `verify()`, so any
+ * `feeBudget` configured on the channel server does not apply here.
  */
 export async function close(parameters: {
   /** Channel contract address. */

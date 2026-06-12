@@ -283,6 +283,10 @@ stellar.channel({
     envelopeSigner: Keypair | string,   // source account + envelope signer
     feeBumpSigner?: Keypair | string,   // wraps tx in FeeBumpTransaction
   },
+  feeBudget?: {                    // cap sponsor fee spend per funder (recommended when feeBumpSigner is set)
+    maxStroops: number,            // max stroops spent per funder key within the window
+    windowMs: number,              // rolling window in ms
+  },
   checkOnChainState?: boolean,    // detect on-chain disputes (default: true)
   onDisputeDetected?: (state) => void, // callback when close_start detected
   maxFeeBumpStroops?: number,     // max fee bump in stroops (default: 10,000,000)
