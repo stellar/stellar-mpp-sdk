@@ -1,3 +1,7 @@
 minimumReleaseAge: 10080 # 7 days, in minutes (pnpm uses minutes for this setting)
+minimumReleaseAgeExclude:
+  # Exempt esbuild so its <7-day-old security patch (0.28.1) can resolve; remove once it ages past the soak.
+  - esbuild
+  - '@esbuild/*'
 packages:
   - '.'
