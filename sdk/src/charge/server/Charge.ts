@@ -85,7 +85,7 @@ export function charge(parameters: charge.Parameters) {
     pollMaxConcurrent = DEFAULT_POLL_MAX_CONCURRENT,
     pollTimeoutMs = DEFAULT_POLL_TIMEOUT_MS,
     recipient,
-    rejectUnsignedPush = false,
+    allowUnsignedPush = false,
     rpcUrl,
     simulationTimeoutMs = DEFAULT_SIMULATION_TIMEOUT_MS,
     store,
@@ -100,12 +100,12 @@ export function charge(parameters: charge.Parameters) {
   const feeBumpKP = feePayer?.feeBumpSigner ? resolveKeypair(feePayer.feeBumpSigner) : undefined
 
   // Compute credentialTypes: sponsored servers advertise only 'transaction' (pull mode).
-  // Unsponsored servers advertise push modes based on rejectUnsignedPush.
+  // Unsponsored servers advertise push modes based on allowUnsignedPush.
   const credentialTypes = envelopeKP
     ? ['transaction']
-    : rejectUnsignedPush
-      ? ['transaction', 'signedHash']
-      : ['transaction', 'signedHash', 'hash']
+    : allowUnsignedPush
+      ? ['transaction', 'signedHash', 'hash']
+      : ['transaction', 'signedHash']
 
   return Method.toServer(Methods.charge, {
     defaults: { currency, recipient },
@@ -313,7 +313,7 @@ export function charge(parameters: charge.Parameters) {
         }
 
         // Check if unsigned push is rejected by policy
-        if (rejectUnsignedPush) {
+        if (!allowUnsignedPush) {
           throw new PaymentVerificationError(
             `${LOG_PREFIX} Unsigned push mode (type="hash") is no longer accepted. Upgrade your client to send type="signedHash", or use server-sponsored flow.`,
           )
@@ -1152,16 +1152,20 @@ export declare namespace charge {
     /** Timeout for Soroban RPC simulation calls in milliseconds. @defaultValue `10_000` */
     simulationTimeoutMs?: number
     /**
-     * Whether to reject legacy unsigned push-mode credentials (type="hash").
+     * Whether to accept legacy unsigned push-mode credentials (type="hash").
      *
-     * In 0.7, unsigned push is accepted by default (default: `false`) to maintain
-     * backward compatibility with pre-0.7 clients. Logs each acceptance so operators
-     * can track when unsigned traffic drains. Set to `true` to reject and force
-     * clients to upgrade to `signedHash` or use server-sponsored flow.
+     * Defaults to `false`: only the payer-authenticated `signedHash` push mode and
+     * pull mode (`transaction`) are accepted. Legacy unsigned push relies solely on
+     * the client-declared payer identity rather than a proof of control, so it is
+     * not accepted by default.
+     *
+     * Set to `true` only for backward compatibility with pre-`signedHash` clients
+     * mid-migration; each acceptance is logged so operators can track when the legacy
+     * traffic drains and turn it back off. New deployments should leave it disabled.
      *
      * @defaultValue `false`
      */
-    rejectUnsignedPush?: boolean
+    allowUnsignedPush?: boolean
     /** Logger instance (pino and console compatible API). Defaults to a no-op logger. */
     logger?: Logger
   }

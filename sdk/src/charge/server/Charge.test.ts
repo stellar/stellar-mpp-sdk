@@ -217,29 +217,29 @@ describe('charge request transform', () => {
     expect(transformed.amount).toBe('100000')
   })
 
-  it('advertises credentialTypes in order of preference (default: accept all push modes)', () => {
+  it('advertises credentialTypes excluding legacy hash by default (allowUnsignedPush: false)', () => {
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
-    })
-    const transformed = (method as any).request({
-      request: { amount: '1', currency: USDC_SAC_TESTNET, recipient: RECIPIENT },
-    })
-    expect(transformed.methodDetails.credentialTypes).toEqual(['transaction', 'signedHash', 'hash'])
-  })
-
-  it('advertises credentialTypes excluding legacy hash when rejectUnsignedPush is true', () => {
-    const method = charge({
-      recipient: RECIPIENT,
-      currency: USDC_SAC_TESTNET,
-      store: Store.memory(),
-      rejectUnsignedPush: true,
     })
     const transformed = (method as any).request({
       request: { amount: '1', currency: USDC_SAC_TESTNET, recipient: RECIPIENT },
     })
     expect(transformed.methodDetails.credentialTypes).toEqual(['transaction', 'signedHash'])
+  })
+
+  it('advertises credentialTypes including legacy hash when allowUnsignedPush is explicitly true', () => {
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store: Store.memory(),
+      allowUnsignedPush: true,
+    })
+    const transformed = (method as any).request({
+      request: { amount: '1', currency: USDC_SAC_TESTNET, recipient: RECIPIENT },
+    })
+    expect(transformed.methodDetails.credentialTypes).toEqual(['transaction', 'signedHash', 'hash'])
   })
 })
 
@@ -314,6 +314,7 @@ describe('charge hash+feePayer rejection', () => {
       currency: USDC_SAC_TESTNET,
       feePayer: { envelopeSigner: Keypair.random() },
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
 
     await expect(
@@ -327,7 +328,7 @@ describe('charge legacy hash (unsigned push) handling', () => {
     mockGetTransaction.mockReset()
   })
 
-  it('accepts legacy hash by default and logs deprecation warning', async () => {
+  it('rejects legacy hash by default and does not consume hash', async () => {
     const client = PAYER
     const tx = buildTransferTx({
       source: client.publicKey(),
@@ -356,7 +357,64 @@ describe('charge legacy hash (unsigned push) handling', () => {
       },
     })
 
-    const hash = testHash('legacy-unsigned-hash')
+    const hash = testHash('legacy-unsigned-hash-default-reject')
+    const cred = Object.assign(
+      Credential.from({
+        challenge,
+        payload: { type: 'hash', hash },
+      }),
+      { source: `did:pkh:stellar:testnet:${client.publicKey()}` },
+    )
+
+    const store = Store.memory()
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store,
+    })
+
+    await expect(
+      method.verify({
+        credential: cred as any,
+        request: cred.challenge.request,
+      }),
+    ).rejects.toThrow('Unsigned push mode')
+
+    // Verify the hash was not consumed
+    const stored = await store.get(`stellar:charge:hash:${hash}`)
+    expect(stored).toBeNull()
+  })
+
+  it('accepts legacy hash when explicitly opted in with allowUnsignedPush: true and logs deprecation warning', async () => {
+    const client = PAYER
+    const tx = buildTransferTx({
+      source: client.publicKey(),
+      from: client.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    tx.sign(client)
+
+    mockGetTransaction.mockResolvedValueOnce({
+      status: 'SUCCESS',
+      envelopeXdr: tx.toXDR(),
+    })
+
+    const challenge = Challenge.from({
+      id: `test-${crypto.randomUUID()}`,
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      request: {
+        amount: '10000000',
+        currency: USDC_SAC_TESTNET,
+        recipient: RECIPIENT,
+        methodDetails: { network: 'stellar:testnet' },
+      },
+    })
+
+    const hash = testHash('legacy-unsigned-hash-opted-in')
     const cred = Object.assign(
       Credential.from({
         challenge,
@@ -377,6 +435,7 @@ describe('charge legacy hash (unsigned push) handling', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
       logger: mockLogger,
     })
 
@@ -400,7 +459,7 @@ describe('charge legacy hash (unsigned push) handling', () => {
     expect(loggedObj.hash).toBe(hash)
   })
 
-  it('rejects legacy hash when rejectUnsignedPush is true', async () => {
+  it('still rejects legacy hash when allowUnsignedPush is explicitly false', async () => {
     const client = PAYER
     const tx = buildTransferTx({
       source: client.publicKey(),
@@ -442,7 +501,7 @@ describe('charge legacy hash (unsigned push) handling', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
-      rejectUnsignedPush: true,
+      allowUnsignedPush: false,
     })
 
     await expect(
@@ -450,7 +509,7 @@ describe('charge legacy hash (unsigned push) handling', () => {
     ).rejects.toThrow('Unsigned push mode')
   })
 
-  it('does not burn tx hash when rejecting unsigned push', async () => {
+  it('does not burn tx hash when rejecting unsigned push by default', async () => {
     const client = PAYER
     const tx = buildTransferTx({
       source: client.publicKey(),
@@ -471,7 +530,6 @@ describe('charge legacy hash (unsigned push) handling', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store,
-      rejectUnsignedPush: true,
     })
 
     const hash = testHash('unsigned-not-burned')
@@ -506,7 +564,7 @@ describe('charge legacy hash (unsigned push) handling', () => {
     expect(stored).toBeNull()
   })
 
-  it('signedHash credential type still accepts valid signatures when rejectUnsignedPush is true', async () => {
+  it('signedHash credential type still accepts valid signatures when allowUnsignedPush is false', async () => {
     const client = PAYER
     const tx = buildTransferTx({
       source: client.publicKey(),
@@ -554,7 +612,7 @@ describe('charge legacy hash (unsigned push) handling', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
-      rejectUnsignedPush: true,
+      allowUnsignedPush: false,
     })
 
     const receipt = await method.verify({
@@ -608,6 +666,7 @@ describe('charge push-mode sender verification', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
 
     await expect(
@@ -665,6 +724,7 @@ describe('charge push-mode sender verification', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
 
     const receipt = await method.verify({
@@ -686,6 +746,7 @@ describe('charge push-mode sender verification', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
 
     await expect(
@@ -716,6 +777,7 @@ describe('charge push-mode sender verification', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
 
     await expect(
@@ -746,6 +808,7 @@ describe('charge push-mode sender verification', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
 
     await expect(
@@ -776,6 +839,7 @@ describe('charge push-mode sender verification', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
 
     await expect(
@@ -810,6 +874,7 @@ describe('charge push-mode verification', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
 
     await expect(
@@ -841,6 +906,7 @@ describe('charge push-mode verification', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
 
     await expect(
@@ -872,6 +938,7 @@ describe('charge push-mode verification', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
 
     await expect(
@@ -893,6 +960,7 @@ describe('charge push-mode verification', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
 
     await expect(
@@ -913,6 +981,7 @@ describe('charge tx hash dedup', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store,
+      allowUnsignedPush: true,
     })
 
     const hash = testHash('abc123firstuse')
@@ -938,6 +1007,7 @@ describe('charge tx hash dedup', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store,
+      allowUnsignedPush: true,
     })
 
     const cred = makeHashCredential({ hash })
@@ -953,6 +1023,7 @@ describe('charge hash format validation', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
     const cred = makeHashCredential({ hash: 'not-hex-at-all' })
     await expect(
@@ -965,6 +1036,7 @@ describe('charge hash format validation', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
     const cred = makeHashCredential({ hash: 'abcd1234' })
     await expect(
@@ -977,6 +1049,7 @@ describe('charge hash format validation', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
     const cred = makeHashCredential({ hash: 'zzzz' + '0'.repeat(60) })
     await expect(
@@ -993,6 +1066,7 @@ describe('charge hash format validation', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
     const payer = Keypair.random()
     const cred = makeHashCredential({
@@ -1343,6 +1417,7 @@ describe('charge push-mode: single lookup (no polling)', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
     const cred = makeHashCredential({
       hash: 'a'.repeat(64),
@@ -1372,6 +1447,7 @@ describe('charge push-mode: single lookup (no polling)', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
     const cred = makeHashCredential({
       hash: 'b'.repeat(64),
@@ -1402,6 +1478,7 @@ describe('charge push-mode: single lookup (no polling)', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
     const cred = makeHashCredential({
       hash: 'c'.repeat(64),
@@ -1436,6 +1513,7 @@ describe('charge push-mode: single lookup (no polling)', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
     const cred = makeHashCredential({
       hash: 'd'.repeat(64),
@@ -3037,6 +3115,7 @@ describe('charge push-mode FeeBump envelope', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
     const hash = testHash('feebump-hash')
     const cred = Object.assign(
@@ -3102,6 +3181,7 @@ describe('charge push-mode FeeBump envelope', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
     const hash = testHash('feebump-xdr-obj-hash')
     const cred = Object.assign(
@@ -3160,6 +3240,7 @@ describe('charge push-mode envelopeXdr as XDR object', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
     const hash = testHash('xdr-obj-hash')
     const cred = Object.assign(
@@ -3360,11 +3441,13 @@ describe('charge hash replay across instances sharing a store', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: sharedStore,
+      allowUnsignedPush: true,
     })
     const method2 = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: sharedStore,
+      allowUnsignedPush: true,
     })
 
     // Same hash credential sent to both instances — only one should succeed
@@ -3456,11 +3539,13 @@ describe('charge hash replay across instances sharing a store', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: sharedStore,
+      allowUnsignedPush: true,
     })
     const method2 = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: sharedStore,
+      allowUnsignedPush: true,
     })
 
     // Same challenge ID, different hashes — tests challenge-level replay

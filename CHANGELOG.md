@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Harden charge and channel payment verification ([#47](https://github.com/stellar/stellar-mpp-sdk/pull/47))
   - Add a payer-bound `signedHash` push credential (tx hash + `sourceSignature` over `"{challenge.id}:{hash}"`), verified against the key controlling the on-chain transfer's `from`.
   - Advertise accepted credential types via `methodDetails.credentialTypes` so clients detect unsupported settlement modes before paying; sponsored (`feePayer`) servers advertise pull mode only.
-  - Keep legacy unsigned `hash` push accepted by default (with a deprecation warning per acceptance) for backward compatibility; add a `rejectUnsignedPush` server option to refuse it.
+  - Accept only payer-authenticated push (`signedHash`) and pull (`transaction`) credentials by default; legacy unsigned `hash` push is no longer accepted unless an operator opts in with `allowUnsignedPush: true`, which logs each acceptance for migration tracking.
   - Require an atomic store (one providing `update()` compare-and-set) for both charge and channel servers, validated at construction with a clear error.
   - Channel: require explicit commitment pinning on the client, verify the simulated commitment matches the pinned channel, intended amount, network, and domain before signing, reject credentials during the on-chain close settling window, add an opt-in per-funder fee budget, and warn at startup when a fee-bump signer is configured without one.
   - Channel: document that the server store's `update()` must be a linearizable compare-and-set (a get-then-put or eventually-consistent backend is not sufficient for multi-process deployments), with single- and multi-process reference implementations.

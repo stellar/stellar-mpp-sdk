@@ -57,7 +57,7 @@ function handlerAsFetch(
   }
 }
 
-describe('legacy hash credential acceptance (default server)', () => {
+describe('legacy hash credential acceptance (allowUnsignedPush: true opt-in)', () => {
   beforeAll(async () => {
     await Promise.all([
       sorobanServer.fundAddress(TEST_PAYER.publicKey()),
@@ -65,13 +65,13 @@ describe('legacy hash credential acceptance (default server)', () => {
     ])
   }, 30_000)
 
-  it('default server accepts legacy hash credential and settles on-chain', async () => {
-    // Create default server method (rejectUnsignedPush unset/false)
+  it('server with explicit allowUnsignedPush: true accepts legacy hash credential and settles on-chain', async () => {
+    // Create server method with explicit allowUnsignedPush: true for legacy acceptance
     const serverMethod = serverCharge({
       recipient: TEST_RECIPIENT,
       currency: XLM_SAC_TESTNET,
       store: Store.memory(),
-      // rejectUnsignedPush defaults to false: legacy unsigned credentials accepted
+      allowUnsignedPush: true,
     })
 
     // Build a real SEP-41 transfer on-chain
