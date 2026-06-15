@@ -64,7 +64,7 @@ charge and channel servers **throw at construction** if the store has no
 `update()` method:
 
 ```ts
-import { Store } from 'mppx'
+import { Store } from 'mppx/server'
 
 const store = Store.memory() // correct single-process reference
 // multi-process deployments need a shared backend whose update() is a genuine
