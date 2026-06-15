@@ -1,6 +1,6 @@
 {
   "name": "@stellar/mpp",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Stellar blockchain payment method for the Machine Payments Protocol (MPP)",
   "type": "module",
   "packageManager": "pnpm@10.33.0",
@@ -66,33 +66,33 @@
     "zod": "^4.4.3"
   },
   "peerDependencies": {
-    "@stellar/stellar-sdk": "^15.0.1",
-    "mppx": "^0.6.28"
+    "@stellar/stellar-sdk": "^15.1.0",
+    "mppx": "^0.6.29"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@stellar/stellar-sdk": "^15.0.1",
+    "@stellar/stellar-sdk": "^15.1.0",
     "@types/express": "^5.0.6",
-    "@types/node": "^25.6.0",
-    "@vitest/coverage-v8": "^4.1.4",
-    "eslint": "^10.2.0",
+    "@types/node": "^25.9.1",
+    "@vitest/coverage-v8": "^4.1.8",
+    "eslint": "^10.4.1",
     "express": "^5.2.1",
     "express-rate-limit": "^8.5.2",
-    "helmet": "^8.1.0",
-    "mppx": "^0.6.28",
+    "helmet": "^8.2.0",
+    "mppx": "^0.6.29",
     "pino": "^10.3.1",
     "pino-http": "^11.0.0",
-    "prettier": "^3.8.2",
-    "tsx": "^4.21.0",
+    "prettier": "^3.8.3",
+    "tsx": "^4.22.4",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.58.1",
-    "viem": ">=2.50.4 <2.51.0 || >2.51.0",
-    "vitest": "^4.1.4"
+    "typescript-eslint": "^8.60.1",
+    "viem": "^2.52.0",
+    "vitest": "^4.1.8"
   },
   "pnpm": {
     "overrides": {
       "axios": "^1.16.0",
-      "vite": "^7.3.2"
+      "vite": "^8.0.16"
     }
   },
   "license": "MIT",

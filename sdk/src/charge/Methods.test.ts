@@ -144,7 +144,79 @@ describe('Methods.charge', () => {
     expect(result.methodDetails).toBeUndefined()
   })
 
-  it('credential payload accepts hash type (push)', () => {
+  it('request schema accepts credentialTypes in methodDetails', () => {
+    const result = Methods.charge.schema.request.parse({
+      amount: '100000',
+      currency: 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC',
+      recipient: 'GBXYZ',
+      methodDetails: {
+        network: 'stellar:testnet',
+        credentialTypes: ['signedHash', 'transaction'],
+      },
+    })
+    expect(result.methodDetails?.credentialTypes).toEqual(['signedHash', 'transaction'])
+  })
+
+  it('request schema requires network in methodDetails', () => {
+    const result = Methods.charge.schema.request.parse({
+      amount: '100000',
+      currency: 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC',
+      recipient: 'GBXYZ',
+      methodDetails: {
+        network: 'stellar:testnet',
+        credentialTypes: ['signedHash'],
+      },
+    })
+    expect(result.methodDetails?.network).toBe('stellar:testnet')
+    expect(result.methodDetails?.credentialTypes).toEqual(['signedHash'])
+  })
+
+  it('credential payload accepts signedHash type (push) with both hash and sourceSignature', () => {
+    const hash = 'a'.repeat(64)
+    const sourceSignature = 'b'.repeat(128)
+    const result = Methods.charge.schema.credential.payload.parse({
+      type: 'signedHash',
+      hash,
+      sourceSignature,
+    })
+    expect(result.type).toBe('signedHash')
+    if (result.type === 'signedHash') {
+      expect(result.hash).toBe(hash)
+      expect(result.sourceSignature).toBe(sourceSignature)
+    }
+  })
+
+  it('credential payload rejects signedHash without sourceSignature', () => {
+    const hash = 'a'.repeat(64)
+    expect(() =>
+      Methods.charge.schema.credential.payload.parse({
+        type: 'signedHash',
+        hash,
+      }),
+    ).toThrow()
+  })
+
+  it('credential payload rejects signedHash with invalid hash format', () => {
+    expect(() =>
+      Methods.charge.schema.credential.payload.parse({
+        type: 'signedHash',
+        hash: 'abc123',
+        sourceSignature: 'b'.repeat(128),
+      }),
+    ).toThrow()
+  })
+
+  it('credential payload rejects signedHash with invalid sourceSignature format', () => {
+    expect(() =>
+      Methods.charge.schema.credential.payload.parse({
+        type: 'signedHash',
+        hash: 'a'.repeat(64),
+        sourceSignature: 'xyz',
+      }),
+    ).toThrow()
+  })
+
+  it('credential payload accepts legacy hash type (push receive-only) without sourceSignature', () => {
     const hash = 'a'.repeat(64)
     const result = Methods.charge.schema.credential.payload.parse({
       type: 'hash',
@@ -153,10 +225,28 @@ describe('Methods.charge', () => {
     expect(result.type).toBe('hash')
     if (result.type === 'hash') {
       expect(result.hash).toBe(hash)
+      // sourceSignature should not be present in legacy hash
+      expect(result).not.toHaveProperty('sourceSignature')
     }
   })
 
-  it('credential payload rejects invalid hash format', () => {
+  it('credential payload accepts legacy hash even if extra sourceSignature key is included (stripped by Zod)', () => {
+    const hash = 'a'.repeat(64)
+    const sourceSignature = 'b'.repeat(128)
+    const result = Methods.charge.schema.credential.payload.parse({
+      type: 'hash',
+      hash,
+      sourceSignature, // extra field, should be stripped
+    })
+    expect(result.type).toBe('hash')
+    if (result.type === 'hash') {
+      expect(result.hash).toBe(hash)
+      // sourceSignature should not exist in result
+      expect(result).not.toHaveProperty('sourceSignature')
+    }
+  })
+
+  it('credential payload rejects legacy hash with invalid format', () => {
     expect(() =>
       Methods.charge.schema.credential.payload.parse({
         type: 'hash',
@@ -165,7 +255,7 @@ describe('Methods.charge', () => {
     ).toThrow()
   })
 
-  it('credential payload rejects hash that is not hex', () => {
+  it('credential payload rejects legacy hash that is not hex', () => {
     expect(() =>
       Methods.charge.schema.credential.payload.parse({
         type: 'hash',
@@ -174,7 +264,7 @@ describe('Methods.charge', () => {
     ).toThrow()
   })
 
-  it('credential payload accepts transaction type (pull)', () => {
+  it('credential payload accepts transaction type (pull) unchanged', () => {
     const result = Methods.charge.schema.credential.payload.parse({
       type: 'transaction',
       transaction: 'AAAA...',
@@ -200,5 +290,14 @@ describe('Methods.charge', () => {
       transaction: 'A'.repeat(8192),
     })
     expect(result.type).toBe('transaction')
+  })
+
+  it('credential payload rejects unknown type', () => {
+    expect(() =>
+      Methods.charge.schema.credential.payload.parse({
+        type: 'unknownType',
+        hash: 'a'.repeat(64),
+      }),
+    ).toThrow()
   })
 })

@@ -8,7 +8,7 @@ import {
   nativeToScVal,
   rpc,
 } from '@stellar/stellar-sdk'
-import { Credential, Method, Receipt, Store } from 'mppx'
+import { Method, Receipt, Store } from 'mppx'
 import {
   ALL_ZEROS,
   DEFAULT_DECIMALS,
@@ -36,14 +36,16 @@ import { pollTransaction } from '../../shared/poll.js'
 import { toBaseUnits } from '../../shared/units.js'
 import { simulateCall } from '../../shared/simulate.js'
 import { validateAmount, validateHexSignature } from '../../shared/validation.js'
-import { verifyInvokeContractOp } from '../../shared/verify-invoke.js'
-import { claimOrThrow, releaseClaim } from '../../shared/claim.js'
 import { channel as ChannelMethod } from '../Methods.js'
 import { getChannelState, type ChannelState } from './State.js'
 
 type ChannelCredential = Parameters<Method.VerifyFn<typeof ChannelMethod>>[0]['credential']
-type OpenPayload = Extract<ChannelCredential['payload'], { action: 'open' }>
-type OpenCredential = Credential.Credential<OpenPayload, ChannelCredential['challenge']>
+type CumulativeRecord = {
+  amount: string
+  settling?: boolean
+  settlingAmount?: string
+  settledAt?: string
+}
 
 /**
  * Creates a Stellar one-way-channel method for use on the **server**.
@@ -80,6 +82,13 @@ export function channel(parameters: channel.Parameters) {
     )
   }
 
+  if (typeof parameters.store.update !== 'function') {
+    throw new ChannelVerificationError(
+      `${LOG_PREFIX} An atomic store providing compare-and-set semantics via update() is required for replay protection.`,
+      {},
+    )
+  }
+
   const {
     channel: channelAddress,
     checkOnChainState = true,
@@ -96,6 +105,7 @@ export function channel(parameters: channel.Parameters) {
     rpcUrl,
     simulationTimeoutMs = DEFAULT_SIMULATION_TIMEOUT_MS,
     store,
+    feeBudget,
     logger = noopLogger,
   } = parameters
 
@@ -118,6 +128,12 @@ export function channel(parameters: channel.Parameters) {
   // Track cumulative amounts per channel in the store
   const cumulativeKey = `${STORE_PREFIX}:cumulative:${channelAddress}`
 
+  // Track channel settlement in-progress state. Set under the lock when a close
+  // is accepted, cleared after successful settlement. If settlement fails, the
+  // marker remains to fail-closed: prevent acceptance of new credentials pending
+  // operator reconciliation.
+  const settlingKey = `${STORE_PREFIX}:settling:${channelAddress}`
+
   // Serialize cumulative amount updates to prevent concurrent double-acceptance.
   // Without a transactional store, two concurrent verify calls could both
   // read the same cumulative amount, both pass, and only one write wins.
@@ -131,8 +147,14 @@ export function channel(parameters: channel.Parameters) {
     )
   }
 
+  if (feeBumpKP && !feeBudget) {
+    logger.warn(
+      `${LOG_PREFIX} A fee-bump signer is configured without a feeBudget — sponsor fee spending per funder is not capped. Set feeBudget to bound settlement fee usage in fee-sponsoring deployments.`,
+    )
+  }
+
   logger.info(
-    `${LOG_PREFIX} Initialized. Multi-process deployments require the store to provide atomic put-if-absent semantics for replay protection.`,
+    `${LOG_PREFIX} Initialized. Multi-process deployments require an atomic store.update() compare-and-set implementation for replay protection.`,
   )
 
   return Method.toServer(ChannelMethod, {
@@ -173,7 +195,6 @@ export function channel(parameters: channel.Parameters) {
 
   type ValidatedCredential =
     | { action: 'voucher'; receipt: Receipt.Receipt }
-    | { action: 'open'; credential: OpenCredential; challengeStoreKey: string }
     | {
         action: 'close'
         commitmentAmount: bigint
@@ -187,8 +208,8 @@ export function channel(parameters: channel.Parameters) {
    *
    * Performs replay protection, cumulative amount checks, and signature
    * verification. For vouchers, writes the cumulative and returns the
-   * receipt directly. For close/open, returns the validated state so
-   * the long on-chain operations can run outside the lock.
+   * receipt directly. For close, returns the validated state so
+   * the long on-chain operation can run outside the lock.
    */
   async function doValidate(credential: ChannelCredential): Promise<ValidatedCredential> {
     const { challenge, payload } = credential
@@ -197,7 +218,7 @@ export function channel(parameters: channel.Parameters) {
     const action = payload.action ?? 'voucher'
     const { externalId } = challengeRequest
 
-    // Reject credentials once the channel has been closed on-chain. Applied to all actions including 'open'.
+    // Reject credentials once the channel has been closed on-chain. Applied to all actions.
     const closed = await store.get(`${STORE_PREFIX}:closed:${channelAddress}`)
     if (closed) {
       logger.warn(`${LOG_PREFIX} Rejecting credential — channel already closed`, {
@@ -209,33 +230,53 @@ export function channel(parameters: channel.Parameters) {
       )
     }
 
-    // Replay protection — applied to all actions including 'open'.
-    // Uses a two-layer claim: a synchronous in-process Set prevents
-    // intra-process TOCTOU races (two coroutines in the same event
-    // loop), and the store.get/put handles cross-process visibility.
-    // The challenge is claimed before any expensive RPC work.
+    // Reject all actions if a close is currently settling. The settling marker is set
+    // atomically under the lock when a close is accepted, and remains set until settlement
+    // completes or fails. During settlement, the channel must not accept new credentials.
+    // If settlement fails, the marker stays set to fail-closed: no silent reopening.
+    const settling = await store.get(settlingKey)
+    if (settling) {
+      logger.warn(`${LOG_PREFIX} Rejecting credential — channel is settling`, {
+        channel: channelAddress,
+      })
+      throw new ChannelVerificationError(
+        `${LOG_PREFIX} Channel is settling — no further credentials accepted until settlement completes.`,
+        { channel: channelAddress },
+      )
+    }
+    const cumulativeRecord = await store.get(cumulativeKey)
+    if (
+      cumulativeRecord &&
+      typeof cumulativeRecord === 'object' &&
+      'settling' in cumulativeRecord &&
+      (cumulativeRecord as CumulativeRecord).settling
+    ) {
+      logger.warn(`${LOG_PREFIX} Rejecting credential — channel is settling`, {
+        channel: channelAddress,
+      })
+      throw new ChannelVerificationError(
+        `${LOG_PREFIX} Channel is settling — no further credentials accepted until settlement completes.`,
+        { channel: channelAddress },
+      )
+    }
+
+    // Replay protection via atomic compare-and-set: reject if challenge already used.
+    // Applied to all actions.
     const challengeStoreKey = `${STORE_PREFIX}:challenge:${challenge.id}`
     const replayError = new ChannelVerificationError('Challenge already used. Replay rejected.', {
       channel: channelAddress,
     })
-    claimOrThrow(store, challengeStoreKey, replayError)
-    try {
-      const existingChallenge = await store.get(challengeStoreKey)
-      if (existingChallenge) {
-        releaseClaim(store, challengeStoreKey)
-        throw replayError
-      }
-      await store.put(challengeStoreKey, { state: 'pending', claimedAt: new Date().toISOString() })
-    } catch (err) {
-      releaseClaim(store, challengeStoreKey)
-      throw err
-    }
-    releaseClaim(store, challengeStoreKey)
-
-    // Dispatch open action — it has completely different semantics
-    // (broadcasts an on-chain tx). Return validated state for phase 2.
-    if (action === 'open') {
-      return { action: 'open', credential: credential as OpenCredential, challengeStoreKey }
+    const claimResult = await store.update(challengeStoreKey, (current) =>
+      current
+        ? { op: 'noop', result: 'replay' as const }
+        : {
+            op: 'set',
+            value: { state: 'pending', claimedAt: new Date().toISOString() },
+            result: 'claimed' as const,
+          },
+    )
+    if (claimResult === 'replay') {
+      throw replayError
     }
 
     validateAmount(payload.amount)
@@ -257,49 +298,107 @@ export function channel(parameters: channel.Parameters) {
     }
     const signatureBytes = Buffer.from(signatureHex, 'hex')
 
-    // Retrieve the previous cumulative amount
-    let previousCumulative = 0n
-    const storedCumulative = await store.get(cumulativeKey)
-    if (storedCumulative && typeof storedCumulative === 'object' && 'amount' in storedCumulative) {
-      previousCumulative = BigInt((storedCumulative as { amount: string }).amount)
-    }
-
     validateAmount(challengeRequest.amount)
     const requestedAmount = BigInt(challengeRequest.amount)
 
-    // The new cumulative must be strictly greater than previous cumulative
-    if (commitmentAmount <= previousCumulative) {
-      throw new ChannelVerificationError(
-        `${LOG_PREFIX} Commitment amount ${commitmentAmount} must be greater than previous cumulative ${previousCumulative}.`,
-        {
-          commitmentAmount: commitmentAmount.toString(),
-          previousCumulative: previousCumulative.toString(),
-        },
-      )
-    }
-
-    // The commitment must cover the requested amount
-    if (commitmentAmount < previousCumulative + requestedAmount) {
-      throw new ChannelVerificationError(
-        `${LOG_PREFIX} Commitment amount ${commitmentAmount} does not cover the requested amount ${requestedAmount} (previous cumulative: ${previousCumulative}).`,
-        {
-          commitmentAmount: commitmentAmount.toString(),
-          requestedAmount: requestedAmount.toString(),
-          previousCumulative: previousCumulative.toString(),
-        },
-      )
-    }
-
+    // Verify commitment signature before atomic cumulative update
+    // (async work must complete before the atomic CAS)
     await verifyCommitmentSignature(commitmentAmount, signatureBytes)
 
-    // Close: write cumulative eagerly (signature is valid), settle on-chain in phase 2.
+    // Atomic cumulative monotonic check and write: reject if invariants fail,
+    // or write the new cumulative if all checks pass.
+    type CumulativeResult = { success: true } | { success: false; error: ChannelVerificationError }
+
+    const cumulativeUpdateResult = await store.update(
+      cumulativeKey,
+      (current): Store.Change<CumulativeRecord, CumulativeResult> => {
+        let previousCumulative = 0n
+        if (current && typeof current === 'object' && 'amount' in current) {
+          const record = current as CumulativeRecord
+          if (record.settling) {
+            return {
+              op: 'noop',
+              result: {
+                success: false,
+                error: new ChannelVerificationError(
+                  `${LOG_PREFIX} Channel is settling — no further credentials accepted until settlement completes.`,
+                  { channel: channelAddress },
+                ),
+              },
+            }
+          }
+          previousCumulative = BigInt(record.amount)
+        }
+
+        // The new cumulative must be strictly greater than previous cumulative
+        if (commitmentAmount <= previousCumulative) {
+          return {
+            op: 'noop',
+            result: {
+              success: false,
+              error: new ChannelVerificationError(
+                `${LOG_PREFIX} Commitment amount ${commitmentAmount} must be greater than previous cumulative ${previousCumulative}.`,
+                {
+                  commitmentAmount: commitmentAmount.toString(),
+                  previousCumulative: previousCumulative.toString(),
+                },
+              ),
+            },
+          }
+        }
+
+        // The commitment must cover the requested amount
+        if (commitmentAmount < previousCumulative + requestedAmount) {
+          return {
+            op: 'noop',
+            result: {
+              success: false,
+              error: new ChannelVerificationError(
+                `${LOG_PREFIX} Commitment amount ${commitmentAmount} does not cover the requested amount ${requestedAmount} (previous cumulative: ${previousCumulative}).`,
+                {
+                  commitmentAmount: commitmentAmount.toString(),
+                  requestedAmount: requestedAmount.toString(),
+                  previousCumulative: previousCumulative.toString(),
+                },
+              ),
+            },
+          }
+        }
+
+        // All checks passed, write the new cumulative
+        return {
+          op: 'set',
+          result: { success: true },
+          value:
+            action === 'close'
+              ? {
+                  amount: commitmentAmount.toString(),
+                  settling: true,
+                  settlingAmount: commitmentAmount.toString(),
+                  settledAt: new Date().toISOString(),
+                }
+              : { amount: commitmentAmount.toString() },
+        }
+      },
+    )
+
+    if (!cumulativeUpdateResult.success) {
+      throw cumulativeUpdateResult.error
+    }
+
+    // Close: set settling marker to block new credentials during phase 2 settlement.
+    // Cumulative was already written atomically above. The settling marker remains set
+    // until settlement completes (marker cleared) or fails (marker remains to fail-closed).
     if (action === 'close') {
-      await store.put(cumulativeKey, { amount: commitmentAmount.toString() })
+      await store.put(settlingKey, {
+        settlingAmount: commitmentAmount.toString(),
+        settledAt: new Date().toISOString(),
+      })
       return { action: 'close', commitmentAmount, signatureBytes, challengeStoreKey, externalId }
     }
 
-    // Voucher path: persist cumulative and return receipt directly (no long operation).
-    await store.put(cumulativeKey, { amount: commitmentAmount.toString() })
+    // Voucher path: cumulative was already written atomically above.
+    // Mark the challenge as used and return receipt directly (no long operation).
     await store.put(challengeStoreKey, { state: 'used', usedAt: new Date().toISOString() })
 
     return {
@@ -317,15 +416,13 @@ export function channel(parameters: channel.Parameters) {
   /**
    * Phase 2 — settlement (runs outside the lock).
    *
-   * Handles long on-chain operations: broadcasting close/open transactions
+   * Handles long on-chain operations: broadcasting the close transaction
    * and polling for confirmation. Vouchers return directly from phase 1.
    */
   async function doSettle(validated: ValidatedCredential): Promise<Receipt.Receipt> {
     switch (validated.action) {
       case 'voucher':
         return validated.receipt
-      case 'open':
-        return doVerifyOpen(validated.credential, validated.challengeStoreKey)
       case 'close':
         return doVerifyClose(validated)
     }
@@ -387,6 +484,9 @@ export function channel(parameters: channel.Parameters) {
       })
     }
 
+    // Enforce fee budget before broadcast (fail-safe: charge BEFORE broadcast)
+    await enforceFeeBudget()
+
     const txHash = await broadcastAndPoll(txToSubmit, 'Close')
 
     logger.debug(`${LOG_PREFIX} Channel closed, marking in store`)
@@ -396,132 +496,10 @@ export function channel(parameters: channel.Parameters) {
       amount: commitmentAmount.toString(),
     })
 
-    await store.put(challengeStoreKey, { state: 'used', usedAt: new Date().toISOString() })
+    // Clear settling marker — it is now redundant because the closed marker blocks everything.
+    // This is done for cleanliness after a successful settlement.
+    await store.delete(settlingKey)
 
-    return Receipt.from({
-      method: 'stellar',
-      reference: txHash,
-      status: 'success',
-      timestamp: new Date().toISOString(),
-      ...(externalId ? { externalId } : {}),
-    })
-  }
-
-  /**
-   * Verifies and broadcasts an "open" credential that deploys the channel on-chain.
-   *
-   * Steps:
-   * 1. Enforces amount invariants (positive, covers requested amount).
-   * 2. Rejects replay opens when the channel is already initialised in the store.
-   * 3. Validates the initial commitment signature via `prepare_commitment` simulation.
-   * 4. Parses the client-signed deploy transaction XDR and verifies it targets
-   *    the expected channel contract address.
-   * 5. Optionally wraps in a {@link FeeBumpTransaction} if `feeBumpKP` is configured.
-   * 6. Broadcasts, polls for confirmation, and initialises the cumulative amount in the store.
-   *
-   * @param credential - The open credential containing the signed deploy tx XDR,
-   *   initial commitment amount, and ed25519 signature.
-   * @param challengeStoreKey - Store key used to mark the challenge as consumed
-   *   after successful settlement.
-   * @throws {ChannelVerificationError} On invalid signature, amount invariant
-   *   violation, replay, malformed XDR, contract mismatch, or broadcast failure.
-   */
-  async function doVerifyOpen(credential: OpenCredential, challengeStoreKey: string) {
-    const { challenge, payload } = credential
-    const { externalId } = challenge.request
-    const { transaction: txXdr, amount, signature: signatureHex } = payload
-
-    if (!txXdr || typeof txXdr !== 'string') {
-      throw new ChannelVerificationError(
-        `${LOG_PREFIX} Open action requires a signed transaction XDR.`,
-        {},
-      )
-    }
-
-    // Validate signature format
-    try {
-      validateHexSignature(signatureHex)
-    } catch {
-      throw new ChannelVerificationError(
-        `${LOG_PREFIX} Invalid commitment signature for open action.`,
-        {
-          length: String(signatureHex?.length ?? 0),
-        },
-      )
-    }
-    const signatureBytes = Buffer.from(signatureHex, 'hex')
-
-    // Step 1: Validate amounts
-    validateAmount(challenge.request.amount)
-    const requestedAmount = BigInt(challenge.request.amount)
-
-    validateAmount(amount)
-    const commitmentAmount = BigInt(amount)
-
-    if (commitmentAmount < requestedAmount) {
-      throw new ChannelVerificationError(
-        `${LOG_PREFIX} Commitment amount does not cover requested amount for open action.`,
-        {
-          commitmentAmount: commitmentAmount.toString(),
-          requestedAmount: requestedAmount.toString(),
-        },
-      )
-    }
-
-    // Step 2: Reject if the channel is already opened (cumulativeKey already set).
-    const existingChannel = await store.get(cumulativeKey)
-    if (existingChannel) {
-      throw new ChannelVerificationError(
-        `${LOG_PREFIX} Channel is already open. Cannot replay an open credential.`,
-        { channel: channelAddress },
-      )
-    }
-
-    // Step 3: Verify the initial commitment signature via prepare_commitment simulation
-    await verifyCommitmentSignature(commitmentAmount, signatureBytes)
-
-    // Step 4: Parse and validate the open transaction to ensure it targets the correct channel contract
-    // before broadcasting it.
-    let openTx: Transaction | FeeBumpTransaction
-    try {
-      openTx = TransactionBuilder.fromXDR(txXdr, networkPassphrase)
-    } catch (err) {
-      throw new ChannelVerificationError(`${LOG_PREFIX} Invalid open transaction XDR.`, {
-        error: err instanceof Error ? err.message : String(err),
-      })
-    }
-
-    const innerTx =
-      openTx instanceof FeeBumpTransaction ? openTx.innerTransaction : (openTx as Transaction)
-
-    // Ensure the tx structure is correct:
-    const { contractAddress: targetContract } = verifyInvokeContractOp(innerTx, LOG_PREFIX)
-
-    if (targetContract !== channelAddress) {
-      throw new ChannelVerificationError(
-        `${LOG_PREFIX} Open transaction targets contract ${targetContract}, expected ${channelAddress}.`,
-        { targetContract, expectedContract: channelAddress },
-      )
-    }
-
-    // Step 5: Optionally wrap in a FeeBumpTransaction if feeBumpKP is configured.
-    let txToSubmit = openTx
-    if (feeBumpKP) {
-      txToSubmit = wrapFeeBump(innerTx, feeBumpKP, {
-        networkPassphrase,
-        maxFeeStroops: maxFeeBumpStroops,
-      })
-    }
-
-    // Step 6: Broadcast the transaction and poll for confirmation
-    const txHash = await broadcastAndPoll(txToSubmit, 'Open')
-
-    // Initialise cumulative amount in the store
-    await store.put(cumulativeKey, {
-      amount: commitmentAmount.toString(),
-    })
-
-    // Finalize challenge claim after successful open settlement
     await store.put(challengeStoreKey, { state: 'used', usedAt: new Date().toISOString() })
 
     return Receipt.from({
@@ -582,11 +560,92 @@ export function channel(parameters: channel.Parameters) {
   }
 
   /**
+   * Enforces per-funder fee budget before settlement broadcast.
+   *
+   * If `feeBudget` is configured, checks whether the funder key has exceeded
+   * the maximum stroops within the rolling window. The conservative per-settlement
+   * charge is `maxFeeBumpStroops` (the configured ceiling on network fees).
+   *
+   * Charge is recorded BEFORE broadcast (fail-safe: admitted-but-reverting txs
+   * still cost fees, so we must not under-count).
+   *
+   * @throws {ChannelVerificationError} If the budget is exceeded.
+   */
+  type FeeBudgetRecord = { windowStartMs: number; spentStroops: number }
+
+  async function enforceFeeBudget(): Promise<void> {
+    if (!feeBudget) {
+      // No budget configured — backward compatible behavior.
+      return
+    }
+
+    // Funder key is the public key that actually pays the network fee.
+    // Settlement only runs when an envelope signer is configured, so this is
+    // always defined here; the early return is purely defensive.
+    const funderKey = feeBumpKP?.publicKey() ?? envelopeKP?.publicKey()
+    if (!funderKey) {
+      return
+    }
+
+    const budgetKey = `${STORE_PREFIX}:feebudget:${funderKey}`
+    // Conservative per-settlement charge: the configured ceiling on the network
+    // fee the server may pay for one settlement.
+    const charge = maxFeeBumpStroops
+
+    // Pure transition: returns the updated record or throws if the charge would
+    // exceed the budget. Recording the charge BEFORE broadcast is intentional —
+    // an admitted-but-reverting tx still costs fees, so we must not under-count.
+    const applyCharge = (current: FeeBudgetRecord | null): FeeBudgetRecord => {
+      const now = Date.now()
+      const inWindow = current !== null && now - current.windowStartMs < feeBudget.windowMs
+      const windowStartMs = inWindow ? current.windowStartMs : now
+      const spentStroops = inWindow ? current.spentStroops : 0
+
+      if (spentStroops + charge > feeBudget.maxStroops) {
+        throw new ChannelVerificationError(
+          `${LOG_PREFIX} Fee budget exceeded for funder ${funderKey}: spent ${spentStroops} stroops + charge ${charge} stroops exceeds budget ${feeBudget.maxStroops} stroops within ${feeBudget.windowMs} ms window.`,
+          {
+            funderKey,
+            spentStroops,
+            charge,
+            budgetStroops: feeBudget.maxStroops,
+            windowMs: feeBudget.windowMs,
+          },
+        )
+      }
+
+      return { windowStartMs, spentStroops: spentStroops + charge }
+    }
+
+    // Prefer the store's atomic read-modify-write so the budget holds under
+    // concurrent settlements (which run outside the cumulative lock). Stores
+    // without `update` fall back to get/put — best-effort under cross-process
+    // races, acceptable for a fee-drain guard rather than a hard cap.
+    const atomicStore = store as {
+      update?: (
+        key: string,
+        fn: (current: FeeBudgetRecord | null) => Store.Change<FeeBudgetRecord, void>,
+      ) => Promise<void>
+    }
+
+    if (typeof atomicStore.update === 'function') {
+      await atomicStore.update(budgetKey, (current) => ({
+        op: 'set',
+        value: applyCharge(current),
+        result: undefined,
+      }))
+    } else {
+      const current = (await store.get(budgetKey)) as FeeBudgetRecord | null
+      await store.put(budgetKey, applyCharge(current))
+    }
+  }
+
+  /**
    * Broadcasts a transaction via Soroban RPC, polls for confirmation, and
    * returns the transaction hash on success.
    *
    * @param tx - The signed transaction (or FeeBumpTransaction) to submit.
-   * @param label - Action label for error messages (e.g. "Close", "Open").
+   * @param label - Action label for error messages (e.g. "Close").
    * @throws {ChannelVerificationError} If sendTransaction returns a non-PENDING
    *   status or the polled result is not SUCCESS.
    */
@@ -701,6 +760,9 @@ export function channel(parameters: channel.Parameters) {
  * Transfers the committed amount to the recipient and auto-refunds
  * the remaining balance to the funder. This is a server-side
  * administrative operation.
+ *
+ * Note: this standalone helper is not routed through `verify()`, so any
+ * `feeBudget` configured on the channel server does not apply here.
  */
 export async function close(parameters: {
   /** Channel contract address. */
@@ -827,7 +889,7 @@ export declare namespace channel {
      */
     checkOnChainState?: boolean
     /**
-     * Fee payer configuration for on-chain channel operations (close, open).
+     * Fee payer configuration for on-chain channel operations (close).
      *
      * `envelopeSigner` provides the source account and signs the envelope.
      * `feeBumpSigner` optionally wraps the transaction in a FeeBumpTransaction.
@@ -876,19 +938,56 @@ export declare namespace channel {
     /** Simulation timeout in milliseconds. @default 10_000 */
     simulationTimeoutMs?: number
     /**
-     * Persistent store for replay protection, cumulative amount tracking,
-     * and channel lifecycle state (open/closed).
+     * Persistent atomic store for replay protection, cumulative amount tracking,
+     * and channel lifecycle state (settling/closed).
      *
-     * Required — the channel security model depends entirely on this store.
-     * Without it, replay attacks, non-monotonic commitments, and post-close
-     * voucher acceptance are all possible.
+     * Required — channel state coordination depends on this store. Without it,
+     * duplicate processing, non-monotonic commitments, and post-close voucher
+     * acceptance are all possible.
      *
-     * For multi-process deployments (e.g., multiple Node.js pods behind a
-     * load balancer), the store must provide atomic put-if-absent semantics
-     * to prevent TOCTOU races in replay protection. The in-process
-     * `verifyLock` serializes calls within a single process only.
+     * `update()` must be a **linearizable compare-and-set**: the callback must
+     * observe the latest committed value and its write must commit (or abort) as
+     * one indivisible step, even under concurrent callers across processes. The
+     * constructor verifies that `update()` exists but cannot verify that the
+     * backend implements it correctly — a store that emulates `update()` with a
+     * separate get-then-put, or one backed by an eventually-consistent datastore,
+     * passes the type check while silently dropping the guarantee in multi-process
+     * deployments.
+     *
+     * Reference implementations:
+     * - Single process: `Store.memory()`.
+     * - Multi-process (e.g. multiple pods behind a load balancer): a backend whose
+     *   `update()` maps to a genuine atomic CAS, such as a Redis Lua script or a
+     *   PostgreSQL conditional `UPDATE … WHERE`. A plain get-then-put against a
+     *   shared cache is not sufficient.
      */
-    store: Store.Store
+    store: Store.AtomicStore
+    /**
+     * Optional fee budget to limit server spending on per-funder settlement transactions.
+     * When set, the server tracks the total fees paid per fee-payer key within a rolling
+     * time window. Each close settlement is conservatively charged the
+     * `maxFeeBumpStroops` amount against the budget.
+     *
+     * When unset (default), there is no budget enforcement and behavior is unchanged
+     * (backward compatible).
+     *
+     * The fee payer (funder key) is determined as:
+     * - `feeBumpSigner.publicKey()` if `feeBumpSigner` is set
+     * - Otherwise, `envelopeSigner.publicKey()`
+     *
+     * Budget enforcement runs BEFORE broadcast in `doVerifyClose`.
+     * A settlement rejected for budget exhaustion throws `ChannelVerificationError` with
+     * clear context (funder key, spent, cap, window).
+     *
+     * The fee budget is NOT applied to the standalone exported `close()` function
+     * (operator-initiated admin actions).
+     */
+    feeBudget?: {
+      /** Maximum total stroops the server will spend per funder key within the window. */
+      maxStroops: number
+      /** Rolling time window in milliseconds. */
+      windowMs: number
+    }
     /** Logger for debug/warn messages. @default noopLogger */
     logger?: Logger
   }

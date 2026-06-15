@@ -48,6 +48,7 @@ const mppx = Mppx.create({
       commitmentKey: commitmentPublicKeyG,
       store,
       network: 'stellar:testnet',
+      ...(Env.feePayer ? { feePayer: Env.feePayer } : {}),
       logger,
     }),
   ],

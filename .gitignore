@@ -8,3 +8,7 @@ package-lock.json
 .env
 examples/.env.*
 !examples/.env.*.example
+tmp/
+
+# Local-only security-review and planning scratch — never shipped in the repo
+h1/

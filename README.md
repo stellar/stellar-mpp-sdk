@@ -283,6 +283,10 @@ stellar.channel({
     envelopeSigner: Keypair | string,   // source account + envelope signer
     feeBumpSigner?: Keypair | string,   // wraps tx in FeeBumpTransaction
   },
+  feeBudget?: {                    // cap sponsor fee spend per funder (recommended when feeBumpSigner is set)
+    maxStroops: number,            // max stroops spent per funder key within the window
+    windowMs: number,              // rolling window in ms
+  },
   checkOnChainState?: boolean,    // detect on-chain disputes (default: true)
   onDisputeDetected?: (state) => void, // callback when close_start detected
   maxFeeBumpStroops?: number,     // max fee bump in stroops (default: 10,000,000)
@@ -392,6 +396,8 @@ stellar.charge({
 })
 ```
 
+Replay protection depends on `store.update()` being a linearizable compare-and-set, the same requirement as the channel server (see [Store requirement](#one-way-payment-channels) below). `Store.memory()` is a correct single-process reference; multi-process deployments (multiple pods behind a load balancer) need a backend whose `update()` maps to a genuine atomic CAS and a single shared store across all instances — a per-instance `Store.memory()`, a plain get-then-put against a shared cache, or an eventually-consistent backend is **not** sufficient.
+
 ### Logger
 
 Pass a `logger` to charge or channel servers for structured debug and warning output. The `Logger` interface is compatible with [pino](https://github.com/pinojs/pino) out of the box:
@@ -422,13 +428,22 @@ Payment channels allow many off-chain micro-payments with minimal on-chain trans
 **How it works:**
 
 - The client signs cumulative commitment amounts off-chain using the ed25519 commitment key
+- The client should pin the channel contract with `allowedChannels` so it only signs for trusted channel addresses
+- Before signing, the client verifies the simulated commitment matches the pinned channel, the intended cumulative amount, the expected network, and the channel domain separator
 - The server verifies signatures by simulating `prepare_commitment` on the channel contract and checking the ed25519 signature
-- A `Store` is required on the server to track cumulative amounts across requests
+- An atomic `Store` is required on the server to track cumulative amounts and channel lifecycle state across requests
 - The server can call `close()` on-chain at any time to settle accumulated payments
 
-**Opening a channel via the SDK:**
+The channel contract is deployed out-of-band (e.g. with the `stellar` CLI) before any payments; the SDK handles off-chain vouchers and on-chain close, not channel deployment.
 
-The SDK also supports opening a channel through the MPP 402 flow using the `open` action. The client builds the deploy transaction externally (e.g., `stellar contract deploy --send=no`), then passes it as `openTransaction` context alongside an initial commitment. The server verifies the commitment signature and broadcasts the deploy transaction on-chain. See [`examples/channel-open.ts`](examples/channel-open.ts) for a complete example.
+**Store requirement — `update()` must be a linearizable compare-and-set.**
+
+The channel server's monotonic-amount and lifecycle guarantees depend on `store.update()` performing an _atomic, linearizable_ read-modify-write: the callback must observe the latest committed value and its write must commit (or abort) as one indivisible step, even across concurrent processes. The constructor verifies that `update()` exists, but it cannot verify that your backend implements it correctly — a store that emulates `update()` with a separate get-then-put, or one backed by an eventually-consistent datastore, will satisfy the type check while silently dropping the guarantee in multi-process deployments.
+
+- **Single process:** `Store.memory()` is a correct reference implementation.
+- **Multi-process (multiple pods behind a load balancer):** use a backend whose `update()` maps to a genuine atomic CAS — e.g. a Redis Lua script, or a PostgreSQL conditional `UPDATE … WHERE`. A plain get-then-put against a shared cache is **not** sufficient.
+
+During an on-chain close the channel enters a fail-closed `settling` state and stops accepting credentials. If settlement throws (including an ambiguous timeout where the close may still have landed), the state is intentionally left in place rather than reopened — operators should monitor for stale `settling` markers and reconcile against on-chain state before clearing them.
 
 **On-chain close (server-side):**
 

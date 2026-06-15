@@ -19,13 +19,13 @@ import {
   STELLAR_TESTNET,
   XLM_SAC_TESTNET,
   SOROBAN_RPC_URLS,
-} from '../../constants.js'
-import { wrapFeeBump } from '../../shared/fee-bump.js'
-import { pollTransaction } from '../../shared/poll.js'
-import { resolveNetworkId } from '../../shared/validation.js'
-import { charge as chargeMethod } from '../Methods.js'
-import { charge as serverCharge } from '../server/Charge.js'
-import { charge as clientCharge } from '../client/Charge.js'
+} from '../../../../constants.js'
+import { wrapFeeBump } from '../../../../shared/fee-bump.js'
+import { pollTransaction } from '../../../../shared/poll.js'
+import { resolveNetworkId } from '../../../../shared/validation.js'
+import { charge as chargeMethod } from '../../../Methods.js'
+import { charge as serverCharge } from '../../../server/Charge.js'
+import { charge as clientCharge } from '../../../client/Charge.js'
 
 // All flows share TEST_PAYER so we only fund one payer account per suite run.
 // Consequence: tests are NOT fully independent — the payer's sequence advances
@@ -110,9 +110,12 @@ function feeBumpChargeClient(opts: {
           throw new Error(`Broadcast failed: sendTransaction returned ${result.status}`)
         }
         await pollTransaction(sorobanServer, result.hash, {})
+        const canonicalHash = result.hash.toLowerCase()
+        const bindingMessage = Buffer.from(`${challenge.id}:${canonicalHash}`)
+        const sourceSignature = Buffer.from(payerKP.sign(bindingMessage)).toString('hex')
         return Credential.serialize({
           challenge,
-          payload: { type: 'hash' as const, hash: result.hash },
+          payload: { type: 'signedHash' as const, hash: result.hash, sourceSignature },
           source,
         })
       }

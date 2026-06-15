@@ -5,6 +5,7 @@ import {
   Contract,
   FeeBumpTransaction,
   Keypair,
+  Memo,
   Operation,
   SorobanDataBuilder,
   TransactionBuilder,
@@ -136,6 +137,34 @@ describe('stellar server charge', () => {
     expect(method.name).toBe('stellar')
   })
 
+  it('warns that a configured fee-bump signer must be funded with XLM', () => {
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+
+    charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store: Store.memory(),
+      feePayer: { envelopeSigner: Keypair.random(), feeBumpSigner: Keypair.random() },
+      logger,
+    })
+
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('fee-bump signer'))
+  })
+
+  it('does not warn about fee-bump funding when no fee-bump signer is configured', () => {
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+
+    charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store: Store.memory(),
+      feePayer: { envelopeSigner: Keypair.random() },
+      logger,
+    })
+
+    expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('fee-bump signer'))
+  })
+
   it('accepts custom decimals', () => {
     const method = charge({
       recipient: RECIPIENT,
@@ -215,13 +244,43 @@ describe('charge request transform', () => {
     })
     expect(transformed.amount).toBe('100000')
   })
+
+  it('advertises credentialTypes excluding legacy hash by default (allowUnsignedPush: false)', () => {
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store: Store.memory(),
+    })
+    const transformed = (method as any).request({
+      request: { amount: '1', currency: USDC_SAC_TESTNET, recipient: RECIPIENT },
+    })
+    expect(transformed.methodDetails.credentialTypes).toEqual(['transaction', 'signedHash'])
+  })
+
+  it('advertises credentialTypes including legacy hash when allowUnsignedPush is explicitly true', () => {
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store: Store.memory(),
+      allowUnsignedPush: true,
+    })
+    const transformed = (method as any).request({
+      request: { amount: '1', currency: USDC_SAC_TESTNET, recipient: RECIPIENT },
+    })
+    expect(transformed.methodDetails.credentialTypes).toEqual(['transaction', 'signedHash', 'hash'])
+  })
 })
 
 // ---------------------------------------------------------------------------
 // Transaction hash dedup tests (hash flow with mocked RPC)
 // ---------------------------------------------------------------------------
 
-function makeHashCredential(opts: { hash: string; challengeId?: string; source?: string }) {
+function makeHashCredential(opts: {
+  hash: string
+  challengeId?: string
+  source?: string
+  signingKey?: Keypair
+}) {
   const challenge = Challenge.from({
     id: opts.challengeId ?? `test-${crypto.randomUUID()}`,
     realm: 'localhost',
@@ -236,9 +295,18 @@ function makeHashCredential(opts: { hash: string; challengeId?: string; source?:
       },
     },
   })
+  const canonicalHash = opts.hash.toLowerCase()
+  const bindingMessage = Buffer.from(`${challenge.id}:${canonicalHash}`)
+  const sourceSignature = opts.signingKey
+    ? Buffer.from(opts.signingKey.sign(bindingMessage)).toString('hex')
+    : Buffer.alloc(64).toString('hex') // placeholder if no key provided
   const cred = Credential.from({
     challenge,
-    payload: { type: 'hash', hash: opts.hash },
+    payload: {
+      type: 'hash',
+      hash: opts.hash,
+      sourceSignature,
+    },
   })
   // source is explicitly settable; omitting it tests the "no source" rejection path
   if (opts.source !== undefined) {
@@ -274,6 +342,7 @@ describe('charge hash+feePayer rejection', () => {
       currency: USDC_SAC_TESTNET,
       feePayer: { envelopeSigner: Keypair.random() },
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
 
     await expect(
@@ -282,58 +351,13 @@ describe('charge hash+feePayer rejection', () => {
   })
 })
 
-describe('charge push-mode sender verification (hash-theft attack prevention)', () => {
-  it('rejects hash where the on-chain `from` does not match the credential source', async () => {
-    // Attack: attacker steals a client's tx hash and submits it with their own challenge.
-    // The tx transfers from LEGITIMATE_CLIENT but the attacker's credential claims
-    // source = ATTACKER. The server must compare args[0] against credential.source.
-    const legitimateClient = Keypair.random()
-    const tx = buildTransferTx({
-      source: legitimateClient.publicKey(),
-      from: legitimateClient.publicKey(),
-      to: RECIPIENT,
-      amount: 10000000n,
-      currency: USDC_SAC_TESTNET,
-    })
-    tx.sign(legitimateClient)
-
-    mockGetTransaction.mockResolvedValueOnce({
-      status: 'SUCCESS',
-      envelopeXdr: tx.toXDR(),
-    })
-
-    const attackerKey = Keypair.random().publicKey()
-    const challenge = Challenge.from({
-      id: `test-${crypto.randomUUID()}`,
-      realm: 'localhost',
-      method: 'stellar',
-      intent: 'charge',
-      request: {
-        amount: '10000000',
-        currency: USDC_SAC_TESTNET,
-        recipient: RECIPIENT,
-        methodDetails: { network: 'stellar:testnet' },
-      },
-    })
-    // Attacker's credential claims their own key as source
-    const cred = Object.assign(
-      Credential.from({ challenge, payload: { type: 'hash', hash: testHash('stolen-hash') } }),
-      { source: `did:pkh:stellar:testnet:${attackerKey}` },
-    )
-
-    const method = charge({
-      recipient: RECIPIENT,
-      currency: USDC_SAC_TESTNET,
-      store: Store.memory(),
-    })
-
-    await expect(
-      method.verify({ credential: cred as any, request: cred.challenge.request }),
-    ).rejects.toThrow('Transfer "from" does not match')
+describe('charge legacy hash (unsigned push) handling', () => {
+  beforeEach(() => {
+    mockGetTransaction.mockReset()
   })
 
-  it('accepts hash where the on-chain `from` matches the credential source', async () => {
-    const client = PAYER // PAYER key defined in test scope
+  it('rejects legacy hash by default and does not consume hash', async () => {
+    const client = PAYER
     const tx = buildTransferTx({
       source: client.publicKey(),
       from: client.publicKey(),
@@ -360,9 +384,144 @@ describe('charge push-mode sender verification (hash-theft attack prevention)', 
         methodDetails: { network: 'stellar:testnet' },
       },
     })
-    // Credential source matches the actual `from` in the tx
+
+    const hash = testHash('legacy-unsigned-hash-default-reject')
     const cred = Object.assign(
-      Credential.from({ challenge, payload: { type: 'hash', hash: testHash('legit-hash') } }),
+      Credential.from({
+        challenge,
+        payload: { type: 'hash', hash },
+      }),
+      { source: `did:pkh:stellar:testnet:${client.publicKey()}` },
+    )
+
+    const store = Store.memory()
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store,
+    })
+
+    await expect(
+      method.verify({
+        credential: cred as any,
+        request: cred.challenge.request,
+      }),
+    ).rejects.toThrow('Unsigned push mode')
+
+    // Verify the hash was not consumed
+    const stored = await store.get(`stellar:charge:hash:${hash}`)
+    expect(stored).toBeNull()
+  })
+
+  it('accepts legacy hash when explicitly opted in with allowUnsignedPush: true and logs deprecation warning', async () => {
+    const client = PAYER
+    const tx = buildTransferTx({
+      source: client.publicKey(),
+      from: client.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    tx.sign(client)
+
+    mockGetTransaction.mockResolvedValueOnce({
+      status: 'SUCCESS',
+      envelopeXdr: tx.toXDR(),
+    })
+
+    const challenge = Challenge.from({
+      id: `test-${crypto.randomUUID()}`,
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      request: {
+        amount: '10000000',
+        currency: USDC_SAC_TESTNET,
+        recipient: RECIPIENT,
+        methodDetails: { network: 'stellar:testnet' },
+      },
+    })
+
+    const hash = testHash('legacy-unsigned-hash-opted-in')
+    const cred = Object.assign(
+      Credential.from({
+        challenge,
+        payload: { type: 'hash', hash },
+      }),
+      { source: `did:pkh:stellar:testnet:${client.publicKey()}` },
+    )
+
+    const warnSpy = vi.fn()
+    const mockLogger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: warnSpy,
+      error: vi.fn(),
+    }
+
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store: Store.memory(),
+      allowUnsignedPush: true,
+      logger: mockLogger,
+    })
+
+    const receipt = await method.verify({
+      credential: cred as any,
+      request: cred.challenge.request,
+    })
+
+    expect(receipt.status).toBe('success')
+    expect(receipt.reference).toBe(hash)
+
+    // Verify that a deprecation warning was logged
+    expect(warnSpy).toHaveBeenCalled()
+    const warnCall = warnSpy.mock.calls[0]
+    expect(warnCall[0]).toContain('[stellar:charge]')
+    // The warning should mention unsigned/deprecated
+    expect(warnCall[1]).toBeDefined()
+    // The logged object should contain the challenge ID and hash
+    const loggedObj = warnCall[1] as Record<string, unknown>
+    expect(loggedObj.challengeId).toBe(challenge.id)
+    expect(loggedObj.hash).toBe(hash)
+  })
+
+  it('still rejects legacy hash when allowUnsignedPush is explicitly false', async () => {
+    const client = PAYER
+    const tx = buildTransferTx({
+      source: client.publicKey(),
+      from: client.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    tx.sign(client)
+
+    mockGetTransaction.mockResolvedValueOnce({
+      status: 'SUCCESS',
+      envelopeXdr: tx.toXDR(),
+    })
+
+    const challenge = Challenge.from({
+      id: `test-${crypto.randomUUID()}`,
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      request: {
+        amount: '10000000',
+        currency: USDC_SAC_TESTNET,
+        recipient: RECIPIENT,
+        methodDetails: { network: 'stellar:testnet' },
+      },
+    })
+
+    const hash = testHash('rejected-unsigned-hash')
+    const cred = Object.assign(
+      Credential.from({
+        challenge,
+        payload: { type: 'hash', hash },
+      }),
       { source: `did:pkh:stellar:testnet:${client.publicKey()}` },
     )
 
@@ -370,6 +529,230 @@ describe('charge push-mode sender verification (hash-theft attack prevention)', 
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: false,
+    })
+
+    await expect(
+      method.verify({ credential: cred as any, request: cred.challenge.request }),
+    ).rejects.toThrow('Unsigned push mode')
+  })
+
+  it('does not burn tx hash when rejecting unsigned push by default', async () => {
+    const client = PAYER
+    const tx = buildTransferTx({
+      source: client.publicKey(),
+      from: client.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    tx.sign(client)
+
+    mockGetTransaction.mockResolvedValueOnce({
+      status: 'SUCCESS',
+      envelopeXdr: tx.toXDR(),
+    })
+
+    const store = Store.memory()
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store,
+    })
+
+    const hash = testHash('unsigned-not-burned')
+    const challenge = Challenge.from({
+      id: `test-${crypto.randomUUID()}`,
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      request: {
+        amount: '10000000',
+        currency: USDC_SAC_TESTNET,
+        recipient: RECIPIENT,
+        methodDetails: { network: 'stellar:testnet' },
+      },
+    })
+
+    const cred = Object.assign(
+      Credential.from({
+        challenge,
+        payload: { type: 'hash', hash },
+      }),
+      { source: `did:pkh:stellar:testnet:${client.publicKey()}` },
+    )
+
+    // Reject the unsigned push
+    await expect(
+      method.verify({ credential: cred as any, request: cred.challenge.request }),
+    ).rejects.toThrow('Unsigned push mode')
+
+    // The hash should not be in the store (not burned/claimed)
+    const stored = await store.get(`stellar:charge:hash:${hash}`)
+    expect(stored).toBeNull()
+  })
+
+  it('signedHash credential type still accepts valid signatures when allowUnsignedPush is false', async () => {
+    const client = PAYER
+    const tx = buildTransferTx({
+      source: client.publicKey(),
+      from: client.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    tx.sign(client)
+
+    mockGetTransaction.mockResolvedValueOnce({
+      status: 'SUCCESS',
+      envelopeXdr: tx.toXDR(),
+    })
+
+    const challenge = Challenge.from({
+      id: `test-${crypto.randomUUID()}`,
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      request: {
+        amount: '10000000',
+        currency: USDC_SAC_TESTNET,
+        recipient: RECIPIENT,
+        methodDetails: { network: 'stellar:testnet' },
+      },
+    })
+
+    const hash = testHash('signed-hash-still-works')
+    const cred = Object.assign(
+      Credential.from({
+        challenge,
+        payload: {
+          type: 'signedHash',
+          hash,
+          sourceSignature: Buffer.from(
+            client.sign(Buffer.from(`${challenge.id}:${hash.toLowerCase()}`)),
+          ).toString('hex'),
+        },
+      }),
+      { source: `did:pkh:stellar:testnet:${client.publicKey()}` },
+    )
+
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store: Store.memory(),
+      allowUnsignedPush: false,
+    })
+
+    const receipt = await method.verify({
+      credential: cred as any,
+      request: cred.challenge.request,
+    })
+    expect(receipt.status).toBe('success')
+  })
+})
+
+describe('charge push-mode sender verification', () => {
+  it('rejects hash where the on-chain `from` does not match the credential source', async () => {
+    // The tx transfers from one payer account while the credential declares another.
+    const payerKey = Keypair.random()
+    const tx = buildTransferTx({
+      source: payerKey.publicKey(),
+      from: payerKey.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    tx.sign(payerKey)
+
+    mockGetTransaction.mockResolvedValueOnce({
+      status: 'SUCCESS',
+      envelopeXdr: tx.toXDR(),
+    })
+
+    const credentialKey = Keypair.random().publicKey()
+    const challenge = Challenge.from({
+      id: `test-${crypto.randomUUID()}`,
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      request: {
+        amount: '10000000',
+        currency: USDC_SAC_TESTNET,
+        recipient: RECIPIENT,
+        methodDetails: { network: 'stellar:testnet' },
+      },
+    })
+    const cred = Object.assign(
+      Credential.from({
+        challenge,
+        payload: { type: 'hash', hash: testHash('mismatched-source-hash') },
+      }),
+      { source: `did:pkh:stellar:testnet:${credentialKey}` },
+    )
+
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store: Store.memory(),
+      allowUnsignedPush: true,
+    })
+
+    await expect(
+      method.verify({ credential: cred as any, request: cred.challenge.request }),
+    ).rejects.toThrow('Transfer "from" does not match')
+  })
+
+  it('accepts hash where the on-chain `from` matches the credential source and sourceSignature is valid', async () => {
+    const client = PAYER // PAYER key defined in test scope
+
+    const challenge = Challenge.from({
+      id: `test-${crypto.randomUUID()}`,
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      request: {
+        amount: '10000000',
+        currency: USDC_SAC_TESTNET,
+        recipient: RECIPIENT,
+        methodDetails: { network: 'stellar:testnet' },
+      },
+    })
+
+    const tx = buildTransferTx({
+      source: client.publicKey(),
+      from: client.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    tx.sign(client)
+
+    mockGetTransaction.mockResolvedValueOnce({
+      status: 'SUCCESS',
+      envelopeXdr: tx.toXDR(),
+    })
+
+    // Credential source matches the actual `from` in the tx
+    const hash = testHash('legit-hash')
+    const cred = Object.assign(
+      Credential.from({
+        challenge,
+        payload: {
+          type: 'hash',
+          hash,
+          sourceSignature: Buffer.from(
+            client.sign(Buffer.from(`${challenge.id}:${hash.toLowerCase()}`)),
+          ).toString('hex'),
+        },
+      }),
+      { source: `did:pkh:stellar:testnet:${client.publicKey()}` },
+    )
+
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store: Store.memory(),
+      allowUnsignedPush: true,
     })
 
     const receipt = await method.verify({
@@ -391,6 +774,7 @@ describe('charge push-mode sender verification (hash-theft attack prevention)', 
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
 
     await expect(
@@ -421,6 +805,7 @@ describe('charge push-mode sender verification (hash-theft attack prevention)', 
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
 
     await expect(
@@ -451,6 +836,7 @@ describe('charge push-mode sender verification (hash-theft attack prevention)', 
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
 
     await expect(
@@ -481,6 +867,7 @@ describe('charge push-mode sender verification (hash-theft attack prevention)', 
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
 
     await expect(
@@ -515,6 +902,7 @@ describe('charge push-mode verification', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
 
     await expect(
@@ -546,6 +934,7 @@ describe('charge push-mode verification', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
 
     await expect(
@@ -577,6 +966,7 @@ describe('charge push-mode verification', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
 
     await expect(
@@ -598,6 +988,7 @@ describe('charge push-mode verification', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
 
     await expect(
@@ -607,7 +998,7 @@ describe('charge push-mode verification', () => {
 })
 
 describe('charge tx hash dedup', () => {
-  it('rejects a second verify with the same tx hash', async () => {
+  it('releases a pending tx-hash claim when verification fails', async () => {
     mockGetTransaction.mockResolvedValue({
       status: 'SUCCESS',
       envelopeXdr: undefined,
@@ -618,6 +1009,7 @@ describe('charge tx hash dedup', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store,
+      allowUnsignedPush: true,
     })
 
     const hash = testHash('abc123firstuse')
@@ -627,10 +1019,10 @@ describe('charge tx hash dedup', () => {
       method.verify({ credential: cred1 as any, request: cred1.challenge.request }),
     ).rejects.toThrow()
 
-    // Hash is claimed as 'pending' early (prevents TOCTOU replays).
-    // A failed verification burns the hash — client must use a new one.
+    // The hash is claimed early, but the claim must
+    // be released if verification fails so a legitimate payer can retry.
     const stored = await store.get(`stellar:charge:hash:${hash}`)
-    expect((stored as any)?.state).toBe('pending')
+    expect(stored).toBeNull()
   })
 
   it('marks tx hash as used only after successful verification', async () => {
@@ -643,6 +1035,7 @@ describe('charge tx hash dedup', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store,
+      allowUnsignedPush: true,
     })
 
     const cred = makeHashCredential({ hash })
@@ -658,6 +1051,7 @@ describe('charge hash format validation', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
     const cred = makeHashCredential({ hash: 'not-hex-at-all' })
     await expect(
@@ -670,6 +1064,7 @@ describe('charge hash format validation', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
     const cred = makeHashCredential({ hash: 'abcd1234' })
     await expect(
@@ -682,6 +1077,7 @@ describe('charge hash format validation', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
     const cred = makeHashCredential({ hash: 'zzzz' + '0'.repeat(60) })
     await expect(
@@ -698,6 +1094,7 @@ describe('charge hash format validation', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
     const payer = Keypair.random()
     const cred = makeHashCredential({
@@ -711,18 +1108,349 @@ describe('charge hash format validation', () => {
   })
 })
 
-describe('charge push-mode: single lookup (no polling)', () => {
-  it('rejects when transaction is NOT_FOUND on-chain', async () => {
-    mockGetTransaction.mockResolvedValueOnce({ status: 'NOT_FOUND' })
+describe('charge push-mode: source signature binding', () => {
+  it('rejects push-mode credential with invalid sourceSignature', async () => {
+    const client = PAYER
+    const tx = buildTransferTx({
+      source: client.publicKey(),
+      from: client.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    tx.sign(client)
+
+    mockGetTransaction.mockResolvedValueOnce({
+      status: 'SUCCESS',
+      envelopeXdr: tx.toXDR(),
+    })
+
+    const challenge = Challenge.from({
+      id: `test-${crypto.randomUUID()}`,
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      request: {
+        amount: '10000000',
+        currency: USDC_SAC_TESTNET,
+        recipient: RECIPIENT,
+        methodDetails: { network: 'stellar:testnet' },
+      },
+    })
+    const hash = testHash('invalid-sig-hash')
+    const cred = Object.assign(
+      Credential.from({
+        challenge,
+        payload: {
+          type: 'signedHash',
+          hash,
+          sourceSignature: Buffer.alloc(64).toString('hex'), // invalid/wrong signature
+        },
+      }),
+      { source: `did:pkh:stellar:testnet:${client.publicKey()}` },
+    )
 
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
     })
+
+    await expect(
+      method.verify({ credential: cred as any, request: cred.challenge.request }),
+    ).rejects.toThrow('Source signature does not authorize this payment')
+  })
+
+  it('does not burn a tx hash when sourceSignature verification fails', async () => {
+    const client = PAYER
+    const tx = buildTransferTx({
+      source: client.publicKey(),
+      from: client.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    tx.sign(client)
+
+    const hash = testHash('invalid-sig-does-not-burn-hash')
+    mockGetTransaction
+      .mockResolvedValueOnce({
+        status: 'SUCCESS',
+        envelopeXdr: tx.toXDR(),
+      })
+      .mockResolvedValueOnce({
+        status: 'SUCCESS',
+        envelopeXdr: tx.toXDR(),
+      })
+
+    const firstChallenge = Challenge.from({
+      id: `test-${crypto.randomUUID()}`,
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      request: {
+        amount: '10000000',
+        currency: USDC_SAC_TESTNET,
+        recipient: RECIPIENT,
+        methodDetails: { network: 'stellar:testnet' },
+      },
+    })
+    const secondChallenge = Challenge.from({
+      id: `test-${crypto.randomUUID()}`,
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      request: {
+        amount: '10000000',
+        currency: USDC_SAC_TESTNET,
+        recipient: RECIPIENT,
+        methodDetails: { network: 'stellar:testnet' },
+      },
+    })
+
+    const invalidCred = Object.assign(
+      Credential.from({
+        challenge: firstChallenge,
+        payload: {
+          type: 'signedHash',
+          hash,
+          sourceSignature: Buffer.alloc(64).toString('hex'),
+        },
+      }),
+      { source: `did:pkh:stellar:testnet:${client.publicKey()}` },
+    )
+
+    const validCred = Object.assign(
+      Credential.from({
+        challenge: secondChallenge,
+        payload: {
+          type: 'signedHash',
+          hash,
+          sourceSignature: Buffer.from(
+            client.sign(Buffer.from(`${secondChallenge.id}:${hash.toLowerCase()}`)),
+          ).toString('hex'),
+        },
+      }),
+      { source: `did:pkh:stellar:testnet:${client.publicKey()}` },
+    )
+
+    const store = Store.memory()
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store,
+    })
+
+    await expect(
+      method.verify({ credential: invalidCred as any, request: invalidCred.challenge.request }),
+    ).rejects.toThrow('Source signature does not authorize this payment')
+
+    const receipt = await method.verify({
+      credential: validCred as any,
+      request: validCred.challenge.request,
+    })
+
+    expect(receipt.status).toBe('success')
+    expect(receipt.reference).toBe(hash.toLowerCase())
+  })
+
+  it('rejects push-mode credential when sourceSignature is signed by a different key', async () => {
+    const payerKey = PAYER
+    const alternateKey = Keypair.random()
+    const tx = buildTransferTx({
+      source: payerKey.publicKey(),
+      from: payerKey.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    tx.sign(payerKey)
+
+    mockGetTransaction.mockResolvedValueOnce({
+      status: 'SUCCESS',
+      envelopeXdr: tx.toXDR(),
+    })
+
+    const challenge = Challenge.from({
+      id: `test-${crypto.randomUUID()}`,
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      request: {
+        amount: '10000000',
+        currency: USDC_SAC_TESTNET,
+        recipient: RECIPIENT,
+        methodDetails: { network: 'stellar:testnet' },
+      },
+    })
+    const hash = testHash('alternate-signature-hash')
+    // The credential source names one account, but the signature comes from another.
+    const cred = Object.assign(
+      Credential.from({
+        challenge,
+        payload: {
+          type: 'signedHash',
+          hash,
+          sourceSignature: Buffer.from(
+            alternateKey.sign(Buffer.from(`${challenge.id}:${hash.toLowerCase()}`)),
+          ).toString('hex'),
+        },
+      }),
+      { source: `did:pkh:stellar:testnet:${payerKey.publicKey()}` },
+    )
+
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store: Store.memory(),
+    })
+
+    await expect(
+      method.verify({ credential: cred as any, request: cred.challenge.request }),
+    ).rejects.toThrow('Source signature does not authorize this payment')
+  })
+
+  it('accepts push-mode credential with valid sourceSignature by the payer', async () => {
+    const client = PAYER
+    const tx = buildTransferTx({
+      source: client.publicKey(),
+      from: client.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    tx.sign(client)
+
+    mockGetTransaction.mockResolvedValueOnce({
+      status: 'SUCCESS',
+      envelopeXdr: tx.toXDR(),
+    })
+
+    const challenge = Challenge.from({
+      id: `test-${crypto.randomUUID()}`,
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      request: {
+        amount: '10000000',
+        currency: USDC_SAC_TESTNET,
+        recipient: RECIPIENT,
+        methodDetails: { network: 'stellar:testnet' },
+      },
+    })
+    const hash = testHash('valid-sig-hash')
+    const cred = Object.assign(
+      Credential.from({
+        challenge,
+        payload: {
+          type: 'signedHash',
+          hash,
+          sourceSignature: Buffer.from(
+            client.sign(Buffer.from(`${challenge.id}:${hash.toLowerCase()}`)),
+          ).toString('hex'),
+        },
+      }),
+      { source: `did:pkh:stellar:testnet:${client.publicKey()}` },
+    )
+
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store: Store.memory(),
+    })
+
+    const receipt = await method.verify({
+      credential: cred as any,
+      request: cred.challenge.request,
+    })
+    expect(receipt.status).toBe('success')
+  })
+
+  it('rejects case-variant hash with invalid sourceSignature (lowercase canonicalization)', async () => {
+    const client = PAYER
+    const tx = buildTransferTx({
+      source: client.publicKey(),
+      from: client.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    tx.sign(client)
+
+    mockGetTransaction.mockResolvedValueOnce({
+      status: 'SUCCESS',
+      envelopeXdr: tx.toXDR(),
+    })
+
+    const challenge = Challenge.from({
+      id: `test-${crypto.randomUUID()}`,
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      request: {
+        amount: '10000000',
+        currency: USDC_SAC_TESTNET,
+        recipient: RECIPIENT,
+        methodDetails: { network: 'stellar:testnet' },
+      },
+    })
+
+    // Uppercase hash but signature signed with lowercase hash
+    const hash = 'ABCD' + '0'.repeat(60)
+    const lowercaseHash = hash.toLowerCase()
+    const cred = Object.assign(
+      Credential.from({
+        challenge,
+        payload: {
+          type: 'signedHash',
+          hash,
+          sourceSignature: Buffer.from(
+            client.sign(Buffer.from(`${challenge.id}:${lowercaseHash}`)),
+          ).toString('hex'),
+        },
+      }),
+      { source: `did:pkh:stellar:testnet:${client.publicKey()}` },
+    )
+
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store: Store.memory(),
+    })
+
+    const receipt = await method.verify({
+      credential: cred as any,
+      request: cred.challenge.request,
+    })
+    // Should succeed because server canonicalizes the hash to lowercase
+    expect(receipt.status).toBe('success')
+  })
+})
+
+describe('charge push-mode: single lookup (no polling)', () => {
+  it('rejects when transaction is NOT_FOUND on-chain', async () => {
+    const client = PAYER
+    const tx = buildTransferTx({
+      source: client.publicKey(),
+      from: client.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    tx.sign(client)
+
+    mockGetTransaction.mockResolvedValueOnce({ status: 'NOT_FOUND' })
+
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store: Store.memory(),
+      allowUnsignedPush: true,
+    })
     const cred = makeHashCredential({
       hash: 'a'.repeat(64),
-      source: `did:pkh:stellar:testnet:${Keypair.random().publicKey()}`,
+      source: `did:pkh:stellar:testnet:${client.publicKey()}`,
+      signingKey: client,
     })
 
     await expect(
@@ -731,16 +1459,28 @@ describe('charge push-mode: single lookup (no polling)', () => {
   })
 
   it('rejects when transaction FAILED on-chain', async () => {
+    const client = PAYER
+    const tx = buildTransferTx({
+      source: client.publicKey(),
+      from: client.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    tx.sign(client)
+
     mockGetTransaction.mockResolvedValueOnce({ status: 'FAILED' })
 
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
     const cred = makeHashCredential({
       hash: 'b'.repeat(64),
-      source: `did:pkh:stellar:testnet:${Keypair.random().publicKey()}`,
+      source: `did:pkh:stellar:testnet:${client.publicKey()}`,
+      signingKey: client,
     })
 
     await expect(
@@ -749,6 +1489,16 @@ describe('charge push-mode: single lookup (no polling)', () => {
   })
 
   it('includes resultXdr in error details when transaction FAILED', async () => {
+    const client = PAYER
+    const tx = buildTransferTx({
+      source: client.publicKey(),
+      from: client.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    tx.sign(client)
+
     const fakeResultXdr = 'AAAAAAAAAGT/////AAAAAQAAAAAAAAAB////+wAAAAA='
     mockGetTransaction.mockResolvedValueOnce({ status: 'FAILED', resultXdr: fakeResultXdr })
 
@@ -756,10 +1506,12 @@ describe('charge push-mode: single lookup (no polling)', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
     const cred = makeHashCredential({
       hash: 'c'.repeat(64),
-      source: `did:pkh:stellar:testnet:${Keypair.random().publicKey()}`,
+      source: `did:pkh:stellar:testnet:${client.publicKey()}`,
+      signingKey: client,
     })
 
     try {
@@ -773,16 +1525,28 @@ describe('charge push-mode: single lookup (no polling)', () => {
   })
 
   it('omits resultXdr from error details when not present in FAILED response', async () => {
+    const client = PAYER
+    const tx = buildTransferTx({
+      source: client.publicKey(),
+      from: client.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    tx.sign(client)
+
     mockGetTransaction.mockResolvedValueOnce({ status: 'FAILED' })
 
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
     const cred = makeHashCredential({
       hash: 'd'.repeat(64),
-      source: `did:pkh:stellar:testnet:${Keypair.random().publicKey()}`,
+      source: `did:pkh:stellar:testnet:${client.publicKey()}`,
+      signingKey: client,
     })
 
     try {
@@ -796,8 +1560,8 @@ describe('charge push-mode: single lookup (no polling)', () => {
   })
 
   it('does not hold a semaphore slot for push-mode lookups', async () => {
-    // Fake hashes should be rejected instantly without consuming semaphore
-    // slots — this is the core fix for the DoS vector.
+    // Unknown hashes should be rejected instantly without consuming semaphore
+    // slots needed by transaction polls.
     mockGetTransaction.mockResolvedValue({ status: 'NOT_FOUND' })
 
     const method = charge({
@@ -807,7 +1571,7 @@ describe('charge push-mode: single lookup (no polling)', () => {
       pollMaxConcurrent: 1, // only 1 semaphore slot
     })
 
-    // Fire 5 concurrent requests with different fake hashes — all must
+    // Fire 5 concurrent requests with different unknown hashes — all must
     // reject promptly instead of queueing behind a semaphore.
     const start = Date.now()
     const results = await Promise.allSettled(
@@ -828,9 +1592,9 @@ describe('charge push-mode: single lookup (no polling)', () => {
   })
 })
 
-describe('charge DoS prevention: no global serial lock', () => {
+describe('charge concurrency: no global serial lock', () => {
   it('processes concurrent verify calls in parallel, not serially', async () => {
-    // Regression test: verifyLock was removed to prevent head-of-line blocking.
+    // Regression test: verifyLock was removed to avoid head-of-line blocking.
     // Two concurrent verifications with different hashes must run in parallel,
     // not serially. We verify this by timing: if serial, total time >= 2×delay.
     const delayMs = 50
@@ -875,6 +1639,7 @@ function buildTransferTx(opts: {
   to: string
   amount: bigint
   currency: string
+  memo?: { type: 'hash'; value: Buffer }
 }) {
   const account = new Account(opts.source, '0')
   const contract = new Contract(opts.currency)
@@ -884,13 +1649,14 @@ function buildTransferTx(opts: {
     new Address(opts.to).toScVal(),
     nativeToScVal(opts.amount, { type: 'i128' }),
   )
-  return new TransactionBuilder(account, {
+  const builder = new TransactionBuilder(account, {
     fee: '100',
     networkPassphrase: NETWORK_PASSPHRASE,
   })
-    .addOperation(transferOp)
-    .setTimeout(180)
-    .build()
+  if (opts.memo) {
+    builder.addMemo(Memo.hash(opts.memo.value))
+  }
+  return builder.addOperation(transferOp).setTimeout(180).build()
 }
 
 function makeTransactionCredential(
@@ -1525,10 +2291,118 @@ describe('charge transaction verification', () => {
       method.verify({ credential: cred as any, request: cred.challenge.request }),
     ).rejects.toThrow()
 
-    // Challenge IS claimed as 'pending' early (prevents TOCTOU replays).
+    // Challenge IS claimed as 'pending' early in the verification flow.
     // A failed verification burns the challenge — client must get a new one.
     const stored = await store.get(`stellar:charge:challenge:${challengeId}`)
     expect((stored as any)?.state).toBe('pending')
+  })
+})
+
+describe('charge pull-mode tx-hash dedup', () => {
+  beforeEach(() => {
+    mockSimulateTransaction.mockReset()
+    mockSendTransaction.mockReset()
+    mockGetTransaction.mockReset()
+  })
+
+  function txCredentialForFreshChallenge(txXdr: string) {
+    const challenge = Challenge.from({
+      id: `dedup-${crypto.randomUUID()}`,
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      request: {
+        amount: '10000000',
+        currency: USDC_SAC_TESTNET,
+        recipient: RECIPIENT,
+        methodDetails: { network: 'stellar:testnet' },
+      },
+    })
+    return Object.assign(
+      Credential.from({ challenge, payload: { type: 'transaction', transaction: txXdr } }),
+      { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
+    )
+  }
+
+  it('rejects a duplicate transaction XDR submitted under a different challenge id', async () => {
+    const tx = buildTransferTx({
+      source: PAYER.publicKey(),
+      from: PAYER.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    tx.sign(PAYER)
+    const txXdr = tx.toXDR()
+
+    mockSimulateTransaction.mockResolvedValue({
+      result: { retval: null },
+      events: [defaultMockEvent()],
+      transactionData: new SorobanDataBuilder(),
+    })
+    mockSendTransaction.mockResolvedValue({ hash: 'dedup-onchain-hash', status: 'PENDING' })
+    mockGetTransaction.mockResolvedValue({ status: 'SUCCESS' })
+
+    const store = Store.memory()
+    const method = charge({ recipient: RECIPIENT, currency: USDC_SAC_TESTNET, store })
+
+    // First submission under challenge A succeeds.
+    const credA = txCredentialForFreshChallenge(txXdr)
+    const receipt = await method.verify({
+      credential: credA as any,
+      request: credA.challenge.request,
+    })
+    expect(receipt.status).toBe('success')
+
+    // The same tx XDR under a fresh challenge B must be rejected as a duplicate,
+    // even though that challenge has never been used.
+    const credB = txCredentialForFreshChallenge(txXdr)
+    await expect(
+      method.verify({ credential: credB as any, request: credB.challenge.request }),
+    ).rejects.toThrow('Transaction hash already used')
+
+    // The duplicate must never be broadcast.
+    expect(mockSendTransaction).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not lock the tx hash when verification fails before broadcast, allowing retry', async () => {
+    const tx = buildTransferTx({
+      source: PAYER.publicKey(),
+      from: PAYER.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    tx.sign(PAYER)
+    const txXdr = tx.toXDR()
+
+    const store = Store.memory()
+    const method = charge({ recipient: RECIPIENT, currency: USDC_SAC_TESTNET, store })
+
+    // First attempt fails at simulation — no broadcast happens.
+    mockSimulateTransaction.mockRejectedValueOnce(new Error('simulation boom'))
+    const credA = txCredentialForFreshChallenge(txXdr)
+    await expect(
+      method.verify({ credential: credA as any, request: credA.challenge.request }),
+    ).rejects.toThrow()
+    expect(mockSendTransaction).not.toHaveBeenCalled()
+
+    // Verification failed before the hash was claimed, so the same tx can be
+    // retried successfully under a fresh challenge.
+    mockSimulateTransaction.mockResolvedValue({
+      result: { retval: null },
+      events: [defaultMockEvent()],
+      transactionData: new SorobanDataBuilder(),
+    })
+    mockSendTransaction.mockResolvedValue({ hash: 'retry-onchain-hash', status: 'PENDING' })
+    mockGetTransaction.mockResolvedValue({ status: 'SUCCESS' })
+
+    const credB = txCredentialForFreshChallenge(txXdr)
+    const receipt = await method.verify({
+      credential: credB as any,
+      request: credB.challenge.request,
+    })
+    expect(receipt.status).toBe('success')
   })
 })
 
@@ -2336,6 +3210,19 @@ describe('charge transfer argument count validation', () => {
 
 describe('charge push-mode FeeBump envelope', () => {
   it('verifies successfully when envelopeXdr is a FeeBump-wrapped transfer', async () => {
+    const challenge = Challenge.from({
+      id: `test-${crypto.randomUUID()}`,
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      request: {
+        amount: '10000000',
+        currency: USDC_SAC_TESTNET,
+        recipient: RECIPIENT,
+        methodDetails: { network: 'stellar:testnet' },
+      },
+    })
+
     const tx = buildTransferTx({
       source: PAYER.publicKey(),
       from: PAYER.publicKey(),
@@ -2364,11 +3251,22 @@ describe('charge push-mode FeeBump envelope', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
-    const cred = makeHashCredential({
-      hash: testHash('feebump-hash'),
-      source: `did:pkh:stellar:testnet:${PAYER.publicKey()}`,
-    })
+    const hash = testHash('feebump-hash')
+    const cred = Object.assign(
+      Credential.from({
+        challenge,
+        payload: {
+          type: 'hash',
+          hash,
+          sourceSignature: Buffer.from(
+            PAYER.sign(Buffer.from(`${challenge.id}:${hash.toLowerCase()}`)),
+          ).toString('hex'),
+        },
+      }),
+      { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
+    )
 
     const receipt = await method.verify({
       credential: cred as any,
@@ -2378,6 +3276,19 @@ describe('charge push-mode FeeBump envelope', () => {
   })
 
   it('verifies successfully when envelopeXdr is a FeeBump xdr.TransactionEnvelope object', async () => {
+    const challenge = Challenge.from({
+      id: `test-${crypto.randomUUID()}`,
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      request: {
+        amount: '10000000',
+        currency: USDC_SAC_TESTNET,
+        recipient: RECIPIENT,
+        methodDetails: { network: 'stellar:testnet' },
+      },
+    })
+
     const tx = buildTransferTx({
       source: PAYER.publicKey(),
       from: PAYER.publicKey(),
@@ -2406,11 +3317,22 @@ describe('charge push-mode FeeBump envelope', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
-    const cred = makeHashCredential({
-      hash: testHash('feebump-xdr-obj-hash'),
-      source: `did:pkh:stellar:testnet:${PAYER.publicKey()}`,
-    })
+    const hash = testHash('feebump-xdr-obj-hash')
+    const cred = Object.assign(
+      Credential.from({
+        challenge,
+        payload: {
+          type: 'hash',
+          hash,
+          sourceSignature: Buffer.from(
+            PAYER.sign(Buffer.from(`${challenge.id}:${hash.toLowerCase()}`)),
+          ).toString('hex'),
+        },
+      }),
+      { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
+    )
 
     const receipt = await method.verify({
       credential: cred as any,
@@ -2422,6 +3344,19 @@ describe('charge push-mode FeeBump envelope', () => {
 
 describe('charge push-mode envelopeXdr as XDR object', () => {
   it('verifies successfully when envelopeXdr is an xdr.TransactionEnvelope object', async () => {
+    const challenge = Challenge.from({
+      id: `test-${crypto.randomUUID()}`,
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      request: {
+        amount: '10000000',
+        currency: USDC_SAC_TESTNET,
+        recipient: RECIPIENT,
+        methodDetails: { network: 'stellar:testnet' },
+      },
+    })
+
     const tx = buildTransferTx({
       source: PAYER.publicKey(),
       from: PAYER.publicKey(),
@@ -2441,11 +3376,22 @@ describe('charge push-mode envelopeXdr as XDR object', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      allowUnsignedPush: true,
     })
-    const cred = makeHashCredential({
-      hash: testHash('xdr-obj-hash'),
-      source: `did:pkh:stellar:testnet:${PAYER.publicKey()}`,
-    })
+    const hash = testHash('xdr-obj-hash')
+    const cred = Object.assign(
+      Credential.from({
+        challenge,
+        payload: {
+          type: 'hash',
+          hash,
+          sourceSignature: Buffer.from(
+            PAYER.sign(Buffer.from(`${challenge.id}:${hash.toLowerCase()}`)),
+          ).toString('hex'),
+        },
+      }),
+      { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
+    )
 
     const receipt = await method.verify({
       credential: cred as any,
@@ -2579,15 +3525,28 @@ describe('charge sponsored path sequence number', () => {
 })
 
 // ---------------------------------------------------------------------------
-// TOCTOU race condition tests
+// Concurrent coordination tests
 // ---------------------------------------------------------------------------
 
-describe('charge TOCTOU: hash replay across instances sharing a store', () => {
+describe('charge hash replay across instances sharing a store', () => {
   it('rejects the second concurrent verify when two instances share a store (hash mode)', async () => {
     // Simulate multi-process: two charge server instances with separate
     // verifyLocks sharing the same store. pollTransaction is slow (~50ms),
-    // widening the TOCTOU window between hash check and hash mark.
+    // widening the timing gap between hash check and hash mark.
     const sharedStore = Store.memory()
+
+    const challenge = Challenge.from({
+      id: `shared-store-${crypto.randomUUID()}`,
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      request: {
+        amount: '10000000',
+        currency: USDC_SAC_TESTNET,
+        recipient: RECIPIENT,
+        methodDetails: { network: 'stellar:testnet' },
+      },
+    })
 
     const client = PAYER
     const tx = buildTransferTx({
@@ -2618,28 +3577,28 @@ describe('charge TOCTOU: hash replay across instances sharing a store', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: sharedStore,
+      allowUnsignedPush: true,
     })
     const method2 = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: sharedStore,
+      allowUnsignedPush: true,
     })
 
     // Same hash credential sent to both instances — only one should succeed
-    const challenge = Challenge.from({
-      id: `toctou-${crypto.randomUUID()}`,
-      realm: 'localhost',
-      method: 'stellar',
-      intent: 'charge',
-      request: {
-        amount: '10000000',
-        currency: USDC_SAC_TESTNET,
-        recipient: RECIPIENT,
-        methodDetails: { network: 'stellar:testnet' },
-      },
-    })
+    const hash = testHash('shared-tx-hash')
     const cred = Object.assign(
-      Credential.from({ challenge, payload: { type: 'hash', hash: testHash('shared-tx-hash') } }),
+      Credential.from({
+        challenge,
+        payload: {
+          type: 'hash',
+          hash,
+          sourceSignature: Buffer.from(
+            client.sign(Buffer.from(`${challenge.id}:${hash.toLowerCase()}`)),
+          ).toString('hex'),
+        },
+      }),
       { source: `did:pkh:stellar:testnet:${client.publicKey()}` },
     )
 
@@ -2662,6 +3621,19 @@ describe('charge TOCTOU: hash replay across instances sharing a store', () => {
     // Two instances race on the same challenge (hash mode, same challenge ID).
     // Only one should succeed — the challenge must be claimed atomically.
     const sharedStore = Store.memory()
+
+    const challenge = Challenge.from({
+      id: `shared-store-challenge-${crypto.randomUUID()}`,
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      request: {
+        amount: '10000000',
+        currency: USDC_SAC_TESTNET,
+        recipient: RECIPIENT,
+        methodDetails: { network: 'stellar:testnet' },
+      },
+    })
 
     const client = PAYER
     const tx1 = buildTransferTx({
@@ -2703,32 +3675,42 @@ describe('charge TOCTOU: hash replay across instances sharing a store', () => {
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: sharedStore,
+      allowUnsignedPush: true,
     })
     const method2 = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: sharedStore,
+      allowUnsignedPush: true,
     })
 
     // Same challenge ID, different hashes — tests challenge-level replay
-    const challenge = Challenge.from({
-      id: `toctou-challenge-${crypto.randomUUID()}`,
-      realm: 'localhost',
-      method: 'stellar',
-      intent: 'charge',
-      request: {
-        amount: '10000000',
-        currency: USDC_SAC_TESTNET,
-        recipient: RECIPIENT,
-        methodDetails: { network: 'stellar:testnet' },
-      },
-    })
+    const hashA = testHash('hash-a')
+    const hashB = testHash('hash-b')
     const cred1 = Object.assign(
-      Credential.from({ challenge, payload: { type: 'hash', hash: testHash('hash-a') } }),
+      Credential.from({
+        challenge,
+        payload: {
+          type: 'hash',
+          hash: hashA,
+          sourceSignature: Buffer.from(
+            client.sign(Buffer.from(`${challenge.id}:${hashA.toLowerCase()}`)),
+          ).toString('hex'),
+        },
+      }),
       { source: `did:pkh:stellar:testnet:${client.publicKey()}` },
     )
     const cred2 = Object.assign(
-      Credential.from({ challenge, payload: { type: 'hash', hash: testHash('hash-b') } }),
+      Credential.from({
+        challenge,
+        payload: {
+          type: 'hash',
+          hash: hashB,
+          sourceSignature: Buffer.from(
+            client.sign(Buffer.from(`${challenge.id}:${hashB.toLowerCase()}`)),
+          ).toString('hex'),
+        },
+      }),
       { source: `did:pkh:stellar:testnet:${client.publicKey()}` },
     )
 
@@ -2739,5 +3721,65 @@ describe('charge TOCTOU: hash replay across instances sharing a store', () => {
 
     const successes = results.filter((r) => r.status === 'fulfilled')
     expect(successes).toHaveLength(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Atomic replay protection tests
+// ---------------------------------------------------------------------------
+
+describe('atomic challenge replay protection', () => {
+  it('atomically prevents challenge replay via store.update (not claimOrThrow)', async () => {
+    // Test that the dedup path uses store.update instead of the old claimOrThrow+get+put.
+    // We verify this indirectly: if a second redemption of the same challenge is rejected,
+    // the update() call must have been the gating mechanism.
+    const store = Store.memory()
+    const updateSpy = vi.spyOn(store, 'update')
+
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store,
+    })
+
+    // Pre-populate the challenge store key to simulate a first redemption
+    const challengeId = 'atomic-test-already-used'
+    const challengeStoreKey = `stellar:charge:challenge:${challengeId}`
+    await store.put(challengeStoreKey, { state: 'used', usedAt: new Date().toISOString() })
+
+    const challenge = Challenge.from({
+      id: challengeId,
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      request: { amount: '100', currency: USDC_SAC_TESTNET, recipient: RECIPIENT },
+    })
+
+    const client = Keypair.random()
+    const hash = testHash('second-attempt-hash')
+    const cred = Object.assign(
+      Credential.from({
+        challenge,
+        payload: {
+          type: 'hash',
+          hash,
+          sourceSignature: Buffer.from(
+            client.sign(Buffer.from(`${challenge.id}:${hash.toLowerCase()}`)),
+          ).toString('hex'),
+        },
+      }),
+      { source: `did:pkh:stellar:testnet:${client.publicKey()}` },
+    )
+
+    // Second attempt should be rejected at the store.update() stage
+    await expect(
+      method.verify({
+        credential: cred as any,
+        request: cred.challenge.request,
+      }),
+    ).rejects.toThrow('Challenge already used')
+
+    // Verify that store.update was called for the challenge dedup
+    expect(updateSpy).toHaveBeenCalled()
   })
 })

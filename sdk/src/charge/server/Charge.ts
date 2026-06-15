@@ -30,7 +30,6 @@ import { PaymentVerificationError, SettlementError } from '../../shared/errors.j
 import { noopLogger, type Logger } from '../../shared/logger.js'
 import { SimulationContractError, simulateCall } from '../../shared/simulate.js'
 import { verifyInvokeContractOp } from '../../shared/verify-invoke.js'
-import { claimOrThrow, releaseClaim } from '../../shared/claim.js'
 import {
   DEFAULT_MAX_FEE_BUMP_STROOPS,
   DEFAULT_POLL_MAX_ATTEMPTS,
@@ -67,6 +66,13 @@ export function charge(parameters: charge.Parameters) {
     )
   }
 
+  if (typeof parameters.store.update !== 'function') {
+    throw new PaymentVerificationError(
+      `${LOG_PREFIX} An atomic store providing compare-and-set semantics via update() is required for replay protection.`,
+      {},
+    )
+  }
+
   const {
     currency,
     decimals = DEFAULT_DECIMALS,
@@ -79,6 +85,7 @@ export function charge(parameters: charge.Parameters) {
     pollMaxConcurrent = DEFAULT_POLL_MAX_CONCURRENT,
     pollTimeoutMs = DEFAULT_POLL_TIMEOUT_MS,
     recipient,
+    allowUnsignedPush = false,
     rpcUrl,
     simulationTimeoutMs = DEFAULT_SIMULATION_TIMEOUT_MS,
     store,
@@ -92,6 +99,20 @@ export function charge(parameters: charge.Parameters) {
   const envelopeKP = feePayer ? resolveKeypair(feePayer.envelopeSigner) : undefined
   const feeBumpKP = feePayer?.feeBumpSigner ? resolveKeypair(feePayer.feeBumpSigner) : undefined
 
+  // Compute credentialTypes: sponsored servers advertise only 'transaction' (pull mode).
+  // Unsponsored servers advertise push modes based on allowUnsignedPush.
+  const credentialTypes = envelopeKP
+    ? ['transaction']
+    : allowUnsignedPush
+      ? ['transaction', 'signedHash', 'hash']
+      : ['transaction', 'signedHash']
+
+  if (feeBumpKP) {
+    logger.warn(
+      `${LOG_PREFIX} A fee-bump signer is configured — ensure it is funded with XLM. An unfunded fee-bump signer is accepted silently but causes every sponsored fee-bump settlement to fail at broadcast time.`,
+    )
+  }
+
   return Method.toServer(Methods.charge, {
     defaults: { currency, recipient },
     request({ request }) {
@@ -101,6 +122,7 @@ export function charge(parameters: charge.Parameters) {
         methodDetails: {
           network,
           ...(envelopeKP ? { feePayer: true } : {}),
+          credentialTypes,
         },
       }
     },
@@ -113,32 +135,30 @@ export function charge(parameters: charge.Parameters) {
    * Verifies a charge credential (hash or transaction) and settles it on-chain.
    *
    * Dispatches to push mode (on-chain hash lookup) or pull mode (server-broadcast
-   * XDR) based on `payload.type`. Concurrent calls are safe: {@link claimOrThrow}
-   * prevents intra-process TOCTOU races via synchronous Set operations.
+   * XDR) based on `payload.type`. Concurrent calls are safe: atomic store.update()
+   * prevents cross-process TOCTOU races via compare-and-set semantics.
    */
   async function doVerify(credential: ChargeCredential) {
     const { challenge, source } = credential
     const { request: challengeRequest } = challenge
 
-    // Replay protection: two-layer claim prevents intra-process TOCTOU
-    // (synchronous Set) and cross-process replays (store get/put).
+    // Replay protection via atomic compare-and-set: reject if challenge already claimed.
     const challengeStoreKey = `${STORE_PREFIX}:challenge:${challenge.id}`
     const challengeReplayError = new PaymentVerificationError(
       `${LOG_PREFIX} Challenge already used. Replay rejected.`,
     )
-    claimOrThrow(store, challengeStoreKey, challengeReplayError)
-    try {
-      const existingChallenge = await store.get(challengeStoreKey)
-      if (existingChallenge) {
-        releaseClaim(store, challengeStoreKey)
-        throw challengeReplayError
-      }
-      await store.put(challengeStoreKey, { state: 'pending', claimedAt: new Date().toISOString() })
-    } catch (err) {
-      releaseClaim(store, challengeStoreKey)
-      throw err
+    const claimResult = await store.update(challengeStoreKey, (current) =>
+      current
+        ? { op: 'noop', result: 'replay' as const }
+        : {
+            op: 'set',
+            value: { state: 'pending', claimedAt: new Date().toISOString() },
+            result: 'claimed' as const,
+          },
+    )
+    if (claimResult === 'replay') {
+      throw challengeReplayError
     }
-    releaseClaim(store, challengeStoreKey)
 
     const { amount, externalId } = challengeRequest
     const expectedCurrency = challengeRequest.currency
@@ -148,15 +168,15 @@ export function charge(parameters: charge.Parameters) {
     const payload = credential.payload
 
     switch (payload.type) {
-      case 'hash': {
+      case 'signedHash': {
         // Spec: push mode MUST NOT be used with feePayer=true
         if (challengeRequest.methodDetails?.feePayer) {
           throw new PaymentVerificationError(
-            `${LOG_PREFIX} Push mode (type="hash") is not allowed with feePayer=true.`,
+            `${LOG_PREFIX} Push mode (type="signedHash") is not allowed with feePayer=true.`,
           )
         }
 
-        const hash = payload.hash
+        let hash = payload.hash
 
         // Reject obviously invalid hashes before any expensive work.
         if (!/^[0-9a-f]{64}$/i.test(hash)) {
@@ -165,65 +185,246 @@ export function charge(parameters: charge.Parameters) {
           })
         }
 
-        // Two-layer claim for tx hash dedup: synchronous Set prevents
-        // intra-process TOCTOU, store handles cross-process visibility.
+        // Canonicalize hash to lowercase for case-insensitive consistency
+        hash = hash.toLowerCase()
+
+        // Tx hash dedup via atomic compare-and-set: reject if hash already used.
         const hashKey = `${STORE_PREFIX}:hash:${hash}`
         const hashReplayError = new PaymentVerificationError(
           `${LOG_PREFIX} Transaction hash already used. Replay rejected.`,
           { hash },
         )
-        claimOrThrow(store, hashKey, hashReplayError)
+        const hashClaimId = crypto.randomUUID()
+        const hashClaimResult = await store.update(hashKey, (current) =>
+          current
+            ? { op: 'noop', result: 'replay' as const }
+            : {
+                op: 'set',
+                value: {
+                  state: 'pending',
+                  claimId: hashClaimId,
+                  claimedAt: new Date().toISOString(),
+                },
+                result: 'claimed' as const,
+              },
+        )
+        if (hashClaimResult === 'replay') {
+          logger.warn(`${LOG_PREFIX} Verification failed`, {
+            error: 'Transaction hash already used',
+            hash,
+          })
+          throw hashReplayError
+        }
+
         try {
-          const hashUsed = await store.get(hashKey)
-          if (hashUsed) {
-            logger.warn(`${LOG_PREFIX} Verification failed`, {
-              error: 'Transaction hash already used',
+          // Push mode requires the transaction to be confirmed on-chain
+          // before the client submits the hash.
+          const result = await rpcServer.getTransaction(hash)
+
+          if (result.status === 'FAILED') {
+            throw new PaymentVerificationError(`${LOG_PREFIX} Transaction failed on-chain.`, {
               hash,
+              ...(result.resultXdr ? { resultXdr: result.resultXdr } : {}),
             })
-            releaseClaim(store, hashKey)
-            throw hashReplayError
           }
-          await store.put(hashKey, { state: 'pending', claimedAt: new Date().toISOString() })
+
+          if (result.status !== 'SUCCESS') {
+            throw new PaymentVerificationError(
+              `${LOG_PREFIX} Transaction not found on-chain. Push mode requires the transaction to be confirmed before submitting the hash.`,
+              { hash, status: result.status },
+            )
+          }
+
+          const txResult = result as rpc.Api.GetSuccessfulTransactionResponse
+
+          // Extract the payer's public key from the credential DID to verify
+          // the on-chain transfer's `from` address matches the credential's
+          // claimed payer identity.
+          const expectedFrom = publicKeyFromDID(source)
+          verifyTokenTransferFromResult(
+            txResult,
+            {
+              amount: expectedAmount,
+              currency: expectedCurrency,
+              recipient: expectedRecipient,
+              from: expectedFrom,
+            },
+            networkPassphrase,
+          )
+
+          // Verify the source signature proves the submitter controls the payer account.
+          // The signature must be over "{challenge.id}:{hash}" (lowercase hash).
+          // This binds the credential to both the challenge and the canonical tx hash,
+          // so the claimed source must control the payer account used by the payment.
+          const bindingMessage = Buffer.from(`${challenge.id}:${hash}`)
+          try {
+            const isValid = Keypair.fromPublicKey(expectedFrom).verify(
+              bindingMessage,
+              Buffer.from(payload.sourceSignature, 'hex'),
+            )
+            if (!isValid) {
+              throw new PaymentVerificationError(
+                `${LOG_PREFIX} Source signature does not authorize this payment; the credential holder must prove control of the payer account.`,
+                {},
+              )
+            }
+          } catch (err) {
+            if (err instanceof PaymentVerificationError) throw err
+            throw new PaymentVerificationError(
+              `${LOG_PREFIX} Source signature does not authorize this payment; the credential holder must prove control of the payer account.`,
+              {},
+            )
+          }
         } catch (err) {
-          releaseClaim(store, hashKey)
+          await store.update(hashKey, (current) => {
+            if (
+              current &&
+              typeof current === 'object' &&
+              'state' in current &&
+              (current as { state?: string }).state === 'pending' &&
+              'claimId' in current &&
+              (current as { claimId?: string }).claimId === hashClaimId
+            ) {
+              return { op: 'delete', result: undefined }
+            }
+            return { op: 'noop', result: undefined }
+          })
           throw err
         }
-        releaseClaim(store, hashKey)
 
-        // Push mode requires the transaction to be confirmed on-chain
-        // before the client submits the hash.
-        const result = await rpcServer.getTransaction(hash)
+        // Finalize claims after successful verification
+        await store.put(`${STORE_PREFIX}:hash:${hash}`, {
+          state: 'used',
+          usedAt: new Date().toISOString(),
+        })
+        await store.put(challengeStoreKey, { state: 'used', usedAt: new Date().toISOString() })
 
-        if (result.status === 'FAILED') {
-          throw new PaymentVerificationError(`${LOG_PREFIX} Transaction failed on-chain.`, {
-            hash,
-            ...(result.resultXdr ? { resultXdr: result.resultXdr } : {}),
-          })
-        }
+        return Receipt.from({
+          method: 'stellar',
+          reference: hash,
+          status: 'success',
+          timestamp: new Date().toISOString(),
+          ...(externalId ? { externalId } : {}),
+        })
+      }
 
-        if (result.status !== 'SUCCESS') {
+      case 'hash': {
+        // Legacy receive-only push mode: client broadcasts and sends only the tx hash
+        // (without source signature). Server looks it up on-chain for verification.
+        // Spec: push mode MUST NOT be used with feePayer=true
+        if (challengeRequest.methodDetails?.feePayer) {
           throw new PaymentVerificationError(
-            `${LOG_PREFIX} Transaction not found on-chain. Push mode requires the transaction to be confirmed before submitting the hash.`,
-            { hash, status: result.status },
+            `${LOG_PREFIX} Push mode (type="hash") is not allowed with feePayer=true.`,
           )
         }
 
-        const txResult = result as rpc.Api.GetSuccessfulTransactionResponse
+        // Check if unsigned push is rejected by policy
+        if (!allowUnsignedPush) {
+          throw new PaymentVerificationError(
+            `${LOG_PREFIX} Unsigned push mode (type="hash") is no longer accepted. Upgrade your client to send type="signedHash", or use server-sponsored flow.`,
+          )
+        }
 
-        // Extract the payer's public key from the credential DID to verify
-        // the on-chain transfer's `from` address matches the credential's
-        // claimed identity, preventing hash-theft attacks against clients.
-        const expectedFrom = publicKeyFromDID(source)
-        verifyTokenTransferFromResult(
-          txResult,
-          {
-            amount: expectedAmount,
-            currency: expectedCurrency,
-            recipient: expectedRecipient,
-            from: expectedFrom,
-          },
-          networkPassphrase,
+        let hash = payload.hash
+
+        // Reject obviously invalid hashes before any expensive work.
+        if (!/^[0-9a-f]{64}$/i.test(hash)) {
+          throw new PaymentVerificationError(`${LOG_PREFIX} Invalid transaction hash format.`, {
+            hash,
+          })
+        }
+
+        // Canonicalize hash to lowercase for case-insensitive consistency
+        hash = hash.toLowerCase()
+
+        // Tx hash dedup via atomic compare-and-set: reject if hash already used.
+        const hashKey = `${STORE_PREFIX}:hash:${hash}`
+        const hashReplayError = new PaymentVerificationError(
+          `${LOG_PREFIX} Transaction hash already used. Replay rejected.`,
+          { hash },
         )
+        const hashClaimId = crypto.randomUUID()
+        const hashClaimResult = await store.update(hashKey, (current) =>
+          current
+            ? { op: 'noop', result: 'replay' as const }
+            : {
+                op: 'set',
+                value: {
+                  state: 'pending',
+                  claimId: hashClaimId,
+                  claimedAt: new Date().toISOString(),
+                },
+                result: 'claimed' as const,
+              },
+        )
+        if (hashClaimResult === 'replay') {
+          logger.warn(`${LOG_PREFIX} Verification failed`, {
+            error: 'Transaction hash already used',
+            hash,
+          })
+          throw hashReplayError
+        }
+
+        try {
+          // Push mode requires the transaction to be confirmed on-chain
+          // before the client submits the hash.
+          const result = await rpcServer.getTransaction(hash)
+
+          if (result.status === 'FAILED') {
+            throw new PaymentVerificationError(`${LOG_PREFIX} Transaction failed on-chain.`, {
+              hash,
+              ...(result.resultXdr ? { resultXdr: result.resultXdr } : {}),
+            })
+          }
+
+          if (result.status !== 'SUCCESS') {
+            throw new PaymentVerificationError(
+              `${LOG_PREFIX} Transaction not found on-chain. Push mode requires the transaction to be confirmed before submitting the hash.`,
+              { hash, status: result.status },
+            )
+          }
+
+          const txResult = result as rpc.Api.GetSuccessfulTransactionResponse
+
+          // Extract the payer's public key from the credential DID to verify
+          // the on-chain transfer's `from` address matches the credential's
+          // claimed payer identity.
+          const expectedFrom = publicKeyFromDID(source)
+          verifyTokenTransferFromResult(
+            txResult,
+            {
+              amount: expectedAmount,
+              currency: expectedCurrency,
+              recipient: expectedRecipient,
+              from: expectedFrom,
+            },
+            networkPassphrase,
+          )
+
+          // Note: Legacy hash type does not verify sourceSignature.
+          // For source signature verification, use type="signedHash".
+        } catch (err) {
+          await store.update(hashKey, (current) => {
+            if (
+              current &&
+              typeof current === 'object' &&
+              'state' in current &&
+              (current as { state?: string }).state === 'pending' &&
+              'claimId' in current &&
+              (current as { claimId?: string }).claimId === hashClaimId
+            ) {
+              return { op: 'delete', result: undefined }
+            }
+            return { op: 'noop', result: undefined }
+          })
+          throw err
+        }
+
+        // Log acceptance of legacy unsigned push for operator visibility
+        logger.warn(`${LOG_PREFIX} Accepting unsigned push (legacy mode)`, {
+          challengeId: challenge.id,
+          hash,
+        })
 
         // Finalize claims after successful verification
         await store.put(`${STORE_PREFIX}:hash:${hash}`, {
@@ -376,6 +577,30 @@ export function charge(parameters: charge.Parameters) {
           })
         }
 
+        // Tx hash dedup via atomic compare-and-set, just before broadcast:
+        // settle each transaction at most once (shared with push-mode hashes).
+        const txHash = tx.hash().toString('hex')
+        const hashKey = `${STORE_PREFIX}:hash:${txHash}`
+        const hashClaimResult = await store.update(hashKey, (current) =>
+          current
+            ? { op: 'noop', result: 'replay' as const }
+            : {
+                op: 'set',
+                value: { state: 'pending', claimedAt: new Date().toISOString() },
+                result: 'claimed' as const,
+              },
+        )
+        if (hashClaimResult === 'replay') {
+          logger.warn(`${LOG_PREFIX} Verification failed`, {
+            error: 'Transaction hash already used',
+            hash: txHash,
+          })
+          throw new PaymentVerificationError(
+            `${LOG_PREFIX} Transaction hash already used. Replay rejected.`,
+            { hash: txHash },
+          )
+        }
+
         // ── Settlement ──────────────────────────────────────────────
         let sendResult: rpc.Api.SendTransactionResponse
         try {
@@ -430,6 +655,7 @@ export function charge(parameters: charge.Parameters) {
           hash: sendResult.hash,
           settledAt: new Date().toISOString(),
         })
+        await store.put(hashKey, { state: 'used', usedAt: new Date().toISOString() })
 
         return Receipt.from({
           method: 'stellar',
@@ -592,8 +818,7 @@ export function charge(parameters: charge.Parameters) {
  * Rejects transactions whose source account or operation source matches the server's envelope
  * signing address.
  *
- * Prevents an attacker from setting the tx/op source to the server's key, which would authorize
- * operations under the server's account after signing.
+ * This keeps the sponsored-signing account separate from the transaction and operation sources.
  */
 function verifyNoSigningAddressInSources(tx: Transaction, signerKP: Keypair | undefined) {
   if (!signerKP) return
@@ -843,8 +1068,8 @@ function validateSimulationEvents(
  *
  * Throws `PaymentVerificationError` if the source is absent, not a string,
  * or does not conform to the expected `did:pkh` format. A credential without
- * a verifiable source must be rejected — silently skipping the sender check
- * would leave the hash-theft attack vector open.
+ * a verifiable source must be rejected because the payer account cannot be
+ * matched to the credential.
  */
 function publicKeyFromDID(source: unknown): string {
   if (typeof source !== 'string' || !source) {
@@ -924,13 +1149,27 @@ export declare namespace charge {
     /**
      * Replay protection store for challenge and tx hash deduplication.
      *
-     * Required — all replay protection depends on this store. Use
-     * `Store.memory()` for development and single-process deployments.
-     * In production, pass a persistent store (e.g. backed by Redis or
-     * PostgreSQL) so that consumed hashes and challenges survive restarts
-     * and are visible across all server instances.
+     * Required — all replay protection depends on this store. Without it,
+     * a confirmed payment could be accepted more than once.
+     *
+     * `update()` must be a **linearizable compare-and-set**: the callback must
+     * observe the latest committed value and its write must commit (or abort) as
+     * one indivisible step, even under concurrent callers across processes. The
+     * constructor verifies that `update()` exists but cannot verify that the
+     * backend implements it correctly — a store that emulates `update()` with a
+     * separate get-then-put, or one backed by an eventually-consistent datastore,
+     * passes the type check while silently dropping the guarantee in multi-process
+     * deployments.
+     *
+     * Reference implementations:
+     * - Single process: `Store.memory()`.
+     * - Multi-process (e.g. multiple pods behind a load balancer): a single shared
+     *   backend whose `update()` maps to a genuine atomic CAS, such as a Redis Lua
+     *   script or a PostgreSQL conditional `UPDATE … WHERE`. A per-instance
+     *   `Store.memory()` or a plain get-then-put against a shared cache is not
+     *   sufficient.
      */
-    store: Store.Store
+    store: Store.AtomicStore
     /** Maximum fee in stroops for the inner transaction and fee bump. @defaultValue `10_000_000` (1 XLM) */
     maxFeeBumpStroops?: number
     /** Maximum number of polling attempts when waiting for tx confirmation. @defaultValue `20` */
@@ -943,6 +1182,21 @@ export declare namespace charge {
     pollTimeoutMs?: number
     /** Timeout for Soroban RPC simulation calls in milliseconds. @defaultValue `10_000` */
     simulationTimeoutMs?: number
+    /**
+     * Whether to accept legacy unsigned push-mode credentials (type="hash").
+     *
+     * Defaults to `false`: only the payer-authenticated `signedHash` push mode and
+     * pull mode (`transaction`) are accepted. Legacy unsigned push relies solely on
+     * the client-declared payer identity rather than a proof of control, so it is
+     * not accepted by default.
+     *
+     * Set to `true` only for backward compatibility with pre-`signedHash` clients
+     * mid-migration; each acceptance is logged so operators can track when the legacy
+     * traffic drains and turn it back off. New deployments should leave it disabled.
+     *
+     * @defaultValue `false`
+     */
+    allowUnsignedPush?: boolean
     /** Logger instance (pino and console compatible API). Defaults to a no-op logger. */
     logger?: Logger
   }
