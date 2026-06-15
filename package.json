@@ -92,7 +92,8 @@
   "pnpm": {
     "overrides": {
       "axios": "^1.16.0",
-      "vite": "^8.0.16"
+      "vite": "^8.0.16",
+      "ws": "^8.21.0"
     }
   },
   "license": "MIT",

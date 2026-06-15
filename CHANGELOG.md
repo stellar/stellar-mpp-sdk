@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add a v0.7 migration guide (`docs/migrating-to-v0.7.md`), linked from the README ([#49](https://github.com/stellar/stellar-mpp-sdk/pull/49))
 
+### Security
+
+- Override the transitive `ws` dependency to `^8.21.0`, clearing a high-severity advisory reachable via `viem` ([#49](https://github.com/stellar/stellar-mpp-sdk/pull/49))
+
 ## [0.7.0] - 2026-06-15
 
 ### Security
