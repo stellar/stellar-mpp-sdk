@@ -2,6 +2,8 @@
 
 Stellar blockchain payment method for the [Machine Payments Protocol (MPP)](https://mpp.dev). Enables machine-to-machine payments using Soroban SEP-41 token transfers on the Stellar network, with optional support for [one-way payment channels](https://github.com/stellar-experimental/one-way-channel) for high-frequency off-chain payments.
 
+> **Upgrading from v0.6.x?** See the [v0.7 migration guide](docs/migrating-to-v0.7.md) — push credential change, store requirement, and the removed channel `open` action.
+
 ## Specification
 
 The charge payment mode implements the [draft-stellar-charge-00](https://paymentauth.org/draft-stellar-charge-00) specification ([source](https://github.com/tempoxyz/mpp-specs/blob/main/specs/methods/stellar/draft-stellar-charge-00.md)), which defines the `stellar` payment method with a `charge` intent for one-time SEP-41 token transfers under the HTTP Payment Authentication scheme.
@@ -467,14 +469,6 @@ await close({
 | `USDC_SAC_TESTNET` | `CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA` |
 | `XLM_SAC_MAINNET`  | `CAS3J7GYLGVE45MR3HPSFG352DAANEV5GGMFTO3IZIE4JMCDALQO57Y`  |
 | `XLM_SAC_TESTNET`  | `CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC` |
-
-## Breaking changes from 0.1.0
-
-- **Package renamed**: `stellar-mpp-sdk` is now `@stellar/mpp`. All import paths change accordingly.
-- **Import paths changed**: `stellar-mpp-sdk/client` and `stellar-mpp-sdk/server` are no longer valid. Use `@stellar/mpp/charge/client` and `@stellar/mpp/charge/server` instead.
-- **Root export renamed**: `Methods` is now `ChargeMethods`.
-- **Store keys changed**: Store key format updated to `stellar:{intent}:{type}:{id}`. Existing stored data is not backwards compatible.
-- **`resolveKeypair` moved**: Now exported from the root (`@stellar/mpp`) and from `@stellar/mpp/charge/server`, no longer from `stellar-mpp-sdk/server`.
 
 ## Environment variables
 
