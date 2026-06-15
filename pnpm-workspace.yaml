@@ -3,5 +3,7 @@ minimumReleaseAgeExclude:
   # Exempt esbuild so its <7-day-old security patch (0.28.1) can resolve; remove once it ages past the soak.
   - esbuild
   - '@esbuild/*'
+  # Exempt form-data so its <7-day-old security patch (4.0.6, GHSA-hmw2-7cc7-3qxx) can resolve; remove once it ages past the soak.
+  - form-data
 packages:
   - '.'
