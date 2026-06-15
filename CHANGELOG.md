@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- Override the transitive `ws` dependency to `^8.21.0`, clearing a high-severity advisory reachable via `viem` ([#49](https://github.com/stellar/stellar-mpp-sdk/pull/49))
+- Override the transitive `ws` dependency to `^8.21.0`, clearing a high-severity advisory reachable via `viem` [#49](https://github.com/stellar/stellar-mpp-sdk/pull/49)
 
 ## [0.7.0] - 2026-06-15
 
