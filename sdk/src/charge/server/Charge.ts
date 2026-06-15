@@ -107,6 +107,12 @@ export function charge(parameters: charge.Parameters) {
       ? ['transaction', 'signedHash', 'hash']
       : ['transaction', 'signedHash']
 
+  if (feeBumpKP) {
+    logger.warn(
+      `${LOG_PREFIX} A fee-bump signer is configured — ensure it is funded with XLM. An unfunded fee-bump signer is accepted silently but causes every sponsored fee-bump settlement to fail at broadcast time.`,
+    )
+  }
+
   return Method.toServer(Methods.charge, {
     defaults: { currency, recipient },
     request({ request }) {
@@ -571,6 +577,30 @@ export function charge(parameters: charge.Parameters) {
           })
         }
 
+        // Tx hash dedup via atomic compare-and-set, just before broadcast:
+        // settle each transaction at most once (shared with push-mode hashes).
+        const txHash = tx.hash().toString('hex')
+        const hashKey = `${STORE_PREFIX}:hash:${txHash}`
+        const hashClaimResult = await store.update(hashKey, (current) =>
+          current
+            ? { op: 'noop', result: 'replay' as const }
+            : {
+                op: 'set',
+                value: { state: 'pending', claimedAt: new Date().toISOString() },
+                result: 'claimed' as const,
+              },
+        )
+        if (hashClaimResult === 'replay') {
+          logger.warn(`${LOG_PREFIX} Verification failed`, {
+            error: 'Transaction hash already used',
+            hash: txHash,
+          })
+          throw new PaymentVerificationError(
+            `${LOG_PREFIX} Transaction hash already used. Replay rejected.`,
+            { hash: txHash },
+          )
+        }
+
         // ── Settlement ──────────────────────────────────────────────
         let sendResult: rpc.Api.SendTransactionResponse
         try {
@@ -625,6 +655,7 @@ export function charge(parameters: charge.Parameters) {
           hash: sendResult.hash,
           settledAt: new Date().toISOString(),
         })
+        await store.put(hashKey, { state: 'used', usedAt: new Date().toISOString() })
 
         return Receipt.from({
           method: 'stellar',

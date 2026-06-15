@@ -137,6 +137,34 @@ describe('stellar server charge', () => {
     expect(method.name).toBe('stellar')
   })
 
+  it('warns that a configured fee-bump signer must be funded with XLM', () => {
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+
+    charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store: Store.memory(),
+      feePayer: { envelopeSigner: Keypair.random(), feeBumpSigner: Keypair.random() },
+      logger,
+    })
+
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('fee-bump signer'))
+  })
+
+  it('does not warn about fee-bump funding when no fee-bump signer is configured', () => {
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+
+    charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store: Store.memory(),
+      feePayer: { envelopeSigner: Keypair.random() },
+      logger,
+    })
+
+    expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('fee-bump signer'))
+  })
+
   it('accepts custom decimals', () => {
     const method = charge({
       recipient: RECIPIENT,
@@ -2267,6 +2295,114 @@ describe('charge transaction verification', () => {
     // A failed verification burns the challenge — client must get a new one.
     const stored = await store.get(`stellar:charge:challenge:${challengeId}`)
     expect((stored as any)?.state).toBe('pending')
+  })
+})
+
+describe('charge pull-mode tx-hash dedup', () => {
+  beforeEach(() => {
+    mockSimulateTransaction.mockReset()
+    mockSendTransaction.mockReset()
+    mockGetTransaction.mockReset()
+  })
+
+  function txCredentialForFreshChallenge(txXdr: string) {
+    const challenge = Challenge.from({
+      id: `dedup-${crypto.randomUUID()}`,
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      request: {
+        amount: '10000000',
+        currency: USDC_SAC_TESTNET,
+        recipient: RECIPIENT,
+        methodDetails: { network: 'stellar:testnet' },
+      },
+    })
+    return Object.assign(
+      Credential.from({ challenge, payload: { type: 'transaction', transaction: txXdr } }),
+      { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
+    )
+  }
+
+  it('rejects a duplicate transaction XDR submitted under a different challenge id', async () => {
+    const tx = buildTransferTx({
+      source: PAYER.publicKey(),
+      from: PAYER.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    tx.sign(PAYER)
+    const txXdr = tx.toXDR()
+
+    mockSimulateTransaction.mockResolvedValue({
+      result: { retval: null },
+      events: [defaultMockEvent()],
+      transactionData: new SorobanDataBuilder(),
+    })
+    mockSendTransaction.mockResolvedValue({ hash: 'dedup-onchain-hash', status: 'PENDING' })
+    mockGetTransaction.mockResolvedValue({ status: 'SUCCESS' })
+
+    const store = Store.memory()
+    const method = charge({ recipient: RECIPIENT, currency: USDC_SAC_TESTNET, store })
+
+    // First submission under challenge A succeeds.
+    const credA = txCredentialForFreshChallenge(txXdr)
+    const receipt = await method.verify({
+      credential: credA as any,
+      request: credA.challenge.request,
+    })
+    expect(receipt.status).toBe('success')
+
+    // The same tx XDR under a fresh challenge B must be rejected as a duplicate,
+    // even though that challenge has never been used.
+    const credB = txCredentialForFreshChallenge(txXdr)
+    await expect(
+      method.verify({ credential: credB as any, request: credB.challenge.request }),
+    ).rejects.toThrow('Transaction hash already used')
+
+    // The duplicate must never be broadcast.
+    expect(mockSendTransaction).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not lock the tx hash when verification fails before broadcast, allowing retry', async () => {
+    const tx = buildTransferTx({
+      source: PAYER.publicKey(),
+      from: PAYER.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    tx.sign(PAYER)
+    const txXdr = tx.toXDR()
+
+    const store = Store.memory()
+    const method = charge({ recipient: RECIPIENT, currency: USDC_SAC_TESTNET, store })
+
+    // First attempt fails at simulation — no broadcast happens.
+    mockSimulateTransaction.mockRejectedValueOnce(new Error('simulation boom'))
+    const credA = txCredentialForFreshChallenge(txXdr)
+    await expect(
+      method.verify({ credential: credA as any, request: credA.challenge.request }),
+    ).rejects.toThrow()
+    expect(mockSendTransaction).not.toHaveBeenCalled()
+
+    // Verification failed before the hash was claimed, so the same tx can be
+    // retried successfully under a fresh challenge.
+    mockSimulateTransaction.mockResolvedValue({
+      result: { retval: null },
+      events: [defaultMockEvent()],
+      transactionData: new SorobanDataBuilder(),
+    })
+    mockSendTransaction.mockResolvedValue({ hash: 'retry-onchain-hash', status: 'PENDING' })
+    mockGetTransaction.mockResolvedValue({ status: 'SUCCESS' })
+
+    const credB = txCredentialForFreshChallenge(txXdr)
+    const receipt = await method.verify({
+      credential: credB as any,
+      request: credB.challenge.request,
+    })
+    expect(receipt.status).toBe('success')
   })
 })
 
