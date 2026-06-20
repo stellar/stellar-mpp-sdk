@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Override the transitive `ws` dependency to `^8.21.0`, clearing a high-severity advisory reachable via `viem` [#49](https://github.com/stellar/stellar-mpp-sdk/pull/49)
 - Override the transitive `form-data` dependency to `^4.0.6`, clearing a high-severity advisory reachable via `@stellar/stellar-sdk` [#49](https://github.com/stellar/stellar-mpp-sdk/pull/49)
+- Drop `minimumReleaseAgeExclude` exemptions for `esbuild` (0.28.1, 2026-06-11) and `form-data` (4.0.6, 2026-06-12) now that both are past the 7-day soak
 
 ## [0.7.0] - 2026-06-15
 
