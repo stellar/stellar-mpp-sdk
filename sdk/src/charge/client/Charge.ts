@@ -24,7 +24,8 @@ import * as Methods from '../Methods.js'
 import { fromBaseUnits } from '../Methods.js'
 import { StellarMppError } from '../../shared/errors.js'
 import { resolveKeypair } from '../../shared/keypairs.js'
-import { resolveNetworkId } from '../../shared/validation.js'
+import { resolveNetworkId, validateAmount } from '../../shared/validation.js'
+import { scValToBigInt } from '../../shared/scval.js'
 import { pollTransaction } from '../../shared/poll.js'
 import {
   DEFAULT_POLL_MAX_ATTEMPTS,
@@ -59,6 +60,78 @@ import {
  * const response = await fetch('https://api.example.com/resource')
  * ```
  */
+type ExpectedTransfer = { currency: string; from: string; to: string; amount: bigint }
+
+/**
+ * Verifies that a Soroban authorization invocation authorizes only the intended
+ * SEP-41 `transfer` and nothing else. A malicious `currency` contract could
+ * otherwise plant extra authorized calls (for example a transfer of a different
+ * token to an attacker) into the tree the client signs, moving funds the client
+ * never agreed to move.
+ */
+function assertInvocationIsExactTransfer(
+  invocation: StellarXdr.SorobanAuthorizedInvocation,
+  expected: ExpectedTransfer,
+): void {
+  if (invocation.subInvocations().length > 0) {
+    throw new StellarMppError(
+      'Refusing to sign: the authorization tree contains unexpected sub-invocations.',
+    )
+  }
+
+  const fn = invocation.function()
+  if (
+    fn.switch().value !==
+    StellarXdr.SorobanAuthorizedFunctionType.sorobanAuthorizedFunctionTypeContractFn().value
+  ) {
+    throw new StellarMppError('Refusing to sign: unexpected authorized function type.')
+  }
+
+  const contractFn = fn.contractFn()
+  const authorizedContract = Address.fromScAddress(contractFn.contractAddress()).toString()
+  if (authorizedContract !== expected.currency) {
+    throw new StellarMppError(
+      `Refusing to sign: authorization targets contract "${authorizedContract}" ` +
+        `instead of the requested currency "${expected.currency}".`,
+    )
+  }
+
+  if (contractFn.functionName().toString() !== 'transfer') {
+    throw new StellarMppError('Refusing to sign: authorization is not a transfer call.')
+  }
+
+  const args = contractFn.args()
+  if (
+    args.length !== 3 ||
+    Address.fromScVal(args[0]).toString() !== expected.from ||
+    Address.fromScVal(args[1]).toString() !== expected.to ||
+    scValToBigInt(args[2]) !== expected.amount
+  ) {
+    throw new StellarMppError(
+      'Refusing to sign: transfer authorization does not match the requested payment.',
+    )
+  }
+}
+
+/**
+ * Validates every Soroban authorization entry across a transaction's
+ * invoke-host-function operations before the client signs it.
+ */
+function assertTransactionAuthorizesOnlyTransfer(
+  tx: StellarXdr.Transaction,
+  expected: ExpectedTransfer,
+): void {
+  for (const op of tx.operations()) {
+    const body = op.body()
+    if (body.switch().value !== StellarXdr.OperationType.invokeHostFunction().value) {
+      continue
+    }
+    for (const entry of body.invokeHostFunctionOp().auth()) {
+      assertInvocationIsExactTransfer(entry.rootInvocation(), expected)
+    }
+  }
+}
+
 export function charge(parameters: charge.Parameters) {
   const {
     decimals = DEFAULT_DECIMALS,
@@ -101,9 +174,24 @@ export function charge(parameters: charge.Parameters) {
       const networkPassphrase = NETWORK_PASSPHRASE[network]
       const server = new rpc.Server(resolvedRpcUrl)
 
+      // Validate the counterparty-supplied amount before converting it: an
+      // out-of-range or malformed value would otherwise surface as an untyped
+      // RangeError/SyntaxError from BigInt/nativeToScVal rather than a typed
+      // StellarMppError.
+      validateAmount(amount)
+
       // Build SEP-41 `transfer(from, to, amount)` invocation
       const contract = new Contract(currency)
       const stellarAmount = BigInt(amount)
+
+      // The only authorization the client is willing to sign: a single SEP-41
+      // transfer of `amount` of `currency` from the client to the recipient.
+      const expectedTransfer: ExpectedTransfer = {
+        currency,
+        from: clientKP.publicKey(),
+        to: recipient,
+        amount: stellarAmount,
+      }
 
       const effectiveMode = context?.mode ?? defaultMode
       const isServerSponsored = request.methodDetails?.feePayer === true
@@ -192,6 +280,11 @@ export function charge(parameters: charge.Parameters) {
         // transaction envelope (the server will do that after rebuilding).
         const envelope = prepared.toEnvelope()
         const v1 = envelope.v1()
+
+        // Confirm the simulated auth tree is exactly the intended transfer
+        // before authorizing any entry.
+        assertTransactionAuthorizesOnlyTransfer(v1.tx(), expectedTransfer)
+
         for (const op of v1.tx().operations()) {
           const body = op.body()
           if (body.switch().value !== StellarXdr.OperationType.invokeHostFunction().value) {
@@ -253,6 +346,10 @@ export function charge(parameters: charge.Parameters) {
 
       // Simulate to attach Soroban resource data
       const prepared = await server.prepareTransaction(transaction)
+
+      // The envelope signature authorizes the entire Soroban auth tree, so
+      // confirm it is exactly the intended transfer before signing.
+      assertTransactionAuthorizesOnlyTransfer(prepared.toEnvelope().v1().tx(), expectedTransfer)
 
       onProgress?.({ type: 'signing' })
       prepared.sign(clientKP)
