@@ -2,13 +2,17 @@ import {
   Account,
   Address,
   Asset,
+  BASE_FEE,
   Contract,
   FeeBumpTransaction,
   Keypair,
   Memo,
   Operation,
   SorobanDataBuilder,
+  Transaction,
   TransactionBuilder,
+  authorizeEntry,
+  authorizeInvocation,
   nativeToScVal,
   xdr,
 } from '@stellar/stellar-sdk'
@@ -651,6 +655,312 @@ describe('charge legacy hash (unsigned push) handling', () => {
   })
 })
 
+describe('charge push-mode payment freshness', () => {
+  beforeEach(() => {
+    mockGetTransaction.mockReset()
+  })
+
+  function freshnessChallenge() {
+    return Challenge.from({
+      id: `test-${crypto.randomUUID()}`,
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      request: {
+        amount: '10000000',
+        currency: USDC_SAC_TESTNET,
+        recipient: RECIPIENT,
+        methodDetails: { network: 'stellar:testnet' },
+      },
+    })
+  }
+
+  function signedHashCredential(challenge: ReturnType<typeof freshnessChallenge>, hash: string) {
+    return Object.assign(
+      Credential.from({
+        challenge,
+        payload: {
+          type: 'signedHash',
+          hash,
+          sourceSignature: Buffer.from(
+            PAYER.sign(Buffer.from(`${challenge.id}:${hash.toLowerCase()}`)),
+          ).toString('hex'),
+        },
+      }),
+      { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
+    )
+  }
+
+  it('rejects a signedHash whose on-chain payment is older than the accepted window', async () => {
+    const tx = buildTransferTx({
+      source: PAYER.publicKey(),
+      from: PAYER.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    tx.sign(PAYER)
+
+    const oneWeekAgo = Math.floor(Date.now() / 1000) - 7 * 24 * 60 * 60
+    mockGetTransaction.mockResolvedValueOnce({
+      status: 'SUCCESS',
+      envelopeXdr: tx.toXDR(),
+      createdAt: oneWeekAgo,
+    })
+
+    const challenge = freshnessChallenge()
+    const hash = testHash('signed-hash-stale-payment')
+    const cred = signedHashCredential(challenge, hash)
+
+    const store = Store.memory()
+    const method = charge({ recipient: RECIPIENT, currency: USDC_SAC_TESTNET, store })
+
+    await expect(
+      method.verify({ credential: cred as any, request: cred.challenge.request }),
+    ).rejects.toThrow(/too old/i)
+
+    // A rejected stale payment must not consume the dedup slot.
+    expect(await store.get(`stellar:charge:hash:${hash.toLowerCase()}`)).toBeNull()
+  })
+
+  it('accepts a signedHash whose on-chain payment is recent', async () => {
+    const tx = buildTransferTx({
+      source: PAYER.publicKey(),
+      from: PAYER.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    tx.sign(PAYER)
+
+    const thirtySecondsAgo = Math.floor(Date.now() / 1000) - 30
+    mockGetTransaction.mockResolvedValueOnce({
+      status: 'SUCCESS',
+      envelopeXdr: tx.toXDR(),
+      createdAt: thirtySecondsAgo,
+    })
+
+    const challenge = freshnessChallenge()
+    const hash = testHash('signed-hash-recent-payment')
+    const cred = signedHashCredential(challenge, hash)
+
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store: Store.memory(),
+    })
+
+    const receipt = await method.verify({
+      credential: cred as any,
+      request: cred.challenge.request,
+    })
+    expect(receipt.status).toBe('success')
+  })
+
+  it('rejects a signedHash whose on-chain payment age is reported as a string and is too old', async () => {
+    const tx = buildTransferTx({
+      source: PAYER.publicKey(),
+      from: PAYER.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    tx.sign(PAYER)
+
+    // Soroban RPC returns createdAt as a JSON string of unix seconds.
+    const oneWeekAgo = Math.floor(Date.now() / 1000) - 7 * 24 * 60 * 60
+    mockGetTransaction.mockResolvedValueOnce({
+      status: 'SUCCESS',
+      envelopeXdr: tx.toXDR(),
+      createdAt: String(oneWeekAgo),
+    })
+
+    const challenge = freshnessChallenge()
+    const hash = testHash('signed-hash-stale-string-age')
+    const cred = signedHashCredential(challenge, hash)
+
+    const store = Store.memory()
+    const method = charge({ recipient: RECIPIENT, currency: USDC_SAC_TESTNET, store })
+
+    await expect(
+      method.verify({ credential: cred as any, request: cred.challenge.request }),
+    ).rejects.toThrow('On-chain payment is too old to settle this challenge.')
+
+    expect(await store.get(`stellar:charge:hash:${hash.toLowerCase()}`)).toBeNull()
+  })
+
+  it('accepts a signedHash whose on-chain payment age is reported as a string and is recent', async () => {
+    const tx = buildTransferTx({
+      source: PAYER.publicKey(),
+      from: PAYER.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    tx.sign(PAYER)
+
+    const thirtySecondsAgo = Math.floor(Date.now() / 1000) - 30
+    mockGetTransaction.mockResolvedValueOnce({
+      status: 'SUCCESS',
+      envelopeXdr: tx.toXDR(),
+      createdAt: String(thirtySecondsAgo),
+    })
+
+    const challenge = freshnessChallenge()
+    const hash = testHash('signed-hash-recent-string-age')
+    const cred = signedHashCredential(challenge, hash)
+
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store: Store.memory(),
+    })
+
+    const receipt = await method.verify({
+      credential: cred as any,
+      request: cred.challenge.request,
+    })
+    expect(receipt.status).toBe('success')
+  })
+
+  it('refuses to settle when the on-chain payment age is present but unreadable', async () => {
+    const tx = buildTransferTx({
+      source: PAYER.publicKey(),
+      from: PAYER.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    tx.sign(PAYER)
+
+    mockGetTransaction.mockResolvedValueOnce({
+      status: 'SUCCESS',
+      envelopeXdr: tx.toXDR(),
+      createdAt: 'not-a-unix-timestamp' as unknown as number,
+    })
+
+    const challenge = freshnessChallenge()
+    const hash = testHash('signed-hash-unreadable-age')
+    const cred = signedHashCredential(challenge, hash)
+
+    const store = Store.memory()
+    const method = charge({ recipient: RECIPIENT, currency: USDC_SAC_TESTNET, store })
+
+    await expect(
+      method.verify({ credential: cred as any, request: cred.challenge.request }),
+    ).rejects.toThrow('On-chain payment age is unavailable; refusing to settle this challenge.')
+
+    expect(await store.get(`stellar:charge:hash:${hash.toLowerCase()}`)).toBeNull()
+  })
+
+  // expires = now + 200 with the default 300s lifetime puts challenge issuance at
+  // now - 100, so these two tests straddle that anchor.
+  function challengeIssuedRecently() {
+    const expiresAt = (Math.floor(Date.now() / 1000) + 200) * 1000
+    return Object.assign(freshnessChallenge(), { expires: new Date(expiresAt).toISOString() })
+  }
+
+  it('rejects a signedHash whose on-chain payment predates the challenge issuance', async () => {
+    const tx = buildTransferTx({
+      source: PAYER.publicKey(),
+      from: PAYER.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    tx.sign(PAYER)
+
+    // 700s old: within the 900s wall-clock window, but ~600s before issuance.
+    const createdAtSeconds = Math.floor(Date.now() / 1000) - 700
+    mockGetTransaction.mockResolvedValueOnce({
+      status: 'SUCCESS',
+      envelopeXdr: tx.toXDR(),
+      createdAt: createdAtSeconds,
+    })
+
+    const challenge = challengeIssuedRecently()
+    const hash = testHash('signed-hash-pre-challenge-payment')
+    const cred = signedHashCredential(challenge, hash)
+
+    const store = Store.memory()
+    const method = charge({ recipient: RECIPIENT, currency: USDC_SAC_TESTNET, store })
+
+    await expect(
+      method.verify({ credential: cred as any, request: cred.challenge.request }),
+    ).rejects.toThrow('On-chain payment predates challenge issuance; cannot settle this challenge.')
+
+    expect(await store.get(`stellar:charge:hash:${hash.toLowerCase()}`)).toBeNull()
+  })
+
+  it('accepts a signedHash whose on-chain payment was confirmed after challenge issuance', async () => {
+    const tx = buildTransferTx({
+      source: PAYER.publicKey(),
+      from: PAYER.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    tx.sign(PAYER)
+
+    // 60s old: after the ~100s-ago issuance anchor, so a legitimate settlement.
+    const createdAtSeconds = Math.floor(Date.now() / 1000) - 60
+    mockGetTransaction.mockResolvedValueOnce({
+      status: 'SUCCESS',
+      envelopeXdr: tx.toXDR(),
+      createdAt: createdAtSeconds,
+    })
+
+    const challenge = challengeIssuedRecently()
+    const hash = testHash('signed-hash-post-challenge-payment')
+    const cred = signedHashCredential(challenge, hash)
+
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store: Store.memory(),
+    })
+
+    const receipt = await method.verify({
+      credential: cred as any,
+      request: cred.challenge.request,
+    })
+    expect(receipt.status).toBe('success')
+  })
+
+  it('refuses to settle when the challenge expiry is present but unreadable', async () => {
+    const tx = buildTransferTx({
+      source: PAYER.publicKey(),
+      from: PAYER.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    tx.sign(PAYER)
+
+    // Recent payment: passes the wall-clock window, so the issuance anchor is the
+    // only remaining gate. An unreadable expiry must not silently skip it.
+    const createdAtSeconds = Math.floor(Date.now() / 1000) - 30
+    mockGetTransaction.mockResolvedValueOnce({
+      status: 'SUCCESS',
+      envelopeXdr: tx.toXDR(),
+      createdAt: createdAtSeconds,
+    })
+
+    const challenge = Object.assign(freshnessChallenge(), { expires: 'not-a-valid-timestamp' })
+    const hash = testHash('signed-hash-unreadable-expiry')
+    const cred = signedHashCredential(challenge, hash)
+
+    const store = Store.memory()
+    const method = charge({ recipient: RECIPIENT, currency: USDC_SAC_TESTNET, store })
+
+    await expect(
+      method.verify({ credential: cred as any, request: cred.challenge.request }),
+    ).rejects.toThrow('Challenge expiry is unreadable; refusing to settle this challenge.')
+
+    expect(await store.get(`stellar:charge:hash:${hash.toLowerCase()}`)).toBeNull()
+  })
+})
+
 describe('charge push-mode sender verification', () => {
   it('rejects hash where the on-chain `from` does not match the credential source', async () => {
     // The tx transfers from one payer account while the credential declares another.
@@ -1025,11 +1335,31 @@ describe('charge tx hash dedup', () => {
     expect(stored).toBeNull()
   })
 
-  it('marks tx hash as used only after successful verification', async () => {
+  it('rejects a push hash whose canonical (inner) tx hash is already used', async () => {
     const store = Store.memory()
 
-    const hash = testHash('already-used-hash')
-    await store.put(`stellar:charge:hash:${hash}`, { usedAt: new Date().toISOString() })
+    const tx = buildTransferTx({
+      source: PAYER.publicKey(),
+      from: PAYER.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    tx.sign(PAYER)
+
+    // Pre-seed the canonical inner-tx-hash dedup entry as already settled. Dedup
+    // is keyed on the inner transaction hash (derived from the on-chain envelope),
+    // not on whatever hash the client presents.
+    const canonicalHash = tx.hash().toString('hex')
+    await store.put(`stellar:charge:hash:${canonicalHash}`, {
+      state: 'used',
+      usedAt: new Date().toISOString(),
+    })
+
+    mockGetTransaction.mockResolvedValueOnce({
+      status: 'SUCCESS',
+      envelopeXdr: tx.toXDR(),
+    })
 
     const method = charge({
       recipient: RECIPIENT,
@@ -1038,7 +1368,10 @@ describe('charge tx hash dedup', () => {
       allowUnsignedPush: true,
     })
 
-    const cred = makeHashCredential({ hash })
+    const cred = makeHashCredential({
+      hash: canonicalHash,
+      source: `did:pkh:stellar:testnet:${PAYER.publicKey()}`,
+    })
     await expect(
       method.verify({ credential: cred as any, request: cred.challenge.request }),
     ).rejects.toThrow('Transaction hash already used')
@@ -1657,6 +1990,67 @@ function buildTransferTx(opts: {
     builder.addMemo(Memo.hash(opts.memo.value))
   }
   return builder.addOperation(transferOp).setTimeout(180).build()
+}
+
+/**
+ * Builds a sponsored transfer transaction (source = ALL_ZEROS) carrying a valid
+ * payer-signed authorization entry bound to the transfer, mirroring what an
+ * honest sponsored client emits. Returns the envelope so callers can adjust it
+ * (e.g. inflate the fee) before serializing to XDR.
+ */
+async function buildSponsoredEnvelopeWithValidAuth(opts?: {
+  amount?: bigint
+  expirationLedger?: number
+  fee?: number
+}) {
+  const amount = opts?.amount ?? 10000000n
+  const expirationLedger = opts?.expirationLedger ?? 1010
+  const tx = buildTransferTx({
+    source: ALL_ZEROS,
+    from: PAYER.publicKey(),
+    to: RECIPIENT,
+    amount,
+    currency: USDC_SAC_TESTNET,
+  })
+  const invokeContractArgs = tx
+    .toEnvelope()
+    .v1()
+    .tx()
+    .operations()[0]
+    .body()
+    .invokeHostFunctionOp()
+    .hostFunction()
+    .invokeContract()
+  const unsignedAuthEntry = new xdr.SorobanAuthorizationEntry({
+    credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
+      new xdr.SorobanAddressCredentials({
+        address: new Address(PAYER.publicKey()).toScAddress(),
+        nonce: xdr.Int64.fromString('0'),
+        signatureExpirationLedger: expirationLedger,
+        signature: xdr.ScVal.scvVec([]),
+      }),
+    ),
+    rootInvocation: new xdr.SorobanAuthorizedInvocation({
+      function:
+        xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(invokeContractArgs),
+      subInvocations: [],
+    }),
+  })
+  const authEntry = await authorizeEntry(
+    unsignedAuthEntry,
+    PAYER,
+    expirationLedger,
+    NETWORK_PASSPHRASE,
+  )
+  const envelope = tx.toEnvelope()
+  envelope.v1().tx().operations()[0].body().invokeHostFunctionOp().auth([authEntry])
+  // The auth signature covers the invocation, not the tx fee, so an optional fee
+  // override applied here keeps the entry valid while letting callers exercise
+  // different inclusion fees.
+  if (opts?.fee !== undefined) {
+    envelope.v1().tx().fee(opts.fee)
+  }
+  return envelope
 }
 
 function makeTransactionCredential(
@@ -2286,15 +2680,16 @@ describe('charge transaction verification', () => {
       payload: { type: 'transaction', transaction: tx.toXDR() },
     })
 
-    // First call fails (wrong recipient)
+    // First call fails (wrong recipient) — a pre-broadcast verification failure.
     await expect(
       method.verify({ credential: cred as any, request: cred.challenge.request }),
     ).rejects.toThrow()
 
-    // Challenge IS claimed as 'pending' early in the verification flow.
-    // A failed verification burns the challenge — client must get a new one.
+    // The transaction never reached the ledger, so the challenge claim is rolled
+    // back rather than burned: the payer can retry the same challenge instead of
+    // being permanently locked out.
     const stored = await store.get(`stellar:charge:challenge:${challengeId}`)
-    expect((stored as any)?.state).toBe('pending')
+    expect(stored).toBeNull()
   })
 })
 
@@ -2403,6 +2798,120 @@ describe('charge pull-mode tx-hash dedup', () => {
       request: credB.challenge.request,
     })
     expect(receipt.status).toBe('success')
+  })
+})
+
+describe('charge pull-mode settlement rollback', () => {
+  beforeEach(() => {
+    mockSimulateTransaction.mockReset()
+    mockSendTransaction.mockReset()
+    mockGetTransaction.mockReset()
+    mockGetLatestLedger.mockReset()
+    mockGetAccount.mockReset()
+  })
+
+  function signedTransferCredential() {
+    const tx = buildTransferTx({
+      source: PAYER.publicKey(),
+      from: PAYER.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    tx.sign(PAYER)
+    return makeTransactionCredential(tx.toXDR())
+  }
+
+  it('releases the challenge claim when verification fails before broadcast, so the same challenge can be retried', async () => {
+    const store = Store.memory()
+    const method = charge({ recipient: RECIPIENT, currency: USDC_SAC_TESTNET, store })
+    const cred = signedTransferCredential()
+
+    // First attempt fails at simulation, before any broadcast.
+    mockSimulateTransaction.mockRejectedValueOnce(new Error('simulation boom'))
+    await expect(
+      method.verify({ credential: cred as any, request: cred.challenge.request }),
+    ).rejects.toThrow('simulation boom')
+    expect(mockSendTransaction).not.toHaveBeenCalled()
+
+    // The SAME challenge can be retried: a pre-broadcast failure released the
+    // claim instead of permanently consuming it.
+    mockSimulateTransaction.mockResolvedValueOnce({
+      result: { retval: null },
+      events: [defaultMockEvent()],
+      transactionData: new SorobanDataBuilder(),
+    })
+    mockSendTransaction.mockResolvedValueOnce({ hash: 'rollback-retry-hash', status: 'PENDING' })
+    mockGetTransaction.mockResolvedValueOnce({ status: 'SUCCESS' })
+
+    const receipt = await method.verify({
+      credential: cred as any,
+      request: cred.challenge.request,
+    })
+    expect(receipt.status).toBe('success')
+    expect(receipt.reference).toBe('rollback-retry-hash')
+  })
+
+  it('releases the challenge and tx-hash claims when the broadcast is rejected before reaching the ledger', async () => {
+    const store = Store.memory()
+    const method = charge({ recipient: RECIPIENT, currency: USDC_SAC_TESTNET, store })
+    const cred = signedTransferCredential()
+
+    mockSimulateTransaction.mockResolvedValue({
+      result: { retval: null },
+      events: [defaultMockEvent()],
+      transactionData: new SorobanDataBuilder(),
+    })
+
+    // Broadcast is rejected synchronously, so the transaction never enters the
+    // mempool and cannot be on-chain.
+    mockSendTransaction.mockResolvedValueOnce({ hash: 'rejected-hash', status: 'ERROR' })
+    await expect(
+      method.verify({ credential: cred as any, request: cred.challenge.request }),
+    ).rejects.toThrow(/ERROR/)
+
+    // The identical (deterministic) transaction can be retried under the same
+    // challenge once the network accepts it — neither claim was permanently held.
+    mockSendTransaction.mockResolvedValueOnce({ hash: 'accepted-hash', status: 'PENDING' })
+    mockGetTransaction.mockResolvedValueOnce({ status: 'SUCCESS' })
+    const receipt = await method.verify({
+      credential: cred as any,
+      request: cred.challenge.request,
+    })
+    expect(receipt.status).toBe('success')
+    expect(receipt.reference).toBe('accepted-hash')
+  })
+
+  it('keeps the challenge and tx-hash claims locked when broadcast succeeds but settlement is unconfirmed', async () => {
+    const store = Store.memory()
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store,
+      pollMaxAttempts: 1,
+      pollDelayMs: 1,
+      pollTimeoutMs: 50,
+    })
+    const cred = signedTransferCredential()
+
+    mockSimulateTransaction.mockResolvedValue({
+      result: { retval: null },
+      events: [defaultMockEvent()],
+      transactionData: new SorobanDataBuilder(),
+    })
+    mockSendTransaction.mockResolvedValue({ hash: 'pending-hash', status: 'PENDING' })
+    // Never confirms → polling gives up → settlement outcome is ambiguous.
+    mockGetTransaction.mockResolvedValue({ status: 'NOT_FOUND' })
+
+    await expect(
+      method.verify({ credential: cred as any, request: cred.challenge.request }),
+    ).rejects.toThrow(/reconciliation/i)
+
+    // The broadcast may have reached the ledger, so the same challenge must stay
+    // locked to prevent a double settlement.
+    await expect(
+      method.verify({ credential: cred as any, request: cred.challenge.request }),
+    ).rejects.toThrow('Challenge already used')
   })
 })
 
@@ -2782,17 +3291,8 @@ describe('charge sponsored path fee cap', () => {
   it('caps the rebuilt transaction fee to maxFeeBumpStroops', async () => {
     const signerKp = Keypair.random()
 
-    const tx = buildTransferTx({
-      source: ALL_ZEROS,
-      from: PAYER.publicKey(),
-      to: RECIPIENT,
-      amount: 10000000n,
-      currency: USDC_SAC_TESTNET,
-    })
-
-    // Inflate the fee via XDR manipulation
-    const envelope = tx.toEnvelope()
-    envelope.v1().tx().fee(2147483647)
+    // Inflate the inclusion fee so the server has to cap it back down.
+    const envelope = await buildSponsoredEnvelopeWithValidAuth({ fee: 2147483647 })
     const bloatedXdr = envelope.toXDR('base64')
 
     mockGetAccount.mockResolvedValueOnce(new Account(signerKp.publicKey(), '100'))
@@ -2837,6 +3337,82 @@ describe('charge sponsored path fee cap', () => {
 
     const sentTx = mockSendTransaction.mock.calls[0][0]
     expect(Number(sentTx.fee)).toBeLessThanOrEqual(10_000_000)
+  })
+})
+
+describe('charge sponsored path authorization enforcement', () => {
+  it('rejects before broadcast when enforcement-mode simulation refuses the supplied authorization', async () => {
+    const signerKp = Keypair.random()
+
+    const envelope = await buildSponsoredEnvelopeWithValidAuth()
+    const txXdr = envelope.toXDR('base64')
+
+    mockGetAccount.mockResolvedValueOnce(new Account(signerKp.publicKey(), '100'))
+    mockGetLatestLedger.mockResolvedValue({ sequence: 1000 })
+
+    // Model the documented Soroban RPC behavior: recording mode ignores the
+    // supplied authorization and returns success, while enforcement mode
+    // validates it against ledger state and rejects an entry the network would
+    // not honor. The sponsored path must use enforcement so the server does not
+    // pay to broadcast a transfer that cannot apply.
+    mockSimulateTransaction.mockImplementationOnce(
+      (_tx: unknown, _resources: unknown, authMode?: string) => {
+        if (authMode === 'enforce') {
+          return Promise.resolve({ id: 1, error: 'transaction simulation failed' })
+        }
+        return Promise.resolve({
+          result: { retval: null },
+          events: [defaultMockEvent()],
+          transactionData: new SorobanDataBuilder(),
+        })
+      },
+    )
+    mockSendTransaction.mockResolvedValue({ hash: 'should-not-broadcast', status: 'PENDING' })
+    mockGetTransaction.mockResolvedValue({ status: 'SUCCESS' })
+
+    const challenge = Challenge.from({
+      id: `test-${crypto.randomUUID()}`,
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      request: {
+        amount: '10000000',
+        currency: USDC_SAC_TESTNET,
+        recipient: RECIPIENT,
+        methodDetails: { network: 'stellar:testnet', feePayer: true },
+      },
+    })
+    const cred = Object.assign(
+      Credential.from({
+        challenge,
+        payload: { type: 'transaction', transaction: txXdr },
+      }),
+      { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
+    )
+
+    const store = Store.memory()
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      feePayer: { envelopeSigner: signerKp },
+      store,
+    })
+
+    // Isolate the broadcast assertion from calls made by earlier tests; mocks
+    // are not auto-cleared between tests in this file.
+    mockSendTransaction.mockClear()
+
+    await expect(
+      method.verify({ credential: cred as any, request: cred.challenge.request }),
+    ).rejects.toThrow('Pre-submission simulation failed')
+
+    // The server must not have broadcast (and therefore not paid a fee) for a
+    // transfer the enforcement-mode simulation rejected.
+    expect(mockSendTransaction).not.toHaveBeenCalled()
+
+    mockGetLatestLedger.mockReset()
+    mockSendTransaction.mockReset()
+    mockGetTransaction.mockReset()
   })
 })
 
@@ -2894,6 +3470,12 @@ describe('charge sponsored path expired challenge', () => {
 
 describe('charge validateAuthEntries (sponsored path)', () => {
   const signerKp = Keypair.random()
+
+  // Reset the broadcast spy before each test so the "never broadcast" assertions
+  // reflect only the test under inspection (no module-level beforeEach resets it).
+  beforeEach(() => {
+    mockSendTransaction.mockClear()
+  })
 
   /** Reuses the InvokeContractArgs from a real transfer op to keep the root
    *  invocation valid for XDR serialization purposes. */
@@ -3036,17 +3618,18 @@ describe('charge validateAuthEntries (sponsored path)', () => {
     // challenge expires in ~60s → maxLedger = 1000 + ceil(60/5) = 1012
     // auth entry expiration 1010 ≤ 1012 → accepted
     const futureExpiry = new Date(Date.now() + 60_000).toISOString()
-    const authEntry = new xdr.SorobanAuthorizationEntry({
+    const unsignedAuthEntry = new xdr.SorobanAuthorizationEntry({
       credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
         new xdr.SorobanAddressCredentials({
           address: new Address(PAYER.publicKey()).toScAddress(),
           nonce: xdr.Int64.fromString('0'),
           signatureExpirationLedger: 1010,
-          signature: xdr.ScVal.scvVoid(),
+          signature: xdr.ScVal.scvVec([]),
         }),
       ),
       rootInvocation: makeRootInvocation(),
     })
+    const authEntry = await authorizeEntry(unsignedAuthEntry, PAYER, 1010, NETWORK_PASSPHRASE)
 
     mockGetLatestLedger.mockResolvedValueOnce({ sequence: 1000 })
     mockGetAccount.mockResolvedValueOnce(new Account(signerKp.publicKey(), '100'))
@@ -3073,6 +3656,81 @@ describe('charge validateAuthEntries (sponsored path)', () => {
     expect(receipt.status).toBe('success')
   })
 
+  it('accepts an auth entry expiring a few ledgers past the strict bound (RPC ledger-view skew)', async () => {
+    // Latest ledger 1000, challenge expires in ~60s → strict maxLedger = 1000 + ceil(60/5) = 1012.
+    // The client and server read the latest ledger at different moments from a load-balanced
+    // RPC, so the client's view can sit a few ledgers ahead. Expiration 1015 is just past the
+    // strict bound but within the ledger-skew tolerance, so it must still be accepted.
+    const futureExpiry = new Date(Date.now() + 60_000).toISOString()
+    const unsignedAuthEntry = new xdr.SorobanAuthorizationEntry({
+      credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
+        new xdr.SorobanAddressCredentials({
+          address: new Address(PAYER.publicKey()).toScAddress(),
+          nonce: xdr.Int64.fromString('0'),
+          signatureExpirationLedger: 1015,
+          signature: xdr.ScVal.scvVec([]),
+        }),
+      ),
+      rootInvocation: makeRootInvocation(),
+    })
+    const authEntry = await authorizeEntry(unsignedAuthEntry, PAYER, 1015, NETWORK_PASSPHRASE)
+
+    mockGetLatestLedger.mockResolvedValueOnce({ sequence: 1000 })
+    mockGetAccount.mockResolvedValueOnce(new Account(signerKp.publicKey(), '100'))
+    mockSimulateTransaction.mockResolvedValueOnce({
+      result: { retval: null },
+      events: [defaultMockEvent()],
+      transactionData: new SorobanDataBuilder(),
+    })
+    mockSendTransaction.mockResolvedValueOnce({ hash: 'skew-within-hash', status: 'PENDING' })
+    mockGetTransaction.mockResolvedValueOnce({ status: 'SUCCESS' })
+
+    const cred = makeSponsoredCredential(buildSponsoredTxWithAuth([authEntry]), futureExpiry)
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      feePayer: { envelopeSigner: signerKp },
+      store: Store.memory(),
+    })
+
+    const receipt = await method.verify({
+      credential: cred as any,
+      request: cred.challenge.request,
+    })
+    expect(receipt.status).toBe('success')
+  })
+
+  it('rejects an auth entry expiring beyond the ledger-skew tolerance', async () => {
+    // Strict maxLedger 1012 + ledger-skew tolerance (10) = 1022; expiration 1023 is beyond it
+    // and must still be rejected, so the tolerance does not become an open-ended extension.
+    const futureExpiry = new Date(Date.now() + 60_000).toISOString()
+    const authEntry = new xdr.SorobanAuthorizationEntry({
+      credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
+        new xdr.SorobanAddressCredentials({
+          address: new Address(PAYER.publicKey()).toScAddress(),
+          nonce: xdr.Int64.fromString('0'),
+          signatureExpirationLedger: 1023,
+          signature: xdr.ScVal.scvVoid(),
+        }),
+      ),
+      rootInvocation: makeRootInvocation(),
+    })
+
+    mockGetLatestLedger.mockResolvedValueOnce({ sequence: 1000 })
+
+    const cred = makeSponsoredCredential(buildSponsoredTxWithAuth([authEntry]), futureExpiry)
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      feePayer: { envelopeSigner: signerKp },
+      store: Store.memory(),
+    })
+
+    await expect(
+      method.verify({ credential: cred as any, request: cred.challenge.request }),
+    ).rejects.toThrow('Auth entry expiration exceeds maximum allowed ledger')
+  })
+
   it('rejects auth entry that contains sub-invocations', async () => {
     const subInvocation = makeRootInvocation()
     const authEntry = new xdr.SorobanAuthorizationEntry({
@@ -3087,6 +3745,8 @@ describe('charge validateAuthEntries (sponsored path)', () => {
       rootInvocation: makeRootInvocation([subInvocation]),
     })
 
+    mockGetLatestLedger.mockResolvedValueOnce({ sequence: 100 })
+
     const cred = makeSponsoredCredential(buildSponsoredTxWithAuth([authEntry]))
     const method = charge({
       recipient: RECIPIENT,
@@ -3098,6 +3758,144 @@ describe('charge validateAuthEntries (sponsored path)', () => {
     await expect(
       method.verify({ credential: cred as any, request: cred.challenge.request }),
     ).rejects.toThrow('Auth entries must not contain sub-invocations')
+  })
+
+  it('rejects auth entry whose signature does not verify', async () => {
+    // Well-formed account-signature structure, but the signature bytes are
+    // forged. Soroban RPC simulation never checks them, so without an explicit
+    // verification the server would broadcast a transfer that fails
+    // require_auth on-chain and waste the fee it paid to settle it.
+    const forgedSignature = xdr.ScVal.scvVec([
+      nativeToScVal(
+        { public_key: PAYER.rawPublicKey(), signature: Buffer.alloc(64, 0x07) },
+        { type: { public_key: ['symbol', null], signature: ['symbol', null] } },
+      ),
+    ])
+    const authEntry = new xdr.SorobanAuthorizationEntry({
+      credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
+        new xdr.SorobanAddressCredentials({
+          address: new Address(PAYER.publicKey()).toScAddress(),
+          nonce: xdr.Int64.fromString('0'),
+          signatureExpirationLedger: 1010,
+          signature: forgedSignature,
+        }),
+      ),
+      rootInvocation: makeRootInvocation(),
+    })
+
+    mockGetLatestLedger.mockResolvedValueOnce({ sequence: 100 })
+
+    const cred = makeSponsoredCredential(buildSponsoredTxWithAuth([authEntry]))
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      feePayer: { envelopeSigner: signerKp },
+      store: Store.memory(),
+    })
+
+    await expect(
+      method.verify({ credential: cred as any, request: cred.challenge.request }),
+    ).rejects.toThrow(/signature/i)
+
+    expect(mockSendTransaction).not.toHaveBeenCalled()
+  })
+
+  it('rejects sponsored settlement when no auth entry authorizes the transfer (empty auth)', async () => {
+    const cred = makeSponsoredCredential(buildSponsoredTxWithAuth([]))
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      feePayer: { envelopeSigner: signerKp },
+      store: Store.memory(),
+    })
+
+    await expect(
+      method.verify({ credential: cred as any, request: cred.challenge.request }),
+    ).rejects.toThrow('No authorization entry authorizes the requested transfer.')
+    expect(mockSendTransaction).not.toHaveBeenCalled()
+  })
+
+  it('rejects sponsored settlement when the auth entry authorizer is not the transfer source', async () => {
+    const otherPayer = Keypair.random()
+    const unsignedAuthEntry = new xdr.SorobanAuthorizationEntry({
+      credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
+        new xdr.SorobanAddressCredentials({
+          address: new Address(otherPayer.publicKey()).toScAddress(),
+          nonce: xdr.Int64.fromString('0'),
+          signatureExpirationLedger: 1010,
+          signature: xdr.ScVal.scvVec([]),
+        }),
+      ),
+      rootInvocation: makeRootInvocation(),
+    })
+    const authEntry = await authorizeEntry(unsignedAuthEntry, otherPayer, 1010, NETWORK_PASSPHRASE)
+
+    mockGetLatestLedger.mockResolvedValueOnce({ sequence: 100 })
+
+    const cred = makeSponsoredCredential(buildSponsoredTxWithAuth([authEntry]))
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      feePayer: { envelopeSigner: signerKp },
+      store: Store.memory(),
+    })
+
+    await expect(
+      method.verify({ credential: cred as any, request: cred.challenge.request }),
+    ).rejects.toThrow('No authorization entry authorizes the requested transfer.')
+    expect(mockSendTransaction).not.toHaveBeenCalled()
+  })
+
+  it('rejects sponsored settlement when the auth entry authorizes a different transfer', async () => {
+    // A validly-signed entry by the payer, but covering a transfer to a
+    // different recipient than the operation actually settles.
+    const otherRecipient = Keypair.random().publicKey()
+    const wrongTx = buildTransferTx({
+      source: PAYER.publicKey(),
+      from: PAYER.publicKey(),
+      to: otherRecipient,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    const wrongArgs = wrongTx
+      .toEnvelope()
+      .v1()
+      .tx()
+      .operations()[0]
+      .body()
+      .invokeHostFunctionOp()
+      .hostFunction()
+      .invokeContract()
+    const unsignedAuthEntry = new xdr.SorobanAuthorizationEntry({
+      credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
+        new xdr.SorobanAddressCredentials({
+          address: new Address(PAYER.publicKey()).toScAddress(),
+          nonce: xdr.Int64.fromString('0'),
+          signatureExpirationLedger: 1010,
+          signature: xdr.ScVal.scvVec([]),
+        }),
+      ),
+      rootInvocation: new xdr.SorobanAuthorizedInvocation({
+        function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(wrongArgs),
+        subInvocations: [],
+      }),
+    })
+    const authEntry = await authorizeEntry(unsignedAuthEntry, PAYER, 1010, NETWORK_PASSPHRASE)
+
+    mockGetLatestLedger.mockResolvedValueOnce({ sequence: 100 })
+
+    const cred = makeSponsoredCredential(buildSponsoredTxWithAuth([authEntry]))
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      feePayer: { envelopeSigner: signerKp },
+      store: Store.memory(),
+    })
+
+    await expect(
+      method.verify({ credential: cred as any, request: cred.challenge.request }),
+    ).rejects.toThrow('No authorization entry authorizes the requested transfer.')
+    expect(mockSendTransaction).not.toHaveBeenCalled()
   })
 })
 
@@ -3470,13 +4268,7 @@ describe('charge sponsored path sequence number', () => {
     const signerKp = Keypair.random()
     const serverSeq = '200'
 
-    const tx = buildTransferTx({
-      source: ALL_ZEROS,
-      from: PAYER.publicKey(),
-      to: RECIPIENT,
-      amount: 10000000n,
-      currency: USDC_SAC_TESTNET,
-    })
+    const envelope = await buildSponsoredEnvelopeWithValidAuth()
 
     mockGetAccount.mockResolvedValueOnce(new Account(signerKp.publicKey(), serverSeq))
     mockGetLatestLedger.mockResolvedValueOnce({ sequence: 1000 })
@@ -3503,7 +4295,7 @@ describe('charge sponsored path sequence number', () => {
     const cred = Object.assign(
       Credential.from({
         challenge,
-        payload: { type: 'transaction', transaction: tx.toXDR() },
+        payload: { type: 'transaction', transaction: envelope.toXDR('base64') },
       }),
       { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
     )
@@ -3781,5 +4573,457 @@ describe('atomic challenge replay protection', () => {
 
     // Verify that store.update was called for the challenge dedup
     expect(updateSpy).toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Fee-bump cross-mode dedup: a fee-bump has two on-chain-resolvable hashes
+// (inner tx hash and outer fee-bump hash). The dedup key MUST be canonical per
+// on-chain payment so a payment settled via pull cannot be re-settled via push
+// (or vice-versa) by presenting the other hash.
+// ---------------------------------------------------------------------------
+describe('charge fee-bump cross-mode dedup (canonical inner hash)', () => {
+  beforeEach(() => {
+    mockGetTransaction.mockReset()
+    mockSimulateTransaction.mockReset()
+    mockSendTransaction.mockReset()
+  })
+
+  function buildSignedFeeBump() {
+    const innerTx = buildTransferTx({
+      source: PAYER.publicKey(),
+      from: PAYER.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    innerTx.sign(PAYER)
+    const feeSource = Keypair.random()
+    const feeBumpTx = TransactionBuilder.buildFeeBumpTransaction(
+      feeSource,
+      '200',
+      innerTx,
+      NETWORK_PASSPHRASE,
+    )
+    feeBumpTx.sign(feeSource)
+    return { innerTx, feeBumpTx }
+  }
+
+  function makeFreshChallenge() {
+    return Challenge.from({
+      id: `test-${crypto.randomUUID()}`,
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      request: {
+        amount: '10000000',
+        currency: USDC_SAC_TESTNET,
+        recipient: RECIPIENT,
+        methodDetails: { network: 'stellar:testnet' },
+      },
+    })
+  }
+
+  async function settleViaPull(
+    store: ReturnType<typeof Store.memory>,
+    feeBumpTx: FeeBumpTransaction,
+  ) {
+    mockSimulateTransaction.mockResolvedValueOnce({
+      result: { retval: null },
+      events: [defaultMockEvent()],
+      transactionData: new SorobanDataBuilder(),
+    })
+    mockSendTransaction.mockResolvedValueOnce({
+      hash: feeBumpTx.hash().toString('hex'),
+      status: 'PENDING',
+    })
+    mockGetTransaction.mockResolvedValueOnce({ status: 'SUCCESS' }) // poll
+    const method = charge({ recipient: RECIPIENT, currency: USDC_SAC_TESTNET, store })
+    const pullCred = makeTransactionCredential(feeBumpTx.toEnvelope().toXDR('base64'))
+    const receipt = await method.verify({
+      credential: pullCred as any,
+      request: pullCred.challenge.request,
+    })
+    expect(receipt.status).toBe('success')
+  }
+
+  it('rejects a signedHash push reusing the OUTER hash of a fee-bump already settled via pull', async () => {
+    const store = Store.memory()
+    const { feeBumpTx } = buildSignedFeeBump()
+    const outerHash = feeBumpTx.hash().toString('hex')
+
+    await settleViaPull(store, feeBumpTx)
+
+    // Push leg: fresh challenge, reuse the OUTER fee-bump hash the attacker controls.
+    mockGetTransaction.mockResolvedValueOnce({
+      status: 'SUCCESS',
+      envelopeXdr: feeBumpTx.toEnvelope().toXDR('base64'),
+    })
+    const challengeB = makeFreshChallenge()
+    const pushCred = Object.assign(
+      Credential.from({
+        challenge: challengeB,
+        payload: {
+          type: 'signedHash',
+          hash: outerHash,
+          sourceSignature: Buffer.from(
+            PAYER.sign(Buffer.from(`${challengeB.id}:${outerHash}`)),
+          ).toString('hex'),
+        },
+      }),
+      { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
+    )
+
+    const method = charge({ recipient: RECIPIENT, currency: USDC_SAC_TESTNET, store })
+    await expect(
+      method.verify({ credential: pushCred as any, request: pushCred.challenge.request }),
+    ).rejects.toThrow('Transaction hash already used')
+  })
+
+  it('rejects a legacy hash push reusing the OUTER hash of a fee-bump already settled via pull', async () => {
+    const store = Store.memory()
+    const { feeBumpTx } = buildSignedFeeBump()
+    const outerHash = feeBumpTx.hash().toString('hex')
+
+    await settleViaPull(store, feeBumpTx)
+
+    mockGetTransaction.mockResolvedValueOnce({
+      status: 'SUCCESS',
+      envelopeXdr: feeBumpTx.toEnvelope().toXDR('base64'),
+    })
+    const challengeB = makeFreshChallenge()
+    const pushCred = Object.assign(
+      Credential.from({
+        challenge: challengeB,
+        payload: { type: 'hash', hash: outerHash },
+      }),
+      { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
+    )
+
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store,
+      allowUnsignedPush: true,
+    })
+    await expect(
+      method.verify({ credential: pushCred as any, request: pushCred.challenge.request }),
+    ).rejects.toThrow('Transaction hash already used')
+  })
+
+  it('still settles a standalone fee-bump push when the payment was not previously settled', async () => {
+    const store = Store.memory()
+    const { feeBumpTx } = buildSignedFeeBump()
+    const outerHash = feeBumpTx.hash().toString('hex')
+
+    mockGetTransaction.mockResolvedValueOnce({
+      status: 'SUCCESS',
+      envelopeXdr: feeBumpTx.toEnvelope().toXDR('base64'),
+    })
+    const challenge = makeFreshChallenge()
+    const pushCred = Object.assign(
+      Credential.from({
+        challenge,
+        payload: {
+          type: 'signedHash',
+          hash: outerHash,
+          sourceSignature: Buffer.from(
+            PAYER.sign(Buffer.from(`${challenge.id}:${outerHash}`)),
+          ).toString('hex'),
+        },
+      }),
+      { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
+    )
+
+    const method = charge({ recipient: RECIPIENT, currency: USDC_SAC_TESTNET, store })
+    const receipt = await method.verify({
+      credential: pushCred as any,
+      request: pushCred.challenge.request,
+    })
+    expect(receipt.status).toBe('success')
+  })
+})
+
+describe('charge sponsored fee handling', () => {
+  const envelopeKP = Keypair.random()
+
+  beforeEach(() => {
+    mockGetAccount.mockReset()
+    mockSimulateTransaction.mockReset()
+    mockSendTransaction.mockReset()
+    mockGetTransaction.mockReset()
+  })
+
+  async function sponsoredTransferCredential(clientFee: string) {
+    // A valid payer-signed auth entry plus the client's chosen inclusion fee.
+    const envelope = await buildSponsoredEnvelopeWithValidAuth({ fee: Number(clientFee) })
+    const txXdr = envelope.toXDR('base64')
+    const challenge = Challenge.from({
+      id: `test-${crypto.randomUUID()}`,
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      request: {
+        amount: '10000000',
+        currency: USDC_SAC_TESTNET,
+        recipient: RECIPIENT,
+        methodDetails: { network: 'stellar:testnet', feePayer: true },
+      },
+    })
+    return Object.assign(
+      Credential.from({ challenge, payload: { type: 'transaction', transaction: txXdr } }),
+      { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
+    )
+  }
+
+  it('sets the sponsored inclusion fee to BASE_FEE regardless of the client tx.fee', async () => {
+    mockGetLatestLedger.mockResolvedValue({ sequence: 100 })
+    mockGetAccount.mockResolvedValue(new Account(envelopeKP.publicKey(), '5'))
+    mockSimulateTransaction.mockResolvedValue({
+      result: { retval: null },
+      events: [defaultMockEvent()],
+      transactionData: new SorobanDataBuilder(),
+    })
+    let submittedFee: string | undefined
+    mockSendTransaction.mockImplementation((submitted: { fee: string }) => {
+      submittedFee = submitted.fee
+      return Promise.resolve({ hash: 'sponsored-fee-hash', status: 'PENDING' })
+    })
+    mockGetTransaction.mockResolvedValue({ status: 'SUCCESS' })
+
+    // Client inflates tx.fee up to the server's per-settlement cap.
+    const cred = await sponsoredTransferCredential('10000000')
+
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      feePayer: { envelopeSigner: envelopeKP },
+      store: Store.memory(),
+    })
+    await method.verify({ credential: cred as any, request: cred.challenge.request })
+
+    expect(submittedFee).toBe(BASE_FEE)
+  })
+
+  it('rejects when the simulated resource fee pushes the total past the per-settlement cap', async () => {
+    mockGetLatestLedger.mockResolvedValue({ sequence: 100 })
+    mockGetAccount.mockResolvedValue(new Account(envelopeKP.publicKey(), '5'))
+    mockSimulateTransaction.mockResolvedValue({
+      result: { retval: null },
+      events: [defaultMockEvent()],
+      transactionData: new SorobanDataBuilder().setResourceFee(20_000_000n),
+    })
+    mockSendTransaction.mockResolvedValue({ hash: 'should-not-broadcast', status: 'PENDING' })
+    mockGetTransaction.mockResolvedValue({ status: 'SUCCESS' })
+
+    const cred = await sponsoredTransferCredential(BASE_FEE)
+
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      feePayer: { envelopeSigner: envelopeKP },
+      store: Store.memory(),
+    })
+
+    await expect(
+      method.verify({ credential: cred as any, request: cred.challenge.request }),
+    ).rejects.toThrow(/fee/i)
+
+    expect(mockSendTransaction).not.toHaveBeenCalled()
+  })
+})
+
+describe('charge sponsored auth-entry expiration', () => {
+  const ENVELOPE = Keypair.random()
+
+  beforeEach(() => {
+    mockGetAccount.mockReset()
+    mockSimulateTransaction.mockReset()
+    mockSendTransaction.mockReset()
+    mockGetTransaction.mockReset()
+    mockGetLatestLedger.mockReset()
+  })
+
+  async function sponsoredCredentialWithAuthEntry(validUntilLedger: number) {
+    const account = new Account(ALL_ZEROS, '0')
+    const contract = new Contract(USDC_SAC_TESTNET)
+    const transferOp = contract.call(
+      'transfer',
+      new Address(PAYER.publicKey()).toScVal(),
+      new Address(RECIPIENT).toScVal(),
+      nativeToScVal(10000000n, { type: 'i128' }),
+    )
+    const invocation = new xdr.SorobanAuthorizedInvocation({
+      function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(
+        new xdr.InvokeContractArgs({
+          contractAddress: contract.address().toScAddress(),
+          functionName: 'transfer',
+          args: [
+            new Address(PAYER.publicKey()).toScVal(),
+            new Address(RECIPIENT).toScVal(),
+            nativeToScVal(10000000n, { type: 'i128' }),
+          ],
+        }),
+      ),
+      subInvocations: [],
+    })
+    const auth = await authorizeInvocation(
+      PAYER,
+      validUntilLedger,
+      invocation,
+      PAYER.publicKey(),
+      NETWORK_PASSPHRASE,
+    )
+    transferOp.body().invokeHostFunctionOp().auth().push(auth)
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: NETWORK_PASSPHRASE,
+    })
+      .addOperation(transferOp)
+      .setTimeout(180)
+      .build()
+    const challenge = Challenge.from({
+      id: `test-${crypto.randomUUID()}`,
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      request: {
+        amount: '10000000',
+        currency: USDC_SAC_TESTNET,
+        recipient: RECIPIENT,
+        methodDetails: { network: 'stellar:testnet', feePayer: true },
+      },
+    })
+    return Object.assign(
+      Credential.from({ challenge, payload: { type: 'transaction', transaction: tx.toXDR() } }),
+      { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
+    )
+  }
+
+  it('rejects an auth entry whose signature expiration is at or below the latest ledger', async () => {
+    mockGetLatestLedger.mockResolvedValue({ sequence: 100 })
+    mockGetAccount.mockResolvedValue(new Account(ENVELOPE.publicKey(), '5'))
+    mockSimulateTransaction.mockResolvedValue({
+      result: { retval: null },
+      events: [defaultMockEvent()],
+      transactionData: new SorobanDataBuilder(),
+    })
+    mockSendTransaction.mockResolvedValue({ hash: 'should-not-broadcast', status: 'PENDING' })
+    mockGetTransaction.mockResolvedValue({ status: 'SUCCESS' })
+
+    const cred = await sponsoredCredentialWithAuthEntry(50) // expires at ledger 50 <= 100
+
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      feePayer: { envelopeSigner: ENVELOPE },
+      store: Store.memory(),
+    })
+
+    await expect(
+      method.verify({ credential: cred as any, request: cred.challenge.request }),
+    ).rejects.toThrow(/expired/i)
+
+    expect(mockSendTransaction).not.toHaveBeenCalled()
+  })
+
+  it('accepts and settles an auth entry that expires after the latest ledger', async () => {
+    mockGetLatestLedger.mockResolvedValue({ sequence: 100 })
+    mockGetAccount.mockResolvedValue(new Account(ENVELOPE.publicKey(), '5'))
+    mockSimulateTransaction.mockResolvedValue({
+      result: { retval: null },
+      events: [defaultMockEvent()],
+      transactionData: new SorobanDataBuilder(),
+    })
+    mockSendTransaction.mockResolvedValue({ hash: 'sponsored-auth-ok', status: 'PENDING' })
+    mockGetTransaction.mockResolvedValue({ status: 'SUCCESS' })
+
+    const cred = await sponsoredCredentialWithAuthEntry(200) // expires at ledger 200 > 100
+
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      feePayer: { envelopeSigner: ENVELOPE },
+      store: Store.memory(),
+    })
+
+    const receipt = await method.verify({
+      credential: cred as any,
+      request: cred.challenge.request,
+    })
+    expect(receipt.status).toBe('success')
+    expect(mockSendTransaction).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('charge sponsored dedup key (canonical on-chain inner hash)', () => {
+  const envelopeKP = Keypair.random()
+
+  beforeEach(() => {
+    mockGetAccount.mockReset()
+    mockGetLatestLedger.mockReset()
+    mockSimulateTransaction.mockReset()
+    mockSendTransaction.mockReset()
+    mockGetTransaction.mockReset()
+  })
+
+  it('dedups a sponsored settlement on the broadcast inner hash, not the client tx hash', async () => {
+    const store = Store.memory()
+    const clientEnvelope = await buildSponsoredEnvelopeWithValidAuth()
+    const clientXdr = clientEnvelope.toXDR('base64')
+    const clientTxHash = new Transaction(clientXdr, NETWORK_PASSPHRASE).hash().toString('hex')
+
+    mockGetLatestLedger.mockResolvedValue({ sequence: 100 })
+    mockGetAccount.mockResolvedValue(new Account(envelopeKP.publicKey(), '5'))
+    mockSimulateTransaction.mockResolvedValue({
+      result: { retval: null },
+      events: [defaultMockEvent()],
+      transactionData: new SorobanDataBuilder(),
+    })
+    let submittedInnerHash: string | undefined
+    mockSendTransaction.mockImplementation((submitted: Transaction | FeeBumpTransaction) => {
+      const inner = submitted instanceof FeeBumpTransaction ? submitted.innerTransaction : submitted
+      submittedInnerHash = inner.hash().toString('hex')
+      return Promise.resolve({ hash: submittedInnerHash, status: 'PENDING' })
+    })
+    mockGetTransaction.mockResolvedValue({ status: 'SUCCESS' })
+
+    const challenge = Challenge.from({
+      id: `test-${crypto.randomUUID()}`,
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      request: {
+        amount: '10000000',
+        currency: USDC_SAC_TESTNET,
+        recipient: RECIPIENT,
+        methodDetails: { network: 'stellar:testnet', feePayer: true },
+      },
+    })
+    const cred = Object.assign(
+      Credential.from({ challenge, payload: { type: 'transaction', transaction: clientXdr } }),
+      { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
+    )
+
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      feePayer: { envelopeSigner: envelopeKP },
+      store,
+    })
+    const receipt = await method.verify({
+      credential: cred as any,
+      request: cred.challenge.request,
+    })
+    expect(receipt.status).toBe('success')
+
+    expect(submittedInnerHash).toBeDefined()
+    // The rebuilt (broadcast) tx has the signer as source, so its hash differs
+    // from the client's ALL_ZEROS-source tx.
+    expect(submittedInnerHash).not.toBe(clientTxHash)
+    // Dedup must key on the actual on-chain inner hash — the same key push mode
+    // derives from the on-chain envelope — not the client's pre-rebuild tx hash.
+    expect(await store.get(`stellar:charge:hash:${submittedInnerHash}`)).not.toBeNull()
+    expect(await store.get(`stellar:charge:hash:${clientTxHash}`)).toBeNull()
   })
 })
