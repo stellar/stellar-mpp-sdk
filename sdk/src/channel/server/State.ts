@@ -7,9 +7,10 @@ import {
   STELLAR_TESTNET,
   type NetworkId,
 } from '../../constants.js'
-import { DEFAULT_SIM_TIMEOUT_SECS } from '../../shared/defaults.js'
+import { DEFAULT_SIM_TIMEOUT_SECS, DEFAULT_SIMULATION_TIMEOUT_MS } from '../../shared/defaults.js'
 import { StellarMppError } from '../../shared/errors.js'
 import { scValToBigInt } from '../../shared/scval.js'
+import { withTimeout } from '../../shared/timeout.js'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -62,7 +63,12 @@ export type ChannelState = {
 export async function getChannelState(
   parameters: getChannelState.Parameters,
 ): Promise<ChannelState> {
-  const { channel: channelAddress, network = STELLAR_TESTNET, rpcUrl } = parameters
+  const {
+    channel: channelAddress,
+    network = STELLAR_TESTNET,
+    rpcUrl,
+    simulationTimeoutMs = DEFAULT_SIMULATION_TIMEOUT_MS,
+  } = parameters
 
   const resolvedRpcUrl = rpcUrl ?? SOROBAN_RPC_URLS[network]
   const networkPassphrase = NETWORK_PASSPHRASE[network]
@@ -81,7 +87,11 @@ export async function getChannelState(
       .setTimeout(DEFAULT_SIM_TIMEOUT_SECS)
       .build()
 
-    const result = await server.simulateTransaction(tx)
+    const result = await withTimeout(
+      server.simulateTransaction(tx),
+      simulationTimeoutMs,
+      `simulate ${fnName} on channel ${channelAddress}`,
+    )
     if (!rpc.Api.isSimulationSuccess(result)) {
       const errorMsg = 'error' in result ? String(result.error) : 'unknown'
       throw new StellarMppError(
@@ -114,9 +124,17 @@ export async function getChannelState(
   // Read CloseEffectiveAtLedger from contract instance storage.
   // The contract uses DataKey::CloseEffectiveAtLedger (enum variant index 5)
   // stored in instance storage.
-  const closeEffectiveAtLedger = await readCloseEffectiveAtLedger(server, channelAddress)
+  const closeEffectiveAtLedger = await readCloseEffectiveAtLedger(
+    server,
+    channelAddress,
+    simulationTimeoutMs,
+  )
 
-  const latestLedger = await server.getLatestLedger()
+  const latestLedger = await withTimeout(
+    server.getLatestLedger(),
+    simulationTimeoutMs,
+    `getLatestLedger for channel ${channelAddress}`,
+  )
 
   return {
     balance,
@@ -137,6 +155,12 @@ export declare namespace getChannelState {
     network?: NetworkId
     /** Custom Soroban RPC URL. */
     rpcUrl?: string
+    /**
+     * Per-RPC timeout in milliseconds. Each on-chain getter, the instance-storage
+     * read, and the latest-ledger query is bounded by this so a hung RPC cannot
+     * stall the caller indefinitely. @default 10000
+     */
+    simulationTimeoutMs?: number
   }
 }
 
@@ -159,6 +183,7 @@ export declare namespace getChannelState {
 async function readCloseEffectiveAtLedger(
   server: rpc.Server,
   channelAddress: string,
+  simulationTimeoutMs: number,
 ): Promise<number | null> {
   // Build the LedgerKey for the contract's instance entry
   const contractId = Address.fromString(channelAddress)
@@ -170,7 +195,11 @@ async function readCloseEffectiveAtLedger(
     }),
   )
 
-  const response = await server.getLedgerEntries(instanceKey)
+  const response = await withTimeout(
+    server.getLedgerEntries(instanceKey),
+    simulationTimeoutMs,
+    `getLedgerEntries for channel ${channelAddress}`,
+  )
   if (!response.entries || response.entries.length === 0) {
     return null
   }

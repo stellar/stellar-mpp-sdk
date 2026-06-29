@@ -1,4 +1,4 @@
-import { Account, Address, Keypair, xdr } from '@stellar/stellar-sdk'
+import { Account, Address, Keypair, Networks, Transaction, xdr } from '@stellar/stellar-sdk'
 import { Challenge, Credential, Store } from 'mppx'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -58,6 +58,21 @@ mockGetAccount.mockResolvedValue({
   sequence: () => '0',
   incrementSequenceNumber: () => {},
 })
+
+// Default on-chain state: an open channel with ample balance. Tests asserting a
+// specific on-chain condition override this with `mockResolvedValueOnce`. The
+// default keeps tests that don't pin a state independent of cross-test mock
+// leakage (mocks are not auto-cleared between tests).
+const mockHealthyChannelState = () => ({
+  balance: 1_000_000_000_000n,
+  refundWaitingPeriod: 1000,
+  token: 'CTOKEN...',
+  from: 'GFROM...',
+  to: 'GTO...',
+  closeEffectiveAtLedger: null,
+  currentLedger: 4000,
+})
+mockGetChannelState.mockResolvedValue(mockHealthyChannelState())
 
 const COMMITMENT_KEY = Keypair.random()
 const CHANNEL_ADDRESS = 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526'
@@ -350,6 +365,11 @@ describe('stellar server channel', () => {
 
 describe('stellar server channel verification', () => {
   beforeEach(() => {
+    // Reset first to drop any queued mockResolvedValueOnce left unconsumed by a
+    // prior test: cheap monotonicity/coverage rejections now short-circuit before
+    // the signature-verify simulate, so a pre-loaded once-value would otherwise
+    // leak into the next test. The default is re-established immediately below.
+    mockSimulateTransaction.mockReset()
     // Default mock for verifyCommitmentSignature (called before cumulative checks)
     mockSimulateTransaction.mockResolvedValue({
       error: undefined,
@@ -560,6 +580,80 @@ describe('stellar server channel verification', () => {
     ).rejects.toThrow('Commitment signature verification failed')
   })
 
+  it('verifies the commitment signature before querying on-chain state', async () => {
+    // A forged voucher (valid hex, wrong ed25519 signature) must be rejected by
+    // the cheap commitment-signature check before the server spends the on-chain
+    // state query's RPC calls. Otherwise an attacker holding a fresh challenge
+    // could amplify each junk voucher into the full multi-call state read.
+    mockGetChannelState.mockResolvedValue({
+      balance: 1000000n,
+      refundWaitingPeriod: 1000,
+      token: 'CTOKEN...',
+      from: 'GFROM...',
+      to: 'GTO...',
+      closeEffectiveAtLedger: null,
+      currentLedger: 4000,
+    })
+    const commitmentBytes = Buffer.from('amplification-guard-bytes')
+    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
+
+    const credential = makeCredential({
+      amount: '1000000',
+      challengeAmount: '1000000',
+      signature: 'ab'.repeat(64), // 128 hex chars, valid length, invalid signature
+    })
+
+    // checkOnChainState defaults to true, so the on-chain read is enabled.
+    const method = channel({
+      channel: CHANNEL_ADDRESS,
+      commitmentKey: COMMITMENT_KEY,
+      store: Store.memory(),
+    })
+
+    // Mocks are not auto-cleared between tests; isolate this assertion to the
+    // call (if any) made by the verify() below.
+    mockGetChannelState.mockClear()
+    await expect(
+      method.verify({
+        credential: credential as any,
+        request: credential.challenge.request,
+      }),
+    ).rejects.toThrow('Commitment signature verification failed')
+    expect(mockGetChannelState).not.toHaveBeenCalled()
+  })
+
+  it('rejects a non-monotonic commitment before any signature-verify or on-chain-state RPC', async () => {
+    // A credential below the stored cumulative cannot advance the channel, so it
+    // must be rejected by the cheap monotonicity check before the server spends
+    // the signature-verify and on-chain-state RPC calls. Otherwise a flood of
+    // stale commitments could amplify into RPC load.
+    const store = Store.memory()
+    await store.put(`stellar:channel:cumulative:${CHANNEL_ADDRESS}`, { amount: '10000' })
+
+    const credential = makeSignedCredential({
+      commitmentBytes: Buffer.from('non-monotonic-precheck-bytes'),
+      cumulativeAmount: 1000n, // below the stored cumulative of 10000
+      challengeAmount: '1000',
+      previousCumulative: '10000',
+    })
+
+    const method = channel({
+      channel: CHANNEL_ADDRESS,
+      commitmentKey: COMMITMENT_KEY,
+      store,
+    })
+
+    mockSimulateTransaction.mockClear()
+    mockGetChannelState.mockClear()
+
+    await expect(
+      method.verify({ credential: credential as any, request: credential.challenge.request }),
+    ).rejects.toThrow('must be greater than previous cumulative')
+
+    expect(mockSimulateTransaction).not.toHaveBeenCalled()
+    expect(mockGetChannelState).not.toHaveBeenCalled()
+  })
+
   it('accepts valid commitment and updates cumulative in store', async () => {
     const commitmentBytes = Buffer.from('valid-commitment-bytes')
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
@@ -679,6 +773,92 @@ describe('stellar server channel verification', () => {
         request: credential.challenge.request,
       }),
     ).rejects.toThrow('Close action requires a feePayer')
+  })
+
+  it('does not brick a voucher-only channel when a close credential is rejected', async () => {
+    // Persistent simulate mock with shared bytes — both credentials sign these.
+    const commitmentBytes = Buffer.from('p25-voucher-only')
+    mockSimulateTransaction.mockResolvedValue(successSimResult(commitmentBytes))
+
+    const store = Store.memory()
+    const method = channel({
+      channel: CHANNEL_ADDRESS,
+      checkOnChainState: false,
+      commitmentKey: COMMITMENT_KEY,
+      store,
+    })
+
+    // Close is rejected because no envelope signer is configured.
+    const closeCred = makeSignedCredential({
+      action: 'close',
+      commitmentBytes,
+      cumulativeAmount: 1000000n,
+      challengeAmount: '1000000',
+    })
+    await expect(
+      method.verify({ credential: closeCred as any, request: closeCred.challenge.request }),
+    ).rejects.toThrow('Close action requires a feePayer')
+
+    // No settling state should have been written.
+    expect(await store.get(`stellar:channel:settling:${CHANNEL_ADDRESS}`)).toBeNull()
+
+    // A subsequent voucher still succeeds — the channel was not left settling.
+    const voucherCred = makeSignedCredential({
+      action: 'voucher',
+      commitmentBytes,
+      cumulativeAmount: 2000000n,
+      challengeAmount: '2000000',
+    })
+    const receipt = await method.verify({
+      credential: voucherCred as any,
+      request: voucherCred.challenge.request,
+    })
+    expect(receipt.status).toBe('success')
+  })
+
+  it('rolls back settling markers when settlement fails before broadcast', async () => {
+    const commitmentBytes = Buffer.from('p25-rollback')
+    mockSimulateTransaction.mockResolvedValue(successSimResult(commitmentBytes))
+    mockPrepareTransaction.mockReset()
+    mockPrepareTransaction.mockRejectedValueOnce(new Error('pre-broadcast failure'))
+
+    const signerKp = Keypair.random()
+    const store = Store.memory()
+    const method = channel({
+      channel: CHANNEL_ADDRESS,
+      checkOnChainState: false,
+      commitmentKey: COMMITMENT_KEY,
+      feePayer: { envelopeSigner: signerKp },
+      store,
+    })
+
+    // Close passes validation but settlement fails before broadcast.
+    const closeCred = makeSignedCredential({
+      action: 'close',
+      commitmentBytes,
+      cumulativeAmount: 5000000n,
+      challengeAmount: '5000000',
+    })
+    await expect(
+      method.verify({ credential: closeCred as any, request: closeCred.challenge.request }),
+    ).rejects.toThrow('pre-broadcast failure')
+    expect(mockSendTransaction).not.toHaveBeenCalled()
+
+    // Settling marker rolled back.
+    expect(await store.get(`stellar:channel:settling:${CHANNEL_ADDRESS}`)).toBeNull()
+
+    // A subsequent voucher above the attempted close amount still succeeds.
+    const voucherCred = makeSignedCredential({
+      action: 'voucher',
+      commitmentBytes,
+      cumulativeAmount: 6000000n,
+      challengeAmount: '1000000',
+    })
+    const receipt = await method.verify({
+      credential: voucherCred as any,
+      request: voucherCred.challenge.request,
+    })
+    expect(receipt.status).toBe('success')
   })
 
   it('settles close on-chain and marks channel as closed in store', async () => {
@@ -927,8 +1107,12 @@ describe('stellar server channel dispute detection', () => {
       currentLedger: 5500, // past effective → closed
     })
 
-    const credential = makeCredential({
-      amount: '1000000',
+    const commitmentBytes = Buffer.from('closed-channel-bytes')
+    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
+
+    const credential = makeSignedCredential({
+      commitmentBytes,
+      cumulativeAmount: 1000000n,
       challengeAmount: '1000000',
     })
 
@@ -994,8 +1178,12 @@ describe('stellar server channel dispute detection', () => {
   it('rejects voucher when on-chain check fails (network error)', async () => {
     mockGetChannelState.mockRejectedValueOnce(new Error('network timeout'))
 
-    const credential = makeCredential({
-      amount: '1000000',
+    const commitmentBytes = Buffer.from('network-error-bytes')
+    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
+
+    const credential = makeSignedCredential({
+      commitmentBytes,
+      cumulativeAmount: 1000000n,
       challengeAmount: '1000000',
     })
 
@@ -1118,8 +1306,12 @@ describe('stellar server channel dispute detection', () => {
   it('wraps non-Error thrown by getChannelState in ChannelVerificationError', async () => {
     mockGetChannelState.mockRejectedValueOnce('raw string failure')
 
-    const credential = makeCredential({
-      amount: '1000000',
+    const commitmentBytes = Buffer.from('non-error-throw-bytes')
+    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
+
+    const credential = makeSignedCredential({
+      commitmentBytes,
+      cumulativeAmount: 1000000n,
       challengeAmount: '1000000',
     })
 
@@ -1226,8 +1418,12 @@ describe('stellar server channel dispute detection', () => {
       currentLedger: 4000,
     })
 
-    const credential = makeCredential({
-      amount: '1000000',
+    const commitmentBytes = Buffer.from('exceeds-balance-bytes')
+    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
+
+    const credential = makeSignedCredential({
+      commitmentBytes,
+      cumulativeAmount: 1000000n,
       challengeAmount: '1000000',
     })
 
@@ -2513,5 +2709,272 @@ describe('atomic challenge replay protection (channel)', () => {
     // Verify cumulative was updated
     const updated = await store.get(`stellar:channel:cumulative:${CHANNEL_ADDRESS}`)
     expect((updated as any).amount).toBe('200')
+  })
+})
+
+describe('channel server recipient pinning (on-chain payout address validation)', () => {
+  const configuredRecipient = Keypair.random().publicKey()
+  const unexpectedRecipient = Keypair.random().publicKey()
+
+  beforeEach(() => {
+    mockGetChannelState.mockReset()
+    mockSimulateTransaction.mockReset()
+  })
+
+  function mockChannelStateWithRecipient(to: string) {
+    return {
+      balance: 1000000n,
+      refundWaitingPeriod: 1000,
+      token: 'CTOKEN...',
+      from: 'GFROM...',
+      to,
+      closeEffectiveAtLedger: null,
+      currentLedger: 4000,
+    }
+  }
+
+  it('rejects a voucher when the on-chain payout address does not match the configured recipient', async () => {
+    mockGetChannelState.mockResolvedValueOnce(mockChannelStateWithRecipient(unexpectedRecipient))
+    const commitmentBytes = Buffer.from('recipient-pin-mismatch')
+    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
+
+    const credential = makeSignedCredential({
+      commitmentBytes,
+      cumulativeAmount: 1000000n,
+      challengeAmount: '1000000',
+    })
+
+    const method = channel({
+      channel: CHANNEL_ADDRESS,
+      commitmentKey: COMMITMENT_KEY,
+      recipient: configuredRecipient,
+      store: Store.memory(),
+    })
+
+    await expect(
+      method.verify({ credential: credential as any, request: credential.challenge.request }),
+    ).rejects.toThrow('Channel payout address does not match the configured recipient.')
+  })
+
+  it('accepts a voucher when the on-chain payout address matches the configured recipient', async () => {
+    mockGetChannelState.mockResolvedValueOnce(mockChannelStateWithRecipient(configuredRecipient))
+    const commitmentBytes = Buffer.from('recipient-pin-match')
+    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
+
+    const credential = makeSignedCredential({
+      commitmentBytes,
+      cumulativeAmount: 1000000n,
+      challengeAmount: '1000000',
+    })
+
+    const method = channel({
+      channel: CHANNEL_ADDRESS,
+      commitmentKey: COMMITMENT_KEY,
+      recipient: configuredRecipient,
+      store: Store.memory(),
+    })
+
+    const receipt = await method.verify({
+      credential: credential as any,
+      request: credential.challenge.request,
+    })
+    expect(receipt.status).toBe('success')
+  })
+
+  it('warns at construction when no recipient is configured while on-chain checks are enabled', () => {
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+
+    channel({
+      channel: CHANNEL_ADDRESS,
+      commitmentKey: COMMITMENT_KEY,
+      store: Store.memory(),
+      logger,
+    })
+
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('recipient'))
+  })
+})
+
+describe('channel server currency pinning (on-chain token validation)', () => {
+  const configuredCurrency = 'CTOKENEXPECTEDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+  const unexpectedToken = 'CTOKENATTACKERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+
+  beforeEach(() => {
+    mockGetChannelState.mockReset()
+    mockSimulateTransaction.mockReset()
+  })
+
+  function mockChannelStateWithToken(token: string) {
+    return {
+      balance: 1000000n,
+      refundWaitingPeriod: 1000,
+      token,
+      from: 'GFROM...',
+      to: 'GTO...',
+      closeEffectiveAtLedger: null,
+      currentLedger: 4000,
+    }
+  }
+
+  it('rejects a voucher when the on-chain token does not match the configured currency', async () => {
+    mockGetChannelState.mockResolvedValueOnce(mockChannelStateWithToken(unexpectedToken))
+    const commitmentBytes = Buffer.from('currency-pin-mismatch')
+    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
+
+    const credential = makeSignedCredential({
+      commitmentBytes,
+      cumulativeAmount: 1000000n,
+      challengeAmount: '1000000',
+    })
+
+    const method = channel({
+      channel: CHANNEL_ADDRESS,
+      commitmentKey: COMMITMENT_KEY,
+      currency: configuredCurrency,
+      store: Store.memory(),
+    })
+
+    await expect(
+      method.verify({ credential: credential as any, request: credential.challenge.request }),
+    ).rejects.toThrow('Channel token does not match the configured currency.')
+  })
+
+  it('accepts a voucher when the on-chain token matches the configured currency', async () => {
+    mockGetChannelState.mockResolvedValueOnce(mockChannelStateWithToken(configuredCurrency))
+    const commitmentBytes = Buffer.from('currency-pin-match')
+    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
+
+    const credential = makeSignedCredential({
+      commitmentBytes,
+      cumulativeAmount: 1000000n,
+      challengeAmount: '1000000',
+    })
+
+    const method = channel({
+      channel: CHANNEL_ADDRESS,
+      commitmentKey: COMMITMENT_KEY,
+      currency: configuredCurrency,
+      store: Store.memory(),
+    })
+
+    const receipt = await method.verify({
+      credential: credential as any,
+      request: credential.challenge.request,
+    })
+    expect(receipt.status).toBe('success')
+  })
+
+  it('warns at construction when no currency is configured while on-chain checks are enabled', () => {
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+
+    channel({
+      channel: CHANNEL_ADDRESS,
+      commitmentKey: COMMITMENT_KEY,
+      store: Store.memory(),
+      logger,
+    })
+
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('currency'))
+  })
+})
+
+describe('channel server close transaction inspection (auth-tree injection)', () => {
+  // A contract-supplied auth entry whose root `close` invocation carries an
+  // injected `transfer` sub-invocation — the shape a malicious channel contract
+  // would use to ride the envelope signature and drain the signer's account.
+  const injectedTokenContract = Address.contract(Buffer.alloc(32, 7)).toString()
+
+  function injectedTransferAuthEntry(): xdr.SorobanAuthorizationEntry {
+    const transferArgs = new xdr.InvokeContractArgs({
+      contractAddress: new Address(injectedTokenContract).toScAddress(),
+      functionName: 'transfer',
+      args: [],
+    })
+    const subInvocation = new xdr.SorobanAuthorizedInvocation({
+      function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(transferArgs),
+      subInvocations: [],
+    })
+    const closeArgs = new xdr.InvokeContractArgs({
+      contractAddress: new Address(CHANNEL_ADDRESS).toScAddress(),
+      functionName: 'close',
+      args: [],
+    })
+    const rootInvocation = new xdr.SorobanAuthorizedInvocation({
+      function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(closeArgs),
+      subInvocations: [subInvocation],
+    })
+    return new xdr.SorobanAuthorizationEntry({
+      credentials: xdr.SorobanCredentials.sorobanCredentialsSourceAccount(),
+      rootInvocation,
+    })
+  }
+
+  /** Returns the prepared close tx with an injected sub-invocation auth entry. */
+  function preparedCloseWithInjectedAuth(tx: Transaction): Transaction {
+    const envelope = tx.toEnvelope()
+    envelope
+      .v1()
+      .tx()
+      .operations()[0]
+      .body()
+      .invokeHostFunctionOp()
+      .auth([injectedTransferAuthEntry()])
+    return new Transaction(envelope, Networks.TESTNET)
+  }
+
+  beforeEach(() => {
+    mockGetAccount.mockReset()
+    mockSimulateTransaction.mockReset()
+    mockSendTransaction.mockReset()
+    mockPrepareTransaction.mockReset()
+  })
+
+  it('rejects a verified close whose prepared auth tree carries injected sub-invocations', async () => {
+    const signerKp = Keypair.random()
+    const commitmentBytes = Buffer.from('close-auth-inject')
+    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
+    mockGetAccount.mockResolvedValueOnce(new Account(signerKp.publicKey(), '70'))
+    mockPrepareTransaction.mockImplementationOnce((tx: Transaction) =>
+      preparedCloseWithInjectedAuth(tx),
+    )
+
+    const credential = makeSignedCredential({
+      action: 'close',
+      commitmentBytes,
+      cumulativeAmount: 5000000n,
+      challengeAmount: '5000000',
+    })
+
+    const method = channel({
+      channel: CHANNEL_ADDRESS,
+      checkOnChainState: false,
+      commitmentKey: COMMITMENT_KEY,
+      feePayer: { envelopeSigner: signerKp },
+      store: Store.memory(),
+    })
+
+    await expect(
+      method.verify({ credential: credential as any, request: credential.challenge.request }),
+    ).rejects.toThrow('Prepared close authorization carries unexpected sub-invocations.')
+    expect(mockSendTransaction).not.toHaveBeenCalled()
+  })
+
+  it('rejects the operator close() when the prepared auth tree carries injected sub-invocations', async () => {
+    const { close } = await import('./Channel.js')
+    const signerKp = Keypair.random()
+    mockGetAccount.mockResolvedValueOnce(new Account(signerKp.publicKey(), '71'))
+    mockPrepareTransaction.mockImplementationOnce((tx: Transaction) =>
+      preparedCloseWithInjectedAuth(tx),
+    )
+
+    await expect(
+      close({
+        channel: CHANNEL_ADDRESS,
+        amount: 5000000n,
+        signature: Buffer.alloc(64, 1),
+        feePayer: { envelopeSigner: signerKp },
+      }),
+    ).rejects.toThrow('Prepared close authorization carries unexpected sub-invocations.')
+    expect(mockSendTransaction).not.toHaveBeenCalled()
   })
 })

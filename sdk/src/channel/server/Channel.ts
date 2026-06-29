@@ -36,6 +36,7 @@ import { pollTransaction } from '../../shared/poll.js'
 import { toBaseUnits } from '../../shared/units.js'
 import { simulateCall } from '../../shared/simulate.js'
 import { validateAmount, validateHexSignature } from '../../shared/validation.js'
+import { verifyInvokeContractOp } from '../../shared/verify-invoke.js'
 import { channel as ChannelMethod } from '../Methods.js'
 import { getChannelState, type ChannelState } from './State.js'
 
@@ -74,6 +75,46 @@ type CumulativeRecord = {
 const LOG_PREFIX = '[stellar:channel]'
 const STORE_PREFIX = 'stellar:channel'
 
+/** Reads the cumulative amount from a stored record, treating an absent or
+ * malformed record as a zero cumulative. */
+function readCumulativeAmount(record: unknown): bigint {
+  if (record && typeof record === 'object' && 'amount' in record) {
+    return BigInt((record as CumulativeRecord).amount)
+  }
+  return 0n
+}
+
+/** Returns the error for a commitment that fails to advance the cumulative
+ * (not strictly increasing, or not covering the requested amount), or null when
+ * the commitment is valid. Shared by the pre-RPC short-circuit and the
+ * authoritative atomic update so both apply identical rules. */
+function cumulativeMonotonicityError(
+  previousCumulative: bigint,
+  commitmentAmount: bigint,
+  requestedAmount: bigint,
+): ChannelVerificationError | null {
+  if (commitmentAmount <= previousCumulative) {
+    return new ChannelVerificationError(
+      `${LOG_PREFIX} Commitment amount ${commitmentAmount} must be greater than previous cumulative ${previousCumulative}.`,
+      {
+        commitmentAmount: commitmentAmount.toString(),
+        previousCumulative: previousCumulative.toString(),
+      },
+    )
+  }
+  if (commitmentAmount < previousCumulative + requestedAmount) {
+    return new ChannelVerificationError(
+      `${LOG_PREFIX} Commitment amount ${commitmentAmount} does not cover the requested amount ${requestedAmount} (previous cumulative: ${previousCumulative}).`,
+      {
+        commitmentAmount: commitmentAmount.toString(),
+        requestedAmount: requestedAmount.toString(),
+        previousCumulative: previousCumulative.toString(),
+      },
+    )
+  }
+  return null
+}
+
 export function channel(parameters: channel.Parameters) {
   if (!parameters.store) {
     throw new ChannelVerificationError(
@@ -98,6 +139,8 @@ export function channel(parameters: channel.Parameters) {
     maxFeeBumpStroops = DEFAULT_MAX_FEE_BUMP_STROOPS,
     network = STELLAR_TESTNET,
     onDisputeDetected,
+    recipient,
+    currency,
     pollDelayMs = DEFAULT_POLL_DELAY_MS,
     pollMaxAttempts = DEFAULT_POLL_MAX_ATTEMPTS,
     pollMaxConcurrent = DEFAULT_POLL_MAX_CONCURRENT,
@@ -145,6 +188,17 @@ export function channel(parameters: channel.Parameters) {
     logger.warn(
       `${LOG_PREFIX} checkOnChainState is disabled — the server will not detect external channel closes. Vouchers accepted after an external close cannot be settled.`,
     )
+  } else {
+    if (!recipient) {
+      logger.warn(
+        `${LOG_PREFIX} No recipient configured — the channel's on-chain payout address is not verified. Set recipient to the account that should receive close payouts so a channel paying out elsewhere is rejected.`,
+      )
+    }
+    if (!currency) {
+      logger.warn(
+        `${LOG_PREFIX} No currency configured — the channel's on-chain token is not verified. Set currency to the token contract you expect so a channel paying out a different token is rejected.`,
+      )
+    }
   }
 
   if (feeBumpKP && !feeBudget) {
@@ -283,10 +337,6 @@ export function channel(parameters: channel.Parameters) {
     const commitmentAmount = BigInt(payload.amount)
     const signatureHex = payload.signature
 
-    if (checkOnChainState) {
-      await verifyOnChainState(commitmentAmount)
-    }
-
     // Validate hex signature format
     try {
       validateHexSignature(signatureHex)
@@ -301,9 +351,41 @@ export function channel(parameters: channel.Parameters) {
     validateAmount(challengeRequest.amount)
     const requestedAmount = BigInt(challengeRequest.amount)
 
+    // Cheap monotonicity short-circuit before any RPC work: a commitment that
+    // cannot advance the cumulative is rejected here, so a flood of stale or
+    // non-monotonic commitments cannot amplify into signature-verify and
+    // on-chain-state RPC load. The atomic store.update below stays authoritative,
+    // re-reading the latest cumulative to remain correct under concurrent writes.
+    const preCheckError = cumulativeMonotonicityError(
+      readCumulativeAmount(cumulativeRecord),
+      commitmentAmount,
+      requestedAmount,
+    )
+    if (preCheckError) {
+      throw preCheckError
+    }
+
     // Verify commitment signature before atomic cumulative update
     // (async work must complete before the atomic CAS)
     await verifyCommitmentSignature(commitmentAmount, signatureBytes)
+
+    // Query on-chain state only after the commitment signature is proven
+    // authentic. The state read costs several RPC calls; gating it behind the
+    // cheaper signature check stops a forged voucher from amplifying into the
+    // full state query.
+    if (checkOnChainState) {
+      await verifyOnChainState(commitmentAmount)
+    }
+
+    // A close can only be settled by a server configured with an envelope signer.
+    // Reject it before the cumulative update writes the settling markers, so a
+    // voucher-only server is not bricked by a close it can never complete.
+    if (action === 'close' && !envelopeKP) {
+      throw new ChannelVerificationError(
+        `${LOG_PREFIX} Close action requires a feePayer.envelopeSigner (transaction source and envelope signer) to be configured.`,
+        {},
+      )
+    }
 
     // Atomic cumulative monotonic check and write: reject if invariants fail,
     // or write the new cumulative if all checks pass.
@@ -330,39 +412,15 @@ export function channel(parameters: channel.Parameters) {
           previousCumulative = BigInt(record.amount)
         }
 
-        // The new cumulative must be strictly greater than previous cumulative
-        if (commitmentAmount <= previousCumulative) {
-          return {
-            op: 'noop',
-            result: {
-              success: false,
-              error: new ChannelVerificationError(
-                `${LOG_PREFIX} Commitment amount ${commitmentAmount} must be greater than previous cumulative ${previousCumulative}.`,
-                {
-                  commitmentAmount: commitmentAmount.toString(),
-                  previousCumulative: previousCumulative.toString(),
-                },
-              ),
-            },
-          }
-        }
-
-        // The commitment must cover the requested amount
-        if (commitmentAmount < previousCumulative + requestedAmount) {
-          return {
-            op: 'noop',
-            result: {
-              success: false,
-              error: new ChannelVerificationError(
-                `${LOG_PREFIX} Commitment amount ${commitmentAmount} does not cover the requested amount ${requestedAmount} (previous cumulative: ${previousCumulative}).`,
-                {
-                  commitmentAmount: commitmentAmount.toString(),
-                  requestedAmount: requestedAmount.toString(),
-                  previousCumulative: previousCumulative.toString(),
-                },
-              ),
-            },
-          }
+        // Authoritative monotonicity check against the latest stored cumulative,
+        // applying the same rules as the pre-RPC short-circuit above.
+        const monotonicityError = cumulativeMonotonicityError(
+          previousCumulative,
+          commitmentAmount,
+          requestedAmount,
+        )
+        if (monotonicityError) {
+          return { op: 'noop', result: { success: false, error: monotonicityError } }
         }
 
         // All checks passed, write the new cumulative
@@ -457,58 +515,76 @@ export function channel(parameters: channel.Parameters) {
       )
     }
 
-    const contract = new Contract(channelAddress)
-    const closeOp = contract.call(
-      'close',
-      nativeToScVal(commitmentAmount, { type: 'i128' }),
-      nativeToScVal(Buffer.from(signatureBytes), { type: 'bytes' }),
-    )
+    // Tracks whether the close transaction may have reached the chain. Before
+    // broadcast a failure is safe to roll back; after it the outcome is
+    // ambiguous and the settling markers must stay set (fail-closed).
+    let broadcast = false
+    try {
+      const contract = new Contract(channelAddress)
+      const closeOp = contract.call(
+        'close',
+        nativeToScVal(commitmentAmount, { type: 'i128' }),
+        nativeToScVal(Buffer.from(signatureBytes), { type: 'bytes' }),
+      )
 
-    const closeAccount = await rpcServer.getAccount(envelopeKP.publicKey())
-    const closeTx = new TransactionBuilder(closeAccount, {
-      fee: DEFAULT_FEE,
-      networkPassphrase,
-    })
-      .addOperation(closeOp)
-      .setTimeout(DEFAULT_TIMEOUT)
-      .build()
-
-    const prepared = await rpcServer.prepareTransaction(closeTx)
-    prepared.sign(envelopeKP)
-
-    let txToSubmit: Transaction | FeeBumpTransaction = prepared
-    if (feeBumpKP) {
-      txToSubmit = wrapFeeBump(prepared, feeBumpKP, {
+      const closeAccount = await rpcServer.getAccount(envelopeKP.publicKey())
+      const closeTx = new TransactionBuilder(closeAccount, {
+        fee: DEFAULT_FEE,
         networkPassphrase,
-        maxFeeStroops: maxFeeBumpStroops,
       })
+        .addOperation(closeOp)
+        .setTimeout(DEFAULT_TIMEOUT)
+        .build()
+
+      const prepared = await rpcServer.prepareTransaction(closeTx)
+      assertPreparedCloseIsSafe(prepared, channelAddress)
+      prepared.sign(envelopeKP)
+
+      let txToSubmit: Transaction | FeeBumpTransaction = prepared
+      if (feeBumpKP) {
+        txToSubmit = wrapFeeBump(prepared, feeBumpKP, {
+          networkPassphrase,
+          maxFeeStroops: maxFeeBumpStroops,
+        })
+      }
+
+      // Enforce fee budget before broadcast (fail-safe: charge BEFORE broadcast)
+      await enforceFeeBudget()
+
+      broadcast = true
+      const txHash = await broadcastAndPoll(txToSubmit, 'Close')
+
+      logger.debug(`${LOG_PREFIX} Channel closed, marking in store`)
+      await store.put(`${STORE_PREFIX}:closed:${channelAddress}`, {
+        closedAt: new Date().toISOString(),
+        txHash,
+        amount: commitmentAmount.toString(),
+      })
+
+      // Clear settling marker — it is now redundant because the closed marker blocks everything.
+      // This is done for cleanliness after a successful settlement.
+      await store.delete(settlingKey)
+
+      await store.put(challengeStoreKey, { state: 'used', usedAt: new Date().toISOString() })
+
+      return Receipt.from({
+        method: 'stellar',
+        reference: txHash,
+        status: 'success',
+        timestamp: new Date().toISOString(),
+        ...(externalId ? { externalId } : {}),
+      })
+    } catch (error) {
+      // A failure before broadcast means the close never reached the chain, so
+      // roll back the settling markers and let the channel keep serving instead
+      // of bricking it. After broadcast the outcome is ambiguous, so the markers
+      // remain set and recovery requires reconciliation.
+      if (!broadcast) {
+        await store.put(cumulativeKey, { amount: commitmentAmount.toString() })
+        await store.delete(settlingKey)
+      }
+      throw error
     }
-
-    // Enforce fee budget before broadcast (fail-safe: charge BEFORE broadcast)
-    await enforceFeeBudget()
-
-    const txHash = await broadcastAndPoll(txToSubmit, 'Close')
-
-    logger.debug(`${LOG_PREFIX} Channel closed, marking in store`)
-    await store.put(`${STORE_PREFIX}:closed:${channelAddress}`, {
-      closedAt: new Date().toISOString(),
-      txHash,
-      amount: commitmentAmount.toString(),
-    })
-
-    // Clear settling marker — it is now redundant because the closed marker blocks everything.
-    // This is done for cleanliness after a successful settlement.
-    await store.delete(settlingKey)
-
-    await store.put(challengeStoreKey, { state: 'used', usedAt: new Date().toISOString() })
-
-    return Receipt.from({
-      method: 'stellar',
-      reference: txHash,
-      status: 'success',
-      timestamp: new Date().toISOString(),
-      ...(externalId ? { externalId } : {}),
-    })
   }
 
   /**
@@ -699,6 +775,7 @@ export function channel(parameters: channel.Parameters) {
         channel: channelAddress,
         network,
         rpcUrl,
+        simulationTimeoutMs,
       })
     } catch (error) {
       // Fail closed — reject the voucher when the on-chain
@@ -706,6 +783,26 @@ export function channel(parameters: channel.Parameters) {
       throw new ChannelVerificationError(
         `${LOG_PREFIX} On-chain state check failed. Cannot verify channel status.`,
         { error: error instanceof Error ? error.message : String(error) },
+      )
+    }
+
+    // The channel contract is deployed out-of-band; when the operator pins an
+    // expected payout address, reject a contract that would settle to anyone
+    // else, so vouchers are never credited against a channel paying a third party.
+    if (recipient !== undefined && state.to !== recipient) {
+      throw new ChannelVerificationError(
+        `${LOG_PREFIX} Channel payout address does not match the configured recipient.`,
+        { expected: recipient, actual: state.to },
+      )
+    }
+
+    // Likewise, reject a channel that would pay out a different token than the
+    // operator expects, so vouchers priced in the intended currency are never
+    // credited against a channel settling in an attacker-controlled token.
+    if (currency !== undefined && state.token !== currency) {
+      throw new ChannelVerificationError(
+        `${LOG_PREFIX} Channel token does not match the configured currency.`,
+        { expected: currency, actual: state.token },
       )
     }
 
@@ -750,6 +847,45 @@ export function channel(parameters: channel.Parameters) {
           commitmentAmount: commitmentAmount.toString(),
           balance: state.balance.toString(),
         },
+      )
+    }
+  }
+}
+
+/**
+ * Inspect a `prepareTransaction`-built close transaction before it is signed.
+ *
+ * `prepareTransaction` runs the channel contract in recording-mode simulation and
+ * inlines whatever authorization the contract requested. Because the channel
+ * contract is deployed out-of-band, a malicious one could request authorization
+ * for an injected sub-invocation (e.g. a token transfer out of the signer's own
+ * account) that the envelope signature would then implicitly authorize. Confirm
+ * the transaction is exactly a `close` call on the expected channel and that no
+ * authorization entry carries sub-invocations before signing it.
+ */
+function assertPreparedCloseIsSafe(preparedTx: Transaction, channelAddress: string): void {
+  const { contractAddress, invokeArgs, authEntries } = verifyInvokeContractOp(
+    preparedTx,
+    LOG_PREFIX,
+  )
+  if (contractAddress !== channelAddress) {
+    throw new ChannelVerificationError(
+      `${LOG_PREFIX} Prepared close targets an unexpected contract.`,
+      { expected: channelAddress, actual: contractAddress },
+    )
+  }
+  const functionName = invokeArgs.functionName().toString()
+  if (functionName !== 'close') {
+    throw new ChannelVerificationError(
+      `${LOG_PREFIX} Prepared close invokes an unexpected function.`,
+      { functionName },
+    )
+  }
+  for (const entry of authEntries) {
+    if (entry.rootInvocation().subInvocations().length > 0) {
+      throw new ChannelVerificationError(
+        `${LOG_PREFIX} Prepared close authorization carries unexpected sub-invocations.`,
+        {},
       )
     }
   }
@@ -836,6 +972,7 @@ export async function close(parameters: {
     .build()
 
   const prepared = await server.prepareTransaction(tx)
+  assertPreparedCloseIsSafe(prepared, channelAddress)
   prepared.sign(signer)
 
   let txToSubmit: Transaction | FeeBumpTransaction = prepared
@@ -916,6 +1053,27 @@ export declare namespace channel {
      * Use this to trigger a close response before the waiting period elapses.
      */
     onDisputeDetected?: (state: ChannelState) => void
+    /**
+     * Expected on-chain payout address (G...) for the channel.
+     *
+     * The channel contract is deployed out-of-band, so its payout address is not
+     * inherently trusted. When set, each on-chain state check rejects a channel
+     * whose `to` differs from this value, so vouchers are never credited against a
+     * channel that would settle to a third party. Strongly recommended; when
+     * omitted the payout address is not verified and a startup warning is logged.
+     */
+    recipient?: string
+    /**
+     * Expected on-chain token contract address (C...) for the channel.
+     *
+     * The channel contract is deployed out-of-band, so the token it pays out in
+     * is not inherently trusted. When set, each on-chain state check rejects a
+     * channel whose token differs from this value, so vouchers priced in the
+     * intended currency are never credited against a channel settling in a
+     * different (potentially worthless) token. Strongly recommended; when omitted
+     * the token is not verified and a startup warning is logged.
+     */
+    currency?: string
     /** Maximum poll attempts when waiting for transaction confirmation. @default 20 */
     pollMaxAttempts?: number
     /** Maximum concurrent polling operations for this server instance. @default 10 */
