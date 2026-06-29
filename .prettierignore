@@ -3,3 +3,7 @@ node_modules/
 pnpm-lock.yaml
 NOTES_PR.md
 h1/
+security-findings-evaluation-*.md
+sessions/
+.claude/
+worktrees/
