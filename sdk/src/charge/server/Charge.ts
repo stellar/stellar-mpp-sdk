@@ -984,11 +984,15 @@ function authorizationCoversTransfer(
   if (args.length !== 3) {
     return false
   }
-  return (
-    Address.fromScVal(args[0]).toString() === expected.from &&
-    Address.fromScVal(args[1]).toString() === expected.to &&
-    scValToBigInt(args[2]) === expected.amount
-  )
+  try {
+    return (
+      Address.fromScVal(args[0]).toString() === expected.from &&
+      Address.fromScVal(args[1]).toString() === expected.to &&
+      scValToBigInt(args[2]) === expected.amount
+    )
+  } catch {
+    return false
+  }
 }
 
 /**

@@ -3897,6 +3897,64 @@ describe('charge validateAuthEntries (sponsored path)', () => {
     ).rejects.toThrow('No authorization entry authorizes the requested transfer.')
     expect(mockSendTransaction).not.toHaveBeenCalled()
   })
+
+  it('rejects sponsored settlement when an auth entry has a malformed transfer argument', async () => {
+    // A validly-signed entry by the payer whose transfer invocation carries a
+    // non-numeric amount argument. Decoding it must count as "does not authorize
+    // the transfer", not surface as an unexpected decode error.
+    const baseTx = buildTransferTx({
+      source: PAYER.publicKey(),
+      from: PAYER.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    const transferArgs = baseTx
+      .toEnvelope()
+      .v1()
+      .tx()
+      .operations()[0]
+      .body()
+      .invokeHostFunctionOp()
+      .hostFunction()
+      .invokeContract()
+    transferArgs.args([
+      transferArgs.args()[0],
+      transferArgs.args()[1],
+      xdr.ScVal.scvString('not-a-number'),
+    ])
+    const unsignedAuthEntry = new xdr.SorobanAuthorizationEntry({
+      credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
+        new xdr.SorobanAddressCredentials({
+          address: new Address(PAYER.publicKey()).toScAddress(),
+          nonce: xdr.Int64.fromString('0'),
+          signatureExpirationLedger: 1010,
+          signature: xdr.ScVal.scvVec([]),
+        }),
+      ),
+      rootInvocation: new xdr.SorobanAuthorizedInvocation({
+        function:
+          xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(transferArgs),
+        subInvocations: [],
+      }),
+    })
+    const authEntry = await authorizeEntry(unsignedAuthEntry, PAYER, 1010, NETWORK_PASSPHRASE)
+
+    mockGetLatestLedger.mockResolvedValueOnce({ sequence: 100 })
+
+    const cred = makeSponsoredCredential(buildSponsoredTxWithAuth([authEntry]))
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      feePayer: { envelopeSigner: signerKp },
+      store: Store.memory(),
+    })
+
+    await expect(
+      method.verify({ credential: cred as any, request: cred.challenge.request }),
+    ).rejects.toThrow('No authorization entry authorizes the requested transfer.')
+    expect(mockSendTransaction).not.toHaveBeenCalled()
+  })
 })
 
 // ---------------------------------------------------------------------------
