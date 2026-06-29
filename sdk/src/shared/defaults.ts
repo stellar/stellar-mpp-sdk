@@ -15,3 +15,11 @@ export const DEFAULT_SIMULATION_TIMEOUT_MS = 10_000
  * in milliseconds. This value is the Soroban transaction `setTimeout()` parameter.
  */
 export const DEFAULT_SIM_TIMEOUT_SECS = 30
+
+/**
+ * Maximum age, in seconds, of an on-chain payment that push-mode charge
+ * settlement will accept. Bounds how far in the past a confirmed transfer may
+ * have been included relative to verification time, so a payment made well
+ * before the challenge cannot be presented as its settlement.
+ */
+export const DEFAULT_MAX_PUSH_PAYMENT_AGE_SECONDS = 900
