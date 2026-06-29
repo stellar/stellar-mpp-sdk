@@ -7,14 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-06-25
+
 ### Added
 
 - Add a v0.7 migration guide (`docs/migrating-to-v0.7.md`), linked from the README [#49](https://github.com/stellar/stellar-mpp-sdk/pull/49)
 
 ### Security
 
-- Override the transitive `ws` dependency to `^8.21.0`, clearing a high-severity advisory reachable via `viem` [#49](https://github.com/stellar/stellar-mpp-sdk/pull/49)
-- Override the transitive `form-data` dependency to `^4.0.6`, clearing a high-severity advisory reachable via `@stellar/stellar-sdk` [#49](https://github.com/stellar/stellar-mpp-sdk/pull/49)
+- Harden charge and channel payment verification against issues identified in an internal security review. Operators running charge or channel servers or clients are strongly encouraged to upgrade. Specifics are intentionally withheld for now so that deployments still on an earlier version are not put at additional risk before they can upgrade. [#51](https://github.com/stellar/stellar-mpp-sdk/pull/51)
+- Update transitive dependencies (`ws`, `form-data`) to clear high-severity advisories in third-party packages [#49](https://github.com/stellar/stellar-mpp-sdk/pull/49)
+
+### Changed
+
+- Upgrade development dependencies to the latest versions satisfying the 7-day `minimumReleaseAge` supply-chain soak [#51](https://github.com/stellar/stellar-mpp-sdk/pull/51)
+- Surface invalid inputs and simulation failures as typed `StellarMppError`s instead of untyped runtime errors [#51](https://github.com/stellar/stellar-mpp-sdk/pull/51)
+- Restore the full 7-day dependency soak by dropping the temporary `esbuild` and `form-data` `minimumReleaseAgeExclude` exemptions now that both have aged past it [#50](https://github.com/stellar/stellar-mpp-sdk/pull/50)
 
 ## [0.7.0] - 2026-06-15
 
