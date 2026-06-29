@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { validateHexSignature, validateAmount, resolveNetworkId } from './validation.js'
+import { StellarMppError } from './errors.js'
 
 describe('validateHexSignature', () => {
   it('accepts valid 128-char hex signature', () => {
@@ -85,5 +86,14 @@ describe('validateAmount', () => {
 
   it('throws on decimal', () => {
     expect(() => validateAmount('1.5')).toThrow()
+  })
+
+  it('accepts the maximum signed i128 value', () => {
+    expect(() => validateAmount((2n ** 127n - 1n).toString())).not.toThrow()
+  })
+
+  it('throws StellarMppError on a value exceeding the signed i128 maximum', () => {
+    expect(() => validateAmount((2n ** 127n).toString())).toThrow(StellarMppError)
+    expect(() => validateAmount((2n ** 127n).toString())).toThrow(/i128 maximum/)
   })
 })
