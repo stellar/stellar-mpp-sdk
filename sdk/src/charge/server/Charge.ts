@@ -1,6 +1,7 @@
 import {
   Account,
   Address,
+  BASE_FEE,
   FeeBumpTransaction,
   Keypair,
   Transaction,
@@ -12,6 +13,7 @@ import { type Challenge, type Credential, Method, Receipt, Store } from 'mppx'
 import type { z } from 'zod/mini'
 import {
   ALL_ZEROS,
+  DEFAULT_CHALLENGE_EXPIRY,
   DEFAULT_DECIMALS,
   DEFAULT_LEDGER_CLOSE_TIME,
   DEFAULT_TIMEOUT,
@@ -30,6 +32,7 @@ import { PaymentVerificationError, SettlementError } from '../../shared/errors.j
 import { noopLogger, type Logger } from '../../shared/logger.js'
 import { SimulationContractError, simulateCall } from '../../shared/simulate.js'
 import { verifyInvokeContractOp } from '../../shared/verify-invoke.js'
+import { verifyAuthEntrySignature } from '../../shared/verify-auth.js'
 import {
   DEFAULT_MAX_FEE_BUMP_STROOPS,
   DEFAULT_POLL_MAX_ATTEMPTS,
@@ -37,6 +40,7 @@ import {
   DEFAULT_POLL_MAX_CONCURRENT,
   DEFAULT_POLL_TIMEOUT_MS,
   DEFAULT_SIMULATION_TIMEOUT_MS,
+  DEFAULT_MAX_PUSH_PAYMENT_AGE_SECONDS,
 } from '../../shared/defaults.js'
 import { Semaphore } from '../../shared/semaphore.js'
 
@@ -49,6 +53,18 @@ type ChargeCredential = Credential.Credential<
 
 const LOG_PREFIX = '[stellar:charge]'
 const STORE_PREFIX = 'stellar:charge'
+
+// Tolerance, in seconds, between a payment's on-chain confirmation time and the
+// challenge issuance it is anchored against, absorbing clock drift between the
+// ledger and the verifying server.
+const PUSH_PAYMENT_CLOCK_SKEW_SECONDS = 30
+
+// Tolerance, in ledgers, when bounding a sponsored auth entry's expiration. The
+// client and the server read the latest ledger at different moments from a
+// load-balanced RPC, so the client's view can sit a few ledgers ahead of the
+// server's. Without this margin a legitimate payment would be rejected for an
+// expiration only trivially beyond the strict bound.
+const AUTH_EXPIRATION_LEDGER_SKEW = 10
 
 /**
  * Creates a Stellar charge method for use on the **server**.
@@ -86,6 +102,8 @@ export function charge(parameters: charge.Parameters) {
     pollTimeoutMs = DEFAULT_POLL_TIMEOUT_MS,
     recipient,
     allowUnsignedPush = false,
+    maxPushPaymentAgeSeconds = DEFAULT_MAX_PUSH_PAYMENT_AGE_SECONDS,
+    challengeLifetimeSeconds = DEFAULT_CHALLENGE_EXPIRY,
     rpcUrl,
     simulationTimeoutMs = DEFAULT_SIMULATION_TIMEOUT_MS,
     store,
@@ -138,6 +156,54 @@ export function charge(parameters: charge.Parameters) {
    * XDR) based on `payload.type`. Concurrent calls are safe: atomic store.update()
    * prevents cross-process TOCTOU races via compare-and-set semantics.
    */
+  // Reject push settlements whose on-chain payment is older than the accepted
+  // window, so a transfer confirmed before the challenge cannot be presented as
+  // its settlement.
+  function assertPaymentIsFresh(
+    createdAt: number | string | undefined,
+    challenge: Challenge.Challenge<ChargeRequest, 'charge', 'stellar'>,
+  ): void {
+    // The RPC omits createdAt only when it has no age to report; with no signal
+    // to bound, keep the prior conservative acceptance for an absent value.
+    if (createdAt === undefined) return
+    // Soroban RPC encodes createdAt as a JSON string of unix seconds even though
+    // the typings advertise a number, so coerce both shapes. Refuse to settle on
+    // any present value we cannot read as an age: a payment whose age is unknown
+    // must never be treated as fresh enough to settle a challenge.
+    const seconds = typeof createdAt === 'number' ? createdAt : Number(createdAt)
+    if (!Number.isFinite(seconds)) {
+      throw new PaymentVerificationError(
+        `${LOG_PREFIX} On-chain payment age is unavailable; refusing to settle this challenge.`,
+      )
+    }
+    const ageSeconds = Math.floor(Date.now() / 1000) - seconds
+    if (ageSeconds > maxPushPaymentAgeSeconds) {
+      throw new PaymentVerificationError(
+        `${LOG_PREFIX} On-chain payment is too old to settle this challenge.`,
+        { ageSeconds, maxAgeSeconds: maxPushPaymentAgeSeconds },
+      )
+    }
+    // Anchor freshness to this challenge: a transfer confirmed before the
+    // challenge was issued cannot be its settlement. Issuance is derived from
+    // the challenge's expiry and the configured lifetime, with a clock-skew
+    // budget so honest near-issuance payments are not rejected.
+    if (challenge.expires) {
+      const expiresAt = Math.floor(new Date(challenge.expires).getTime() / 1000)
+      if (!Number.isFinite(expiresAt)) {
+        throw new PaymentVerificationError(
+          `${LOG_PREFIX} Challenge expiry is unreadable; refusing to settle this challenge.`,
+        )
+      }
+      const issuedAt = expiresAt - challengeLifetimeSeconds
+      if (seconds < issuedAt - PUSH_PAYMENT_CLOCK_SKEW_SECONDS) {
+        throw new PaymentVerificationError(
+          `${LOG_PREFIX} On-chain payment predates challenge issuance; cannot settle this challenge.`,
+          { createdAt: seconds, issuedAt },
+        )
+      }
+    }
+  }
+
   async function doVerify(credential: ChargeCredential) {
     const { challenge, source } = credential
     const { request: challengeRequest } = challenge
@@ -188,115 +254,96 @@ export function charge(parameters: charge.Parameters) {
         // Canonicalize hash to lowercase for case-insensitive consistency
         hash = hash.toLowerCase()
 
-        // Tx hash dedup via atomic compare-and-set: reject if hash already used.
-        const hashKey = `${STORE_PREFIX}:hash:${hash}`
-        const hashReplayError = new PaymentVerificationError(
-          `${LOG_PREFIX} Transaction hash already used. Replay rejected.`,
-          { hash },
-        )
-        const hashClaimId = crypto.randomUUID()
-        const hashClaimResult = await store.update(hashKey, (current) =>
-          current
-            ? { op: 'noop', result: 'replay' as const }
-            : {
-                op: 'set',
-                value: {
-                  state: 'pending',
-                  claimId: hashClaimId,
-                  claimedAt: new Date().toISOString(),
-                },
-                result: 'claimed' as const,
-              },
-        )
-        if (hashClaimResult === 'replay') {
-          logger.warn(`${LOG_PREFIX} Verification failed`, {
-            error: 'Transaction hash already used',
+        // Push mode requires the transaction to be confirmed on-chain before the
+        // client submits the hash. Look it up first: the client-presented hash may
+        // be the inner tx hash or the outer fee-bump hash, and the dedup key must be
+        // the canonical INNER transaction hash so push and pull (which also keys on
+        // the inner hash) settle each on-chain payment at most once.
+        const result = await rpcServer.getTransaction(hash)
+
+        if (result.status === 'FAILED') {
+          throw new PaymentVerificationError(`${LOG_PREFIX} Transaction failed on-chain.`, {
             hash,
+            ...(result.resultXdr ? { resultXdr: result.resultXdr } : {}),
           })
-          throw hashReplayError
         }
 
-        try {
-          // Push mode requires the transaction to be confirmed on-chain
-          // before the client submits the hash.
-          const result = await rpcServer.getTransaction(hash)
-
-          if (result.status === 'FAILED') {
-            throw new PaymentVerificationError(`${LOG_PREFIX} Transaction failed on-chain.`, {
-              hash,
-              ...(result.resultXdr ? { resultXdr: result.resultXdr } : {}),
-            })
-          }
-
-          if (result.status !== 'SUCCESS') {
-            throw new PaymentVerificationError(
-              `${LOG_PREFIX} Transaction not found on-chain. Push mode requires the transaction to be confirmed before submitting the hash.`,
-              { hash, status: result.status },
-            )
-          }
-
-          const txResult = result as rpc.Api.GetSuccessfulTransactionResponse
-
-          // Extract the payer's public key from the credential DID to verify
-          // the on-chain transfer's `from` address matches the credential's
-          // claimed payer identity.
-          const expectedFrom = publicKeyFromDID(source)
-          verifyTokenTransferFromResult(
-            txResult,
-            {
-              amount: expectedAmount,
-              currency: expectedCurrency,
-              recipient: expectedRecipient,
-              from: expectedFrom,
-            },
-            networkPassphrase,
+        if (result.status !== 'SUCCESS') {
+          throw new PaymentVerificationError(
+            `${LOG_PREFIX} Transaction not found on-chain. Push mode requires the transaction to be confirmed before submitting the hash.`,
+            { hash, status: result.status },
           )
+        }
 
-          // Verify the source signature proves the submitter controls the payer account.
-          // The signature must be over "{challenge.id}:{hash}" (lowercase hash).
-          // This binds the credential to both the challenge and the canonical tx hash,
-          // so the claimed source must control the payer account used by the payment.
-          const bindingMessage = Buffer.from(`${challenge.id}:${hash}`)
-          try {
-            const isValid = Keypair.fromPublicKey(expectedFrom).verify(
-              bindingMessage,
-              Buffer.from(payload.sourceSignature, 'hex'),
-            )
-            if (!isValid) {
-              throw new PaymentVerificationError(
-                `${LOG_PREFIX} Source signature does not authorize this payment; the credential holder must prove control of the payer account.`,
-                {},
-              )
-            }
-          } catch (err) {
-            if (err instanceof PaymentVerificationError) throw err
+        const txResult = result as rpc.Api.GetSuccessfulTransactionResponse
+
+        assertPaymentIsFresh(txResult.createdAt, challenge)
+
+        // Extract the payer's public key from the credential DID to verify the
+        // on-chain transfer's `from` matches the claimed payer. The returned value
+        // is the canonical inner transaction hash used for dedup below.
+        const expectedFrom = publicKeyFromDID(source)
+        const canonicalHash = verifyTokenTransferFromResult(
+          txResult,
+          {
+            amount: expectedAmount,
+            currency: expectedCurrency,
+            recipient: expectedRecipient,
+            from: expectedFrom,
+          },
+          networkPassphrase,
+        )
+
+        // Verify the source signature proves the submitter controls the payer account.
+        // The signature must be over "{challenge.id}:{hash}" (the client-presented,
+        // lowercase hash). This binds the credential to both the challenge and the
+        // submitted tx hash, so the claimed source must control the payer account.
+        const bindingMessage = Buffer.from(`${challenge.id}:${hash}`)
+        try {
+          const isValid = Keypair.fromPublicKey(expectedFrom).verify(
+            bindingMessage,
+            Buffer.from(payload.sourceSignature, 'hex'),
+          )
+          if (!isValid) {
             throw new PaymentVerificationError(
               `${LOG_PREFIX} Source signature does not authorize this payment; the credential holder must prove control of the payer account.`,
               {},
             )
           }
         } catch (err) {
-          await store.update(hashKey, (current) => {
-            if (
-              current &&
-              typeof current === 'object' &&
-              'state' in current &&
-              (current as { state?: string }).state === 'pending' &&
-              'claimId' in current &&
-              (current as { claimId?: string }).claimId === hashClaimId
-            ) {
-              return { op: 'delete', result: undefined }
-            }
-            return { op: 'noop', result: undefined }
-          })
-          throw err
+          if (err instanceof PaymentVerificationError) throw err
+          throw new PaymentVerificationError(
+            `${LOG_PREFIX} Source signature does not authorize this payment; the credential holder must prove control of the payer account.`,
+            {},
+          )
         }
 
-        // Finalize claims after successful verification
-        await store.put(`${STORE_PREFIX}:hash:${hash}`, {
-          state: 'used',
-          usedAt: new Date().toISOString(),
-        })
+        // Tx hash dedup via atomic compare-and-set on the canonical inner hash.
+        // The claim runs after verification so a failed check never burns the
+        // payment's dedup slot (which would otherwise let anyone lock out a payer's
+        // legitimate settlement). Each on-chain payment settles at most once,
+        // shared with pull-mode hashes.
+        const hashKey = `${STORE_PREFIX}:hash:${canonicalHash}`
+        const hashClaimResult = await store.update(hashKey, (current) =>
+          current
+            ? { op: 'noop', result: 'replay' as const }
+            : {
+                op: 'set',
+                value: { state: 'used', usedAt: new Date().toISOString() },
+                result: 'claimed' as const,
+              },
+        )
+        if (hashClaimResult === 'replay') {
+          logger.warn(`${LOG_PREFIX} Verification failed`, {
+            error: 'Transaction hash already used',
+            hash: canonicalHash,
+          })
+          throw new PaymentVerificationError(
+            `${LOG_PREFIX} Transaction hash already used. Replay rejected.`,
+            { hash: canonicalHash },
+          )
+        }
+
         await store.put(challengeStoreKey, { state: 'used', usedAt: new Date().toISOString() })
 
         return Receipt.from({
@@ -337,88 +384,47 @@ export function charge(parameters: charge.Parameters) {
         // Canonicalize hash to lowercase for case-insensitive consistency
         hash = hash.toLowerCase()
 
-        // Tx hash dedup via atomic compare-and-set: reject if hash already used.
-        const hashKey = `${STORE_PREFIX}:hash:${hash}`
-        const hashReplayError = new PaymentVerificationError(
-          `${LOG_PREFIX} Transaction hash already used. Replay rejected.`,
-          { hash },
-        )
-        const hashClaimId = crypto.randomUUID()
-        const hashClaimResult = await store.update(hashKey, (current) =>
-          current
-            ? { op: 'noop', result: 'replay' as const }
-            : {
-                op: 'set',
-                value: {
-                  state: 'pending',
-                  claimId: hashClaimId,
-                  claimedAt: new Date().toISOString(),
-                },
-                result: 'claimed' as const,
-              },
-        )
-        if (hashClaimResult === 'replay') {
-          logger.warn(`${LOG_PREFIX} Verification failed`, {
-            error: 'Transaction hash already used',
+        // Push mode requires the transaction to be confirmed on-chain before the
+        // client submits the hash. Look it up first to derive the canonical INNER
+        // transaction hash for dedup (a fee-bump exposes both an inner and an outer
+        // hash; both push and pull settle each on-chain payment at most once on the
+        // inner hash).
+        const result = await rpcServer.getTransaction(hash)
+
+        if (result.status === 'FAILED') {
+          throw new PaymentVerificationError(`${LOG_PREFIX} Transaction failed on-chain.`, {
             hash,
+            ...(result.resultXdr ? { resultXdr: result.resultXdr } : {}),
           })
-          throw hashReplayError
         }
 
-        try {
-          // Push mode requires the transaction to be confirmed on-chain
-          // before the client submits the hash.
-          const result = await rpcServer.getTransaction(hash)
-
-          if (result.status === 'FAILED') {
-            throw new PaymentVerificationError(`${LOG_PREFIX} Transaction failed on-chain.`, {
-              hash,
-              ...(result.resultXdr ? { resultXdr: result.resultXdr } : {}),
-            })
-          }
-
-          if (result.status !== 'SUCCESS') {
-            throw new PaymentVerificationError(
-              `${LOG_PREFIX} Transaction not found on-chain. Push mode requires the transaction to be confirmed before submitting the hash.`,
-              { hash, status: result.status },
-            )
-          }
-
-          const txResult = result as rpc.Api.GetSuccessfulTransactionResponse
-
-          // Extract the payer's public key from the credential DID to verify
-          // the on-chain transfer's `from` address matches the credential's
-          // claimed payer identity.
-          const expectedFrom = publicKeyFromDID(source)
-          verifyTokenTransferFromResult(
-            txResult,
-            {
-              amount: expectedAmount,
-              currency: expectedCurrency,
-              recipient: expectedRecipient,
-              from: expectedFrom,
-            },
-            networkPassphrase,
+        if (result.status !== 'SUCCESS') {
+          throw new PaymentVerificationError(
+            `${LOG_PREFIX} Transaction not found on-chain. Push mode requires the transaction to be confirmed before submitting the hash.`,
+            { hash, status: result.status },
           )
-
-          // Note: Legacy hash type does not verify sourceSignature.
-          // For source signature verification, use type="signedHash".
-        } catch (err) {
-          await store.update(hashKey, (current) => {
-            if (
-              current &&
-              typeof current === 'object' &&
-              'state' in current &&
-              (current as { state?: string }).state === 'pending' &&
-              'claimId' in current &&
-              (current as { claimId?: string }).claimId === hashClaimId
-            ) {
-              return { op: 'delete', result: undefined }
-            }
-            return { op: 'noop', result: undefined }
-          })
-          throw err
         }
+
+        const txResult = result as rpc.Api.GetSuccessfulTransactionResponse
+
+        assertPaymentIsFresh(txResult.createdAt, challenge)
+
+        // Extract the payer's public key from the credential DID to verify the
+        // on-chain transfer's `from` matches the claimed payer. The returned value
+        // is the canonical inner transaction hash used for dedup below.
+        // Note: legacy hash type does not verify sourceSignature.
+        // For source signature verification, use type="signedHash".
+        const expectedFrom = publicKeyFromDID(source)
+        const canonicalHash = verifyTokenTransferFromResult(
+          txResult,
+          {
+            amount: expectedAmount,
+            currency: expectedCurrency,
+            recipient: expectedRecipient,
+            from: expectedFrom,
+          },
+          networkPassphrase,
+        )
 
         // Log acceptance of legacy unsigned push for operator visibility
         logger.warn(`${LOG_PREFIX} Accepting unsigned push (legacy mode)`, {
@@ -426,11 +432,29 @@ export function charge(parameters: charge.Parameters) {
           hash,
         })
 
-        // Finalize claims after successful verification
-        await store.put(`${STORE_PREFIX}:hash:${hash}`, {
-          state: 'used',
-          usedAt: new Date().toISOString(),
-        })
+        // Tx hash dedup via atomic compare-and-set on the canonical inner hash,
+        // after verification so a failed check never burns the payment's dedup slot.
+        const hashKey = `${STORE_PREFIX}:hash:${canonicalHash}`
+        const hashClaimResult = await store.update(hashKey, (current) =>
+          current
+            ? { op: 'noop', result: 'replay' as const }
+            : {
+                op: 'set',
+                value: { state: 'used', usedAt: new Date().toISOString() },
+                result: 'claimed' as const,
+              },
+        )
+        if (hashClaimResult === 'replay') {
+          logger.warn(`${LOG_PREFIX} Verification failed`, {
+            error: 'Transaction hash already used',
+            hash: canonicalHash,
+          })
+          throw new PaymentVerificationError(
+            `${LOG_PREFIX} Transaction hash already used. Replay rejected.`,
+            { hash: canonicalHash },
+          )
+        }
+
         await store.put(challengeStoreKey, { state: 'used', usedAt: new Date().toISOString() })
 
         return Receipt.from({
@@ -443,227 +467,293 @@ export function charge(parameters: charge.Parameters) {
       }
 
       case 'transaction': {
-        const txXdr = payload.transaction
+        // Until the broadcast may have reached the network, the payment is
+        // definitely not on-chain, so a failure can release the challenge (and
+        // tx-hash) claims and let the payer retry the same challenge instead of
+        // being permanently locked out. Once the transaction may be on-chain the
+        // claims are kept to prevent a double settlement; that ambiguous case is
+        // surfaced for reconciliation rather than silently dropped.
+        let mayBeOnChain = false
+        // The tx-hash dedup slot is only ours to release if this call claimed
+        // it. On a replay the slot belongs to an already-settled payment and
+        // must never be deleted, or its replay protection would be undone.
+        let hashKey: string | undefined
+        let hashClaimedByUs = false
+        try {
+          const txXdr = payload.transaction
 
-        // Detect FeeBump by inspecting the XDR envelope type directly.
-        // Using explicit constructors instead of TransactionBuilder.fromXDR +
-        // instanceof avoids false negatives when the FeeBumpTransaction class
-        // reference differs across module boundaries (e.g. in test environments).
-        const txEnvelope = xdr.TransactionEnvelope.fromXDR(txXdr, 'base64')
-        const isFeeBump = txEnvelope.switch().name === 'envelopeTypeTxFeeBump'
+          // Detect FeeBump by inspecting the XDR envelope type directly.
+          // Using explicit constructors instead of TransactionBuilder.fromXDR +
+          // instanceof avoids false negatives when the FeeBumpTransaction class
+          // reference differs across module boundaries (e.g. in test environments).
+          const txEnvelope = xdr.TransactionEnvelope.fromXDR(txXdr, 'base64')
+          const isFeeBump = txEnvelope.switch().name === 'envelopeTypeTxFeeBump'
 
-        let tx: Transaction
-        let txToSubmit: Transaction | FeeBumpTransaction
-        if (isFeeBump) {
-          const feeBumpTx = new FeeBumpTransaction(txEnvelope, networkPassphrase)
-          tx = feeBumpTx.innerTransaction
-          txToSubmit = feeBumpTx
-        } else {
-          tx = new Transaction(txEnvelope, networkPassphrase)
-          txToSubmit = tx
-        }
-
-        verifyNoSigningAddressInSources(tx, envelopeKP)
-
-        const expectedFrom = publicKeyFromDID(credential.source)
-        verifyTokenTransfer(tx, {
-          amount: expectedAmount,
-          currency: expectedCurrency,
-          recipient: expectedRecipient,
-          from: expectedFrom,
-        })
-
-        if (!envelopeKP && tx.source === ALL_ZEROS) {
-          logger.warn(`${LOG_PREFIX} Verification failed`, {
-            error: 'Sponsored source without feePayer',
-          })
-          throw new PaymentVerificationError(
-            `${LOG_PREFIX} Transaction relies on a sponsored source account but the server has no feePayer configuration.`,
-            {},
-          )
-        }
-
-        const expiresTimestamp: number | undefined = challenge.expires
-          ? Math.floor(new Date(challenge.expires).getTime() / 1000)
-          : undefined
-
-        if (envelopeKP !== undefined && tx.source === ALL_ZEROS) {
-          // ── Sponsored path ──────────────────────────────────────────
-
-          await validateAuthEntries(tx, envelopeKP.publicKey(), expiresTimestamp)
-
-          // Rebuild the tx with the signer's account as source
-          logger.debug(`${LOG_PREFIX} Rebuilding sponsored tx...`)
-          const serverAccount = await rpcServer.getAccount(envelopeKP.publicKey())
-          const originalSeq = serverAccount.sequenceNumber() // needed because Transaction.build sets sequence to account's current + 1 in place.
-          const envelopeTx = tx.toEnvelope().v1().tx()
-          const rawOp = envelopeTx.operations()[0]
-
-          // Build without sorobanData so simulation determines resources.
-          // This consumes the account's sequence (N → N+1).
-          const simBuilder = new TransactionBuilder(serverAccount, {
-            fee: Math.min(Number(tx.fee), maxFeeBumpStroops).toString(),
-            networkPassphrase,
-            ...(tx.timeBounds ? { timebounds: tx.timeBounds } : {}),
-          })
-          simBuilder.addOperation(rawOp)
-          if (!tx.timeBounds) {
-            simBuilder.setTimeout(DEFAULT_TIMEOUT)
+          let tx: Transaction
+          let txToSubmit: Transaction | FeeBumpTransaction
+          if (isFeeBump) {
+            const feeBumpTx = new FeeBumpTransaction(txEnvelope, networkPassphrase)
+            tx = feeBumpTx.innerTransaction
+            txToSubmit = feeBumpTx
+          } else {
+            tx = new Transaction(txEnvelope, networkPassphrase)
+            txToSubmit = tx
           }
-          const rebuiltTx = simBuilder.build()
 
-          // Simulate to validate transfer events and obtain accurate
-          // resource data — never trust the client-supplied sorobanData.
-          const simResponse = await simulateTransfer(rebuiltTx)
-          validateSimulationEvents(simResponse.events!, {
+          verifyNoSigningAddressInSources(tx, envelopeKP)
+
+          const expectedFrom = publicKeyFromDID(credential.source)
+          verifyTokenTransfer(tx, {
             amount: expectedAmount,
             currency: expectedCurrency,
             recipient: expectedRecipient,
             from: expectedFrom,
-            serverAddress: envelopeKP.publicKey(),
           })
 
-          // Rebuild with server-determined resources from simulation.
-          // Use a fresh Account at the original sequence so this tx
-          // also gets sequence N+1 (the simulation tx is never submitted).
-          const submitAccount = new Account(envelopeKP.publicKey(), originalSeq)
-          const prepBuilder = new TransactionBuilder(submitAccount, {
-            fee: Math.min(Number(tx.fee), maxFeeBumpStroops).toString(),
-            networkPassphrase,
-            ...(tx.timeBounds ? { timebounds: tx.timeBounds } : {}),
-          })
-          prepBuilder.addOperation(rawOp)
-          if (!tx.timeBounds) {
-            prepBuilder.setTimeout(DEFAULT_TIMEOUT)
-          }
-          const preparedTx = prepBuilder
-            .setSorobanData(simResponse.transactionData.build())
-            .build() as Transaction
-          preparedTx.sign(envelopeKP)
-          txToSubmit = preparedTx
-
-          // Fee bump wrapping (sponsored path only — spec requires
-          // unsponsored transactions to be submitted without modification)
-          if (feeBumpKP) {
-            logger.debug(`${LOG_PREFIX} Fee bump wrapping`)
-            txToSubmit = wrapFeeBump(txToSubmit, feeBumpKP, {
-              networkPassphrase,
-              maxFeeStroops: maxFeeBumpStroops,
+          if (!envelopeKP && tx.source === ALL_ZEROS) {
+            logger.warn(`${LOG_PREFIX} Verification failed`, {
+              error: 'Sponsored source without feePayer',
             })
+            throw new PaymentVerificationError(
+              `${LOG_PREFIX} Transaction relies on a sponsored source account but the server has no feePayer configuration.`,
+              {},
+            )
           }
-        } else {
-          // ── Unsponsored path ────────────────────────────────────────
 
-          if (expiresTimestamp && tx.timeBounds) {
-            const maxTime = parseInt(tx.timeBounds.maxTime, 10)
-            if (maxTime > expiresTimestamp) {
+          const expiresTimestamp: number | undefined = challenge.expires
+            ? Math.floor(new Date(challenge.expires).getTime() / 1000)
+            : undefined
+
+          if (envelopeKP !== undefined && tx.source === ALL_ZEROS) {
+            // ── Sponsored path ──────────────────────────────────────────
+
+            assertTxValidityWithinChallenge(tx, expiresTimestamp)
+
+            await validateAuthEntries(tx, envelopeKP.publicKey(), expiresTimestamp, {
+              currency: expectedCurrency,
+              from: expectedFrom,
+              to: expectedRecipient,
+              amount: expectedAmount,
+            })
+
+            // Rebuild the tx with the signer's account as source
+            logger.debug(`${LOG_PREFIX} Rebuilding sponsored tx...`)
+            const serverAccount = await rpcServer.getAccount(envelopeKP.publicKey())
+            const originalSeq = serverAccount.sequenceNumber() // needed because Transaction.build sets sequence to account's current + 1 in place.
+            const envelopeTx = tx.toEnvelope().v1().tx()
+            const rawOp = envelopeTx.operations()[0]
+
+            // Build without sorobanData so simulation determines resources.
+            // This consumes the account's sequence (N → N+1).
+            // The server sets its own inclusion fee (BASE_FEE) rather than
+            // trusting the counterparty-supplied tx.fee.
+            const simBuilder = new TransactionBuilder(serverAccount, {
+              fee: BASE_FEE,
+              networkPassphrase,
+              ...(tx.timeBounds ? { timebounds: tx.timeBounds } : {}),
+            })
+            simBuilder.addOperation(rawOp)
+            if (!tx.timeBounds) {
+              simBuilder.setTimeout(DEFAULT_TIMEOUT)
+            }
+            const rebuiltTx = simBuilder.build()
+
+            // Simulate to validate transfer events and obtain accurate
+            // resource data — never trust the client-supplied sorobanData.
+            // Enforcement mode also validates the supplied authorization against
+            // ledger state, so the server does not pay to broadcast a transfer
+            // whose authorization the network would no longer honor.
+            const simResponse = await simulateTransfer(rebuiltTx, { authMode: 'enforce' })
+            validateSimulationEvents(simResponse.events!, {
+              amount: expectedAmount,
+              currency: expectedCurrency,
+              recipient: expectedRecipient,
+              from: expectedFrom,
+              serverAddress: envelopeKP.publicKey(),
+            })
+
+            // Rebuild with server-determined resources from simulation.
+            // Use a fresh Account at the original sequence so this tx
+            // also gets sequence N+1 (the simulation tx is never submitted).
+            const submitAccount = new Account(envelopeKP.publicKey(), originalSeq)
+            const prepBuilder = new TransactionBuilder(submitAccount, {
+              fee: BASE_FEE,
+              networkPassphrase,
+              ...(tx.timeBounds ? { timebounds: tx.timeBounds } : {}),
+            })
+            prepBuilder.addOperation(rawOp)
+            if (!tx.timeBounds) {
+              prepBuilder.setTimeout(DEFAULT_TIMEOUT)
+            }
+            const preparedTx = prepBuilder
+              .setSorobanData(simResponse.transactionData.build())
+              .build() as Transaction
+
+            // setSorobanData adds the simulator-derived resource fee on top of the
+            // inclusion fee. Cap the total the server is willing to pay so a
+            // counterparty cannot drive the fee past the per-settlement limit.
+            if (Number(preparedTx.fee) > maxFeeBumpStroops) {
               throw new PaymentVerificationError(
-                `${LOG_PREFIX} Transaction timeBounds.maxTime exceeds challenge expires.`,
-                {
-                  maxTime,
-                  expires: expiresTimestamp,
-                },
+                `${LOG_PREFIX} Settlement fee exceeds the configured maximum.`,
+                { fee: preparedTx.fee, maxFeeBumpStroops },
               )
             }
+
+            preparedTx.sign(envelopeKP)
+            txToSubmit = preparedTx
+
+            // Fee bump wrapping (sponsored path only — spec requires
+            // unsponsored transactions to be submitted without modification)
+            if (feeBumpKP) {
+              logger.debug(`${LOG_PREFIX} Fee bump wrapping`)
+              txToSubmit = wrapFeeBump(txToSubmit, feeBumpKP, {
+                networkPassphrase,
+                maxFeeStroops: maxFeeBumpStroops,
+              })
+            }
+          } else {
+            // ── Unsponsored path ────────────────────────────────────────
+
+            assertTxValidityWithinChallenge(tx, expiresTimestamp)
+
+            const simResponse = await simulateTransfer(tx)
+            validateSimulationEvents(simResponse.events!, {
+              amount: expectedAmount,
+              currency: expectedCurrency,
+              recipient: expectedRecipient,
+              from: expectedFrom,
+              serverAddress: envelopeKP?.publicKey(),
+            })
           }
 
-          const simResponse = await simulateTransfer(tx)
-          validateSimulationEvents(simResponse.events!, {
-            amount: expectedAmount,
-            currency: expectedCurrency,
-            recipient: expectedRecipient,
-            from: expectedFrom,
-            serverAddress: envelopeKP?.publicKey(),
-          })
-        }
-
-        // Tx hash dedup via atomic compare-and-set, just before broadcast:
-        // settle each transaction at most once (shared with push-mode hashes).
-        const txHash = tx.hash().toString('hex')
-        const hashKey = `${STORE_PREFIX}:hash:${txHash}`
-        const hashClaimResult = await store.update(hashKey, (current) =>
-          current
-            ? { op: 'noop', result: 'replay' as const }
-            : {
-                op: 'set',
-                value: { state: 'pending', claimedAt: new Date().toISOString() },
-                result: 'claimed' as const,
-              },
-        )
-        if (hashClaimResult === 'replay') {
-          logger.warn(`${LOG_PREFIX} Verification failed`, {
-            error: 'Transaction hash already used',
-            hash: txHash,
-          })
-          throw new PaymentVerificationError(
-            `${LOG_PREFIX} Transaction hash already used. Replay rejected.`,
-            { hash: txHash },
+          // Tx hash dedup via atomic compare-and-set, just before broadcast.
+          // Key on the canonical INNER hash of the transaction actually being
+          // broadcast — the same key push mode derives from the on-chain
+          // envelope. In the sponsored path the broadcast tx is rebuilt with the
+          // server as source, so its hash differs from the client-submitted tx;
+          // keying on the broadcast tx keeps pull and push converged on one slot,
+          // so each on-chain payment settles at most once regardless of how it
+          // arrives or whether it is wrapped in a fee-bump.
+          const broadcastInnerTx =
+            txToSubmit instanceof FeeBumpTransaction ? txToSubmit.innerTransaction : txToSubmit
+          const txHash = broadcastInnerTx.hash().toString('hex')
+          hashKey = `${STORE_PREFIX}:hash:${txHash}`
+          const hashClaimResult = await store.update(hashKey, (current) =>
+            current
+              ? { op: 'noop', result: 'replay' as const }
+              : {
+                  op: 'set',
+                  value: { state: 'pending', claimedAt: new Date().toISOString() },
+                  result: 'claimed' as const,
+                },
           )
-        }
+          if (hashClaimResult === 'replay') {
+            logger.warn(`${LOG_PREFIX} Verification failed`, {
+              error: 'Transaction hash already used',
+              hash: txHash,
+            })
+            throw new PaymentVerificationError(
+              `${LOG_PREFIX} Transaction hash already used. Replay rejected.`,
+              { hash: txHash },
+            )
+          }
+          hashClaimedByUs = true
 
-        // ── Settlement ──────────────────────────────────────────────
-        let sendResult: rpc.Api.SendTransactionResponse
-        try {
-          logger.debug(`${LOG_PREFIX} Broadcasting tx`)
-          sendResult = await rpcServer.sendTransaction(txToSubmit)
-          logger.debug(`${LOG_PREFIX} Broadcast result`, {
-            hash: sendResult.hash,
-            status: sendResult.status,
-          })
-        } catch (error) {
-          throw new SettlementError(
-            `${LOG_PREFIX} Settlement failed: could not broadcast transaction.`,
-            {
-              details: error instanceof Error ? error.message : String(error),
-            },
-          )
-        }
-
-        if (sendResult.status !== 'PENDING') {
-          throw new SettlementError(
-            `${LOG_PREFIX} Settlement failed: sendTransaction returned ${sendResult.status}.`,
-            { hash: sendResult.hash, status: sendResult.status },
-          )
-        }
-
-        // Attach the tx hash to the already-claimed challenge entry.
-        await store.put(challengeStoreKey, {
-          state: 'pending',
-          hash: sendResult.hash,
-          claimedAt: new Date().toISOString(),
-        })
-
-        try {
-          await pollTransaction(rpcServer, sendResult.hash, {
-            maxAttempts: pollMaxAttempts,
-            delayMs: pollDelayMs,
-            timeoutMs: pollTimeoutMs,
-            semaphore: pollSemaphore,
-          })
-        } catch (error) {
-          throw new SettlementError(
-            `${LOG_PREFIX} Settlement status is ambiguous — challenge locked pending reconciliation.`,
-            {
+          // ── Settlement ──────────────────────────────────────────────
+          let sendResult: rpc.Api.SendTransactionResponse
+          try {
+            logger.debug(`${LOG_PREFIX} Broadcasting tx`)
+            sendResult = await rpcServer.sendTransaction(txToSubmit)
+            logger.debug(`${LOG_PREFIX} Broadcast result`, {
               hash: sendResult.hash,
-              details: error instanceof Error ? error.message : String(error),
-            },
-          )
+              status: sendResult.status,
+            })
+          } catch (error) {
+            // The broadcast request may have reached the network before failing,
+            // so the payment might still apply on-chain; keep the claims.
+            mayBeOnChain = true
+            throw new SettlementError(
+              `${LOG_PREFIX} Settlement failed: could not broadcast transaction.`,
+              {
+                details: error instanceof Error ? error.message : String(error),
+              },
+            )
+          }
+
+          // A PENDING (accepted) or DUPLICATE (already submitted) status may
+          // reach the ledger; any other status is a synchronous rejection that
+          // never enters the mempool, so the claims can be released for retry.
+          mayBeOnChain = sendResult.status === 'PENDING' || sendResult.status === 'DUPLICATE'
+
+          if (sendResult.status !== 'PENDING') {
+            throw new SettlementError(
+              `${LOG_PREFIX} Settlement failed: sendTransaction returned ${sendResult.status}.`,
+              { hash: sendResult.hash, status: sendResult.status },
+            )
+          }
+
+          // Attach the tx hash to the already-claimed challenge entry.
+          await store.put(challengeStoreKey, {
+            state: 'pending',
+            hash: sendResult.hash,
+            claimedAt: new Date().toISOString(),
+          })
+
+          // The signed transaction can be included on-chain any time until its
+          // timeBounds.maxTime. Wait for the settlement result across that whole
+          // validity window — not just the shorter default poll budget — so a
+          // payment that confirms late is still credited instead of being
+          // abandoned while it can still land, which would leave the payer
+          // debited on-chain with no receipt. Once maxTime has passed the
+          // transaction can no longer be applied, so giving up then is safe.
+          const settlement = settlementPollBudget(broadcastInnerTx, {
+            pollTimeoutMs,
+            pollMaxAttempts,
+            pollDelayMs,
+          })
+          try {
+            await pollTransaction(rpcServer, sendResult.hash, {
+              maxAttempts: settlement.maxAttempts,
+              delayMs: pollDelayMs,
+              timeoutMs: settlement.timeoutMs,
+              semaphore: pollSemaphore,
+            })
+          } catch (error) {
+            throw new SettlementError(
+              `${LOG_PREFIX} Settlement status is ambiguous — challenge locked pending reconciliation.`,
+              {
+                hash: sendResult.hash,
+                details: error instanceof Error ? error.message : String(error),
+              },
+            )
+          }
+
+          await store.put(challengeStoreKey, {
+            state: 'settled',
+            hash: sendResult.hash,
+            settledAt: new Date().toISOString(),
+          })
+          await store.put(hashKey, { state: 'used', usedAt: new Date().toISOString() })
+
+          return Receipt.from({
+            method: 'stellar',
+            reference: sendResult.hash,
+            status: 'success',
+            timestamp: new Date().toISOString(),
+            ...(externalId ? { externalId } : {}),
+          })
+        } catch (error) {
+          if (!mayBeOnChain) {
+            // The transaction never reached the ledger, so release the claims
+            // this call made. The payer can then retry the same challenge
+            // instead of being permanently locked out by a failed settlement.
+            await store.delete(challengeStoreKey)
+            if (hashClaimedByUs && hashKey) {
+              await store.delete(hashKey)
+            }
+          }
+          throw error
         }
-
-        await store.put(challengeStoreKey, {
-          state: 'settled',
-          hash: sendResult.hash,
-          settledAt: new Date().toISOString(),
-        })
-        await store.put(hashKey, { state: 'used', usedAt: new Date().toISOString() })
-
-        return Receipt.from({
-          method: 'stellar',
-          reference: sendResult.hash,
-          status: 'success',
-          timestamp: new Date().toISOString(),
-          ...(externalId ? { externalId } : {}),
-        })
       }
 
       default:
@@ -683,10 +773,14 @@ export function charge(parameters: charge.Parameters) {
    */
   async function simulateTransfer(
     tx: Transaction,
+    options: { authMode?: rpc.Api.SimulationAuthMode } = {},
   ): Promise<rpc.Api.SimulateTransactionSuccessResponse> {
     let simResponse: rpc.Api.SimulateTransactionSuccessResponse
     try {
-      simResponse = await simulateCall(rpcServer, tx, { timeoutMs: simulationTimeoutMs })
+      simResponse = await simulateCall(rpcServer, tx, {
+        timeoutMs: simulationTimeoutMs,
+        authMode: options.authMode,
+      })
     } catch (error) {
       if (error instanceof SimulationContractError) {
         throw new PaymentVerificationError(
@@ -723,11 +817,22 @@ export function charge(parameters: charge.Parameters) {
     tx: Transaction,
     serverPublicKey: string,
     expiresTimestamp: number | undefined,
+    expectedTransfer: { currency: string; from: string; to: string; amount: bigint },
   ) {
     const envelope = tx.toEnvelope().v1().tx()
     const ops = envelope.operations()
 
-    // Calculate max ledger from expires
+    // The latest ledger bounds auth-entry expirations on both ends. Fetch it
+    // lazily and once, only when there is something to check.
+    let latestLedgerSeq: number | undefined
+    const getLatestLedgerSeq = async (): Promise<number> => {
+      if (latestLedgerSeq === undefined) {
+        latestLedgerSeq = (await rpcServer.getLatestLedger()).sequence
+      }
+      return latestLedgerSeq
+    }
+
+    // Upper bound on auth-entry expiration derived from the challenge lifetime.
     let maxLedger: number | undefined
     if (expiresTimestamp) {
       const nowSecs = Math.floor(Date.now() / 1000)
@@ -738,8 +843,10 @@ export function charge(parameters: charge.Parameters) {
           nowSecs,
         })
       }
-      const latestLedger = await rpcServer.getLatestLedger()
-      maxLedger = latestLedger.sequence + Math.ceil(secsUntilExpiry / DEFAULT_LEDGER_CLOSE_TIME)
+      maxLedger =
+        (await getLatestLedgerSeq()) +
+        Math.ceil(secsUntilExpiry / DEFAULT_LEDGER_CLOSE_TIME) +
+        AUTH_EXPIRATION_LEDGER_SKEW
     }
 
     const serverAddress = Address.fromString(serverPublicKey)
@@ -754,6 +861,12 @@ export function charge(parameters: charge.Parameters) {
       }
 
       const authEntries = opBody.invokeHostFunctionOp().auth()
+      // The transfer requires authorization from its `from` account; track that
+      // at least one valid entry actually authorizes this exact transfer.
+      // Otherwise a structurally valid but unrelated (or absent) entry would let
+      // the server broadcast a transfer doomed to fail apply-time require_auth,
+      // wasting the fee it paid to settle it.
+      let transferAuthorized = false
       for (const entry of authEntries) {
         const credentials = entry.credentials()
 
@@ -780,17 +893,25 @@ export function charge(parameters: charge.Parameters) {
           )
         }
 
-        if (maxLedger !== undefined) {
-          const entryExpiration = addressCred.signatureExpirationLedger()
-          if (entryExpiration > maxLedger) {
-            throw new PaymentVerificationError(
-              `${LOG_PREFIX} Auth entry expiration exceeds maximum allowed ledger.`,
-              {
-                entryExpiration,
-                maxLedger,
-              },
-            )
-          }
+        const entryExpiration = addressCred.signatureExpirationLedger()
+        const latestLedger = await getLatestLedgerSeq()
+        if (entryExpiration <= latestLedger) {
+          throw new PaymentVerificationError(
+            `${LOG_PREFIX} Auth entry signature has already expired (or expires at the current ledger).`,
+            {
+              entryExpiration,
+              latestLedger,
+            },
+          )
+        }
+        if (maxLedger !== undefined && entryExpiration > maxLedger) {
+          throw new PaymentVerificationError(
+            `${LOG_PREFIX} Auth entry expiration exceeds maximum allowed ledger.`,
+            {
+              entryExpiration,
+              maxLedger,
+            },
+          )
         }
 
         const rootInvocation = entry.rootInvocation()
@@ -800,6 +921,35 @@ export function charge(parameters: charge.Parameters) {
             {},
           )
         }
+
+        // Verify the authorization signature itself as defense in depth. The
+        // enforce-mode simulation below also rejects an invalidly signed entry
+        // before broadcast; checking it here keeps the guarantee independent of
+        // the RPC's auth-mode semantics and fails fast, before the rebuild, with
+        // a precise error rather than a generic simulation failure.
+        try {
+          verifyAuthEntrySignature(entry, networkPassphrase)
+        } catch (error) {
+          throw new PaymentVerificationError(`${LOG_PREFIX} Auth entry signature is invalid.`, {
+            details: error instanceof Error ? error.message : String(error),
+          })
+        }
+
+        // Bind the entry to the settled transfer: its authorizer must be the
+        // transfer's `from` and its invocation must be exactly this transfer.
+        if (
+          entryAddress.toString() === expectedTransfer.from &&
+          authorizationCoversTransfer(rootInvocation, expectedTransfer)
+        ) {
+          transferAuthorized = true
+        }
+      }
+
+      if (!transferAuthorized) {
+        throw new PaymentVerificationError(
+          `${LOG_PREFIX} No authorization entry authorizes the requested transfer.`,
+          {},
+        )
       }
     }
   }
@@ -808,6 +958,100 @@ export function charge(parameters: charge.Parameters) {
 // ---------------------------------------------------------------------------
 // Verification helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Derives the polling budget for awaiting a broadcast pull-mode settlement.
+ *
+ * A signed transaction stays valid until its `timeBounds.maxTime`, so the
+ * server must keep polling across that window instead of the shorter default
+ * budget; otherwise a payment that confirms late is abandoned while it can
+ * still land on-chain, leaving the payer debited with no receipt. The
+ * configured `pollTimeoutMs` is used both as the floor and as grace beyond
+ * `maxTime` (to catch a transfer included in the final valid ledger), and
+ * `maxAttempts` is scaled so the wall-clock timeout — not a premature attempt
+ * cap — governs when polling for a still-valid transaction stops.
+ *
+ * Falls back to the configured budget when the transaction carries no usable
+ * upper time bound.
+ */
+function settlementPollBudget(
+  broadcastTx: Transaction,
+  budget: { pollTimeoutMs: number; pollMaxAttempts: number; pollDelayMs: number },
+): { timeoutMs: number; maxAttempts: number } {
+  const { pollTimeoutMs, pollMaxAttempts, pollDelayMs } = budget
+  const maxTimeSeconds = broadcastTx.timeBounds ? parseInt(broadcastTx.timeBounds.maxTime, 10) : NaN
+  if (!Number.isFinite(maxTimeSeconds) || maxTimeSeconds <= 0) {
+    return { timeoutMs: pollTimeoutMs, maxAttempts: pollMaxAttempts }
+  }
+  const msUntilInvalid = maxTimeSeconds * 1000 - Date.now()
+  const timeoutMs = Math.max(pollTimeoutMs, msUntilInvalid + pollTimeoutMs)
+  // With a minimum inter-poll spacing of pollDelayMs, this many attempts more
+  // than covers the timeout window, so the wall-clock timeout is what stops the
+  // poll rather than the attempt count.
+  const attemptsForWindow = Math.ceil(timeoutMs / Math.max(pollDelayMs, 1)) + 1
+  return { timeoutMs, maxAttempts: Math.max(pollMaxAttempts, attemptsForWindow) }
+}
+
+/**
+ * Rejects a pull-mode transaction whose validity window outlives the challenge
+ * it settles. The signed transaction can be included on-chain any time up to its
+ * `timeBounds.maxTime`, and settlement waits for that whole window (see
+ * {@link settlementPollBudget}); bounding it to the challenge expiry keeps a
+ * counterparty from pinning the settlement wait open long after the challenge
+ * has lapsed. Applied to both the sponsored and unsponsored pull paths.
+ */
+function assertTxValidityWithinChallenge(
+  tx: Transaction,
+  expiresTimestamp: number | undefined,
+): void {
+  if (!expiresTimestamp || !tx.timeBounds) return
+  const maxTime = parseInt(tx.timeBounds.maxTime, 10)
+  if (maxTime > expiresTimestamp) {
+    throw new PaymentVerificationError(
+      `${LOG_PREFIX} Transaction timeBounds.maxTime exceeds challenge expires.`,
+      { maxTime, expires: expiresTimestamp },
+    )
+  }
+}
+
+/**
+ * Returns whether an authorization entry's root invocation is exactly the
+ * expected SEP-41 `transfer` — same token contract, function name, and
+ * `(from, to, amount)` arguments. Used to confirm a sponsored auth entry
+ * authorizes the transfer actually being settled, not some other call.
+ */
+function authorizationCoversTransfer(
+  rootInvocation: xdr.SorobanAuthorizedInvocation,
+  expected: { currency: string; from: string; to: string; amount: bigint },
+): boolean {
+  const authorizedFunction = rootInvocation.function()
+  if (
+    authorizedFunction.switch().value !==
+    xdr.SorobanAuthorizedFunctionType.sorobanAuthorizedFunctionTypeContractFn().value
+  ) {
+    return false
+  }
+  const invokeArgs = authorizedFunction.contractFn()
+  if (Address.fromScAddress(invokeArgs.contractAddress()).toString() !== expected.currency) {
+    return false
+  }
+  if (invokeArgs.functionName().toString() !== 'transfer') {
+    return false
+  }
+  const args = invokeArgs.args()
+  if (args.length !== 3) {
+    return false
+  }
+  try {
+    return (
+      Address.fromScVal(args[0]).toString() === expected.from &&
+      Address.fromScVal(args[1]).toString() === expected.to &&
+      scValToBigInt(args[2]) === expected.amount
+    )
+  } catch {
+    return false
+  }
+}
 
 /**
  * Asserts the transaction contains exactly one operation, that it is an `invokeHostFunction`, and
@@ -910,12 +1154,18 @@ function verifyTokenTransfer(
  * SEP-41 `transfer` invocation matching the expected parameters.
  *
  * Parses the envelope XDR from the RPC response, then delegates to {@link verifyTokenTransfer}.
+ *
+ * Returns the **inner transaction hash** (hex) — the canonical identifier of the
+ * on-chain value transfer. A `FeeBumpTransaction` exposes two distinct
+ * on-chain-resolvable hashes (the inner tx hash and the outer fee-bump hash); the
+ * inner hash uniquely identifies the payment and is the key both push and pull
+ * modes dedup on, so the same payment can never settle twice under different hashes.
  */
 function verifyTokenTransferFromResult(
   txResult: rpc.Api.GetSuccessfulTransactionResponse,
   expected: { amount: bigint; currency: string; recipient: string; from: string },
   networkPassphrase: string,
-) {
+): string {
   if (!txResult.envelopeXdr) {
     throw new PaymentVerificationError(
       `${LOG_PREFIX} Transaction result is missing envelope XDR — cannot verify payment.`,
@@ -952,6 +1202,8 @@ function verifyTokenTransferFromResult(
   }
 
   verifyTokenTransfer(innerTx, expected)
+
+  return innerTx.hash().toString('hex')
 }
 
 // ---------------------------------------------------------------------------
@@ -1197,6 +1449,25 @@ export declare namespace charge {
      * @defaultValue `false`
      */
     allowUnsignedPush?: boolean
+    /**
+     * Maximum age, in seconds, of an on-chain payment that push-mode settlement
+     * (`signedHash`/`hash`) will accept, measured at verification time. Bounds how
+     * far in the past a confirmed transfer may have been included, so a payment
+     * made before the challenge cannot be presented as its settlement.
+     *
+     * @defaultValue `900`
+     */
+    maxPushPaymentAgeSeconds?: number
+    /**
+     * Lifetime, in seconds, of the challenges this server issues. Push-mode
+     * settlement uses it to derive each challenge's issuance time from its
+     * `expires` field and reject any on-chain payment confirmed before then, so a
+     * transfer made before the challenge cannot be presented as its settlement.
+     * Set this to match the expiry configured on the server's challenge issuer.
+     *
+     * @defaultValue `300`
+     */
+    challengeLifetimeSeconds?: number
     /** Logger instance (pino and console compatible API). Defaults to a no-op logger. */
     logger?: Logger
   }

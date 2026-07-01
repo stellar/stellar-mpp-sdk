@@ -8,11 +8,17 @@ import {
 } from '@stellar/stellar-sdk'
 import { Credential, Method, Store } from 'mppx'
 import { z } from 'zod/mini'
-import { ALL_ZEROS, DEFAULT_FEE, NETWORK_PASSPHRASE, SOROBAN_RPC_URLS } from '../../constants.js'
+import {
+  ALL_ZEROS,
+  DEFAULT_FEE,
+  NETWORK_PASSPHRASE,
+  type NetworkId,
+  SOROBAN_RPC_URLS,
+} from '../../constants.js'
 import { DEFAULT_SIMULATION_TIMEOUT_MS } from '../../shared/defaults.js'
 import { StellarMppError } from '../../shared/errors.js'
 import { simulateCall } from '../../shared/simulate.js'
-import { resolveNetworkId } from '../../shared/validation.js'
+import { I128_MAX, resolveNetworkId, validateAmount } from '../../shared/validation.js'
 import { assertCommitmentBinds } from '../commitment.js'
 import { channel as ChannelMethod } from '../Methods.js'
 
@@ -48,6 +54,7 @@ export function channel(parameters: channel.Parameters) {
     store = Store.memory(),
     allowedChannels,
     allowUnpinnedChannel = false,
+    network: pinnedNetwork,
   } = parameters
 
   if (!parameters.store) {
@@ -99,13 +106,22 @@ export function channel(parameters: channel.Parameters) {
         }
       }
 
-      // The server tells us the cumulative amount via methodDetails,
-      // or the caller can override via context.
+      // Enforce network pinning: reject if the server-advertised network does
+      // not match the one the client is configured for, so a server cannot
+      // induce a signature valid on a different network than intended.
+      if (pinnedNetwork && network !== pinnedNetwork) {
+        throw new StellarMppError(
+          `Network mismatch: server advertised "${network}" ` +
+            `but this client is pinned to "${pinnedNetwork}".`,
+        )
+      }
+
       const action = context?.action ?? 'voucher'
 
-      // Read locally tracked cumulative from store (if provided).
-      // The client tracks the last signed cumulative independently of the
-      // server to prevent a rogue server from resetting the baseline.
+      // The signed cumulative baseline comes solely from the client's own
+      // locally tracked value. The server-reported cumulative is not
+      // authoritative and is never adopted as the baseline — trusting it would
+      // let a rogue server inflate the amount the client signs.
       let localPrevious = 0n
       const clientCumulativeKey = `stellar:channel:client:${network}:${channelAddress}:cumulative`
       if (store) {
@@ -115,16 +131,28 @@ export function channel(parameters: channel.Parameters) {
         }
       }
 
-      // Take the maximum of the locally tracked baseline and the
-      // server-reported value. This prevents the server from artificially
-      // resetting the cumulative below what the client has already committed.
-      const serverReported = BigInt(request.methodDetails?.cumulativeAmount ?? '0')
-      const previousCumulative = localPrevious > serverReported ? localPrevious : serverReported
+      // Validate the numeric inputs before converting them: a malformed or
+      // out-of-range value would otherwise surface as an untyped
+      // SyntaxError/RangeError from BigInt/nativeToScVal rather than a typed
+      // StellarMppError. `amount` is counterparty-supplied; the override is the
+      // integrator's own.
+      let cumulativeAmount: bigint
+      if (context?.cumulativeAmount !== undefined) {
+        validateAmount(context.cumulativeAmount)
+        cumulativeAmount = BigInt(context.cumulativeAmount)
+      } else {
+        validateAmount(amount)
+        cumulativeAmount = localPrevious + BigInt(amount)
+      }
 
-      const cumulativeAmount =
-        context?.cumulativeAmount !== undefined
-          ? BigInt(context.cumulativeAmount)
-          : previousCumulative + BigInt(amount)
+      // The cumulative total is encoded as a Soroban i128 below; a sum that
+      // exceeds the signed i128 maximum (the locally tracked baseline plus this
+      // payment) must fail as a typed error rather than throwing from nativeToScVal.
+      if (cumulativeAmount > I128_MAX) {
+        throw new StellarMppError(
+          `Cumulative amount ${cumulativeAmount.toString()} exceeds the signed i128 maximum (${I128_MAX.toString()}).`,
+        )
+      }
 
       onProgress?.({
         type: 'challenge',
@@ -154,7 +182,22 @@ export function channel(parameters: channel.Parameters) {
         .setTimeout(simulationTimeoutMs / 1000)
         .build()
 
-      const simResult = await simulateCall(server, simTx, { timeoutMs: simulationTimeoutMs })
+      // simulateCall throws its own Simulation* error classes, which do not
+      // extend StellarMppError. The triggering network/channel is
+      // counterparty-influenced, so wrap the failure to keep the public client
+      // API's typed-error contract.
+      let simResult
+      try {
+        simResult = await simulateCall(server, simTx, { timeoutMs: simulationTimeoutMs })
+      } catch (error) {
+        if (error instanceof StellarMppError) throw error
+        throw new StellarMppError(
+          `Channel commitment simulation failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+          { details: error instanceof Error ? error.message : String(error) },
+        )
+      }
 
       // Extract the commitment bytes from the simulation result
       const returnValue = simResult.result?.retval
@@ -228,12 +271,11 @@ export declare namespace channel {
      * Optional persistent store for client-side cumulative amount tracking.
      *
      * When provided, the client persists the last signed cumulative amount
-     * and uses it as the baseline for subsequent commitments, taking the
-     * maximum of the locally tracked value and the server-reported value.
-     * This keeps the client's cumulative baseline aligned with the highest
-     * value it has already signed.
+     * and uses it as the sole baseline for subsequent commitments. The
+     * server-reported cumulative is never adopted as a baseline, so the value
+     * the client signs always derives from what it has already signed locally.
      *
-     * Defaults to an in-memory store — protection is active within the
+     * Defaults to an in-memory store — the baseline is tracked within the
      * process lifetime but does not survive restarts. Pass a persistent
      * store for production use.
      */
@@ -261,6 +303,15 @@ export declare namespace channel {
      * @default false
      */
     allowUnpinnedChannel?: boolean
+    /**
+     * Network the client is pinned to (e.g. `'stellar:testnet'`).
+     *
+     * When set, the client rejects a commitment challenge whose advertised
+     * network does not match, so a server cannot induce a signature valid on a
+     * different network than intended. When omitted, the network is taken from
+     * the server-advertised value.
+     */
+    network?: NetworkId
     /** Callback invoked at each lifecycle stage. */
     onProgress?: (event: ProgressEvent) => void
   }

@@ -1,4 +1,4 @@
-import { xdr } from '@stellar/stellar-sdk'
+import { Address, Keypair, xdr } from '@stellar/stellar-sdk'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mockGetEvents = vi.fn()
@@ -21,6 +21,9 @@ vi.mock('@stellar/stellar-sdk', async (importOriginal) => {
 const { watchChannel } = await import('./Watcher.js')
 
 const CHANNEL_ADDRESS = 'CBU3P5BAU6CYGPAVY7TGGGNEPCS7H73IA3L677Z3CFZSGFYB7UFK4IMS'
+const TOKEN_ADDRESS = 'CAYGVE5AUQQ2XNXWOXHH5VPGRHYX4APUAOWA4VOBI3VGMOYJ2IJ6VJG5'
+const FUNDER = Keypair.random().publicKey()
+const RECIPIENT = Keypair.random().publicKey()
 
 function makeSymbolScVal(name: string): xdr.ScVal {
   return xdr.ScVal.scvSymbol(name)
@@ -35,6 +38,38 @@ function makeI128ScVal(amount: bigint): xdr.ScVal {
       lo: xdr.Uint64.fromString(lo.toString()),
     }),
   )
+}
+
+// Builds the map-encoded data section a `#[contractevent]` struct emits: a
+// symbol-keyed ScVal::Map with entries sorted by key.
+function makeMapScVal(entries: Record<string, xdr.ScVal>): xdr.ScVal {
+  const keys = Object.keys(entries).sort()
+  return xdr.ScVal.scvMap(
+    keys.map((key) => new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol(key), val: entries[key] })),
+  )
+}
+
+function closeData(effectiveAtLedger: number): xdr.ScVal {
+  return makeMapScVal({ effective_at_ledger: xdr.ScVal.scvU32(effectiveAtLedger) })
+}
+
+function withdrawData(to: string, amount: bigint): xdr.ScVal {
+  return makeMapScVal({ to: new Address(to).toScVal(), amount: makeI128ScVal(amount) })
+}
+
+function refundData(from: string, amount: bigint): xdr.ScVal {
+  return makeMapScVal({ from: new Address(from).toScVal(), amount: makeI128ScVal(amount) })
+}
+
+function openData(): xdr.ScVal {
+  return makeMapScVal({
+    from: new Address(FUNDER).toScVal(),
+    to: new Address(RECIPIENT).toScVal(),
+    token: new Address(TOKEN_ADDRESS).toScVal(),
+    amount: makeI128ScVal(10_000_000n),
+    commitment_key: xdr.ScVal.scvBytes(Buffer.alloc(32, 7)),
+    refund_waiting_period: xdr.ScVal.scvU32(120),
+  })
 }
 
 function makeEvent(options: {
@@ -85,14 +120,29 @@ describe('watchChannel', () => {
     stop()
   })
 
-  it('parses a close event with amount', async () => {
+  it('anchors the first poll at the provided startLedger without calling getLatestLedger', async () => {
+    const stop = watchChannel({
+      channel: CHANNEL_ADDRESS,
+      onEvent: () => {},
+      startLedger: 1234,
+    })
+
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(mockGetLatestLedger).not.toHaveBeenCalled()
+    expect(mockGetEvents).toHaveBeenCalledWith(expect.objectContaining({ startLedger: 1234 }))
+
+    stop()
+  })
+
+  it('parses a close event carrying the effective-at ledger (the dispute signal)', async () => {
     const events: unknown[] = []
 
     mockGetEvents.mockResolvedValueOnce({
       events: [
         makeEvent({
           topicName: 'close',
-          value: makeI128ScVal(5_000_000n),
+          value: closeData(5_002_345),
           txHash: 'close-hash',
           ledger: 1001,
         }),
@@ -110,7 +160,7 @@ describe('watchChannel', () => {
     expect(events).toHaveLength(1)
     expect(events[0]).toEqual({
       type: 'close',
-      amount: 5_000_000n,
+      effectiveAtLedger: 5_002_345,
       txHash: 'close-hash',
       ledger: 1001,
       ledgerClosedAt: '2026-03-19T00:00:00Z',
@@ -119,18 +169,14 @@ describe('watchChannel', () => {
     stop()
   })
 
-  it('parses a close_start event', async () => {
+  it('parses an open event', async () => {
     const events: unknown[] = []
 
     mockGetEvents.mockResolvedValueOnce({
       events: [
-        makeEvent({
-          topicName: 'close_start',
-          txHash: 'close-start-hash',
-          ledger: 2000,
-        }),
+        makeEvent({ topicName: 'open', value: openData(), txHash: 'open-hash', ledger: 900 }),
       ],
-      cursor: 'cursor-2',
+      cursor: 'cursor-open',
     })
 
     const stop = watchChannel({
@@ -142,29 +188,35 @@ describe('watchChannel', () => {
 
     expect(events).toHaveLength(1)
     expect(events[0]).toEqual({
-      type: 'close_start',
-      txHash: 'close-start-hash',
-      ledger: 2000,
+      type: 'open',
+      from: FUNDER,
+      to: RECIPIENT,
+      token: TOKEN_ADDRESS,
+      amount: 10_000_000n,
+      commitmentKey: Buffer.alloc(32, 7).toString('hex'),
+      refundWaitingPeriod: 120,
+      txHash: 'open-hash',
+      ledger: 900,
       ledgerClosedAt: '2026-03-19T00:00:00Z',
     })
 
     stop()
   })
 
-  it('parses refund and top_up events', async () => {
+  it('parses withdraw and refund events', async () => {
     const events: unknown[] = []
 
     mockGetEvents.mockResolvedValueOnce({
       events: [
         makeEvent({
-          topicName: 'refund',
-          value: makeI128ScVal(3_000_000n),
-          txHash: 'refund-hash',
+          topicName: 'withdraw',
+          value: withdrawData(RECIPIENT, 3_000_000n),
+          txHash: 'withdraw-hash',
         }),
         makeEvent({
-          topicName: 'top_up',
-          value: makeI128ScVal(10_000_000n),
-          txHash: 'topup-hash',
+          topicName: 'refund',
+          value: refundData(FUNDER, 7_000_000n),
+          txHash: 'refund-hash',
         }),
       ],
       cursor: 'cursor-3',
@@ -178,8 +230,22 @@ describe('watchChannel', () => {
     await vi.advanceTimersByTimeAsync(0)
 
     expect(events).toHaveLength(2)
-    expect(events[0]).toMatchObject({ type: 'refund', amount: 3_000_000n })
-    expect(events[1]).toMatchObject({ type: 'top_up', amount: 10_000_000n })
+    expect(events[0]).toEqual({
+      type: 'withdraw',
+      to: RECIPIENT,
+      amount: 3_000_000n,
+      txHash: 'withdraw-hash',
+      ledger: 1000,
+      ledgerClosedAt: '2026-03-19T00:00:00Z',
+    })
+    expect(events[1]).toEqual({
+      type: 'refund',
+      from: FUNDER,
+      amount: 7_000_000n,
+      txHash: 'refund-hash',
+      ledger: 1000,
+      ledgerClosedAt: '2026-03-19T00:00:00Z',
+    })
 
     stop()
   })
@@ -188,7 +254,12 @@ describe('watchChannel', () => {
     const events: unknown[] = []
 
     mockGetEvents.mockResolvedValueOnce({
-      events: [makeEvent({ topicName: 'some_other_event' })],
+      events: [
+        makeEvent({ topicName: 'some_other_event' }),
+        // Topics from the old, incorrect model that the contract never emits.
+        makeEvent({ topicName: 'close_start' }),
+        makeEvent({ topicName: 'top_up' }),
+      ],
       cursor: 'cursor-4',
     })
 
@@ -207,7 +278,7 @@ describe('watchChannel', () => {
   it('uses cursor for subsequent polls', async () => {
     mockGetEvents
       .mockResolvedValueOnce({
-        events: [makeEvent({ topicName: 'close_start' })],
+        events: [makeEvent({ topicName: 'close', value: closeData(5_001_000) })],
         cursor: 'cursor-after-first',
       })
       .mockResolvedValueOnce({
@@ -313,8 +384,12 @@ describe('watchChannel', () => {
 
     mockGetEvents.mockResolvedValueOnce({
       events: [
-        makeEvent({ topicName: 'close', value: makeI128ScVal(1_000_000n), txHash: 'tx1' }),
-        makeEvent({ topicName: 'top_up', value: makeI128ScVal(2_000_000n), txHash: 'tx2' }),
+        makeEvent({ topicName: 'close', value: closeData(5_003_000), txHash: 'tx1' }),
+        makeEvent({
+          topicName: 'withdraw',
+          value: withdrawData(RECIPIENT, 2_000_000n),
+          txHash: 'tx2',
+        }),
       ],
       cursor: 'cursor-after-throw',
     })
@@ -335,7 +410,7 @@ describe('watchChannel', () => {
     expect(errors).toHaveLength(1)
     expect(errors[0].message).toBe('handler boom')
     expect(events).toHaveLength(1)
-    expect(events[0]).toMatchObject({ type: 'top_up' })
+    expect(events[0]).toMatchObject({ type: 'withdraw' })
 
     stop()
   })
@@ -374,13 +449,17 @@ describe('watchChannel', () => {
     const errors: Error[] = []
     const events: unknown[] = []
 
-    // First event has an unexpected ScVal type that scValToBigInt cannot handle;
-    // second event is valid. Cursor must still advance.
+    // First event's data is a scalar instead of the map the contract emits, so
+    // parsing throws; the second event is valid. Cursor must still advance.
     mockGetEvents
       .mockResolvedValueOnce({
         events: [
-          makeEvent({ topicName: 'close', value: xdr.ScVal.scvVoid(), txHash: 'bad-tx' }),
-          makeEvent({ topicName: 'top_up', value: makeI128ScVal(500n), txHash: 'good-tx' }),
+          makeEvent({ topicName: 'close', value: makeI128ScVal(5n), txHash: 'bad-tx' }),
+          makeEvent({
+            topicName: 'withdraw',
+            value: withdrawData(RECIPIENT, 500n),
+            txHash: 'good-tx',
+          }),
         ],
         cursor: 'cursor-after-bad',
       })
@@ -399,9 +478,9 @@ describe('watchChannel', () => {
     // First poll — bad event skipped, good event delivered, cursor advanced
     await vi.advanceTimersByTimeAsync(0)
     expect(errors).toHaveLength(1)
-    expect(errors[0].message).toMatch(/Cannot convert ScVal/)
+    expect(errors[0].message).toMatch(/non-map data/i)
     expect(events).toHaveLength(1)
-    expect(events[0]).toMatchObject({ type: 'top_up', amount: 500n })
+    expect(events[0]).toMatchObject({ type: 'withdraw', amount: 500n })
 
     // Second poll uses the advanced cursor (not stuck on bad event)
     await vi.advanceTimersByTimeAsync(1000)

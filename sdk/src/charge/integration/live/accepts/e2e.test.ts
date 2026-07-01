@@ -27,14 +27,26 @@ import { charge as chargeMethod } from '../../../Methods.js'
 import { charge as serverCharge } from '../../../server/Charge.js'
 import { charge as clientCharge } from '../../../client/Charge.js'
 
-// All flows share TEST_PAYER so we only fund one payer account per suite run.
-// Consequence: tests are NOT fully independent — the payer's sequence advances
-// between flows, and a tx failure mid-broadcast can surface as a sequence or
-// balance error in a later flow. If a test fails unexpectedly, re-run the
-// whole file rather than isolating a single `it()`.
-const TEST_PAYER = Keypair.random()
+// Every flow gets its own payer so a mid-broadcast failure in one flow cannot
+// poison a later flow through a shared on-chain sequence. Sponsored flows also
+// get their own envelope signer — the transaction source after the server
+// rebuild, whose sequence likewise advances on settlement. The recipient only
+// receives funds and the fee payer only sponsors fees (fee-bump outers carry no
+// sequence of their own), so neither accumulates sequence state and both can be
+// shared across flows.
+const flowPayers = {
+  flow1: Keypair.random(),
+  flow2: Keypair.random(),
+  flow3: Keypair.random(),
+  flow4: Keypair.random(),
+  flow5: Keypair.random(),
+  flow6: Keypair.random(),
+}
+const sponsoredEnvelopeSigners = {
+  flow5: Keypair.random(),
+  flow6: Keypair.random(),
+}
 const TEST_RECIPIENT = Keypair.random().publicKey()
-const TEST_ENVELOPE_SIGNER = Keypair.random()
 const TEST_FEE_PAYER = Keypair.random()
 
 const MPP_SECRET_KEY = 'e2e-test-secret-key'
@@ -177,7 +189,14 @@ async function runChargeFlow(opts: {
   })
 
   const response = await clientMppx.fetch('http://localhost/test')
-  expect(response.status).toBe(200)
+  // mppx keeps verification-failure detail server-side and re-challenges the
+  // client with a 402. Every flow in the accepts suite is expected to settle, so
+  // a non-200 here is a transient testnet broadcast/propagation failure (e.g. a
+  // push tx not yet confirmed on the server's RPC node). Signal it for retry
+  // rather than asserting, so a momentary 402 does not fail an otherwise-valid flow.
+  if (response.status !== 200) {
+    throw new Error(`Charge flow did not settle: server returned ${response.status}`)
+  }
 
   const paymentReceiptHeader = response.headers.get('Payment-Receipt')
   expect(
@@ -189,12 +208,50 @@ async function runChargeFlow(opts: {
   expect(receipt.method).toBe('stellar')
   expect(receipt.reference).toMatch(/^[a-f0-9]{64}$/)
 
-  const tx = await sorobanServer.getTransaction(receipt.reference)
+  // The server already confirmed settlement before returning the receipt, but the
+  // public RPC is load-balanced and a re-fetch can hit a node that has not yet
+  // ingested the tx (transient NOT_FOUND). Poll through that lag to a terminal state.
+  const tx = await pollTransaction(sorobanServer, receipt.reference)
   expect(tx.status).toBe(Api.GetTransactionStatus.SUCCESS)
   const successful = tx as Api.GetSuccessfulTransactionResponse
   expect(successful.txHash).toEqual(receipt.reference)
 
   return successful
+}
+
+// Transient testnet conditions that are not flow bugs: the public RPC rejects a
+// broadcast under load, or a just-broadcast tx is briefly invisible to a
+// load-balanced RPC node. They warrant retrying the whole round-trip. A genuine
+// rejection (e.g. enforce-mode auth failure) does not match and propagates.
+const TRANSIENT_BROADCAST_ERROR =
+  /sendTransaction returned ERROR|Broadcast failed|not found on-chain|NOT_FOUND|Account not found|did not settle/i
+
+/**
+ * Runs a charge round-trip, retrying the whole flow on transient testnet
+ * broadcast/propagation errors. Each attempt rebuilds the server and client
+ * methods so it starts from a clean store and a freshly fetched sequence.
+ */
+async function runChargeFlowWithRetry(
+  makeOpts: () => { serverMethod: ServerChargeMethod; clientMethod: ClientChargeMethod },
+  attempts = 5,
+): Promise<Api.GetSuccessfulTransactionResponse> {
+  let lastError: unknown
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await runChargeFlow(makeOpts())
+    } catch (err) {
+      lastError = err
+      const message = err instanceof Error ? err.message : String(err)
+      if (!TRANSIENT_BROADCAST_ERROR.test(message)) {
+        throw err
+      }
+      // Give a momentary congestion spike time to clear before rebuilding.
+      if (attempt < attempts) {
+        await new Promise((resolve) => setTimeout(resolve, 3_000))
+      }
+    }
+  }
+  throw lastError
 }
 
 /**
@@ -241,72 +298,99 @@ function expectFeeBumpEnvelope(
   return outerEnv
 }
 
+// Friendbot and the Soroban RPC are separate services: friendbot submits the
+// funding tx via Horizon, and the RPC ingests it a few ledgers later. fundAddress
+// polls the RPC immediately, so it can throw NOT_FOUND / "Account not found" even
+// though funding succeeded. Retry against account visibility, tolerating the lag
+// and the "already funded" error from a prior attempt that did land.
+async function fundResilient(pubkey: string): Promise<void> {
+  const deadlineMs = Date.now() + 90_000
+  let lastError: unknown
+  while (Date.now() < deadlineMs) {
+    try {
+      await sorobanServer.getAccount(pubkey)
+      return
+    } catch (err) {
+      lastError = err
+    }
+    try {
+      await sorobanServer.fundAddress(pubkey)
+    } catch (err) {
+      lastError = err
+    }
+    await new Promise((resolve) => setTimeout(resolve, 3_000))
+  }
+  throw new Error(
+    `Funding ${pubkey} timed out: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
+  )
+}
+
 describe('charge e2e (testnet)', () => {
   beforeAll(async () => {
     await Promise.all([
-      sorobanServer.fundAddress(TEST_PAYER.publicKey()),
-      sorobanServer.fundAddress(TEST_RECIPIENT),
-      sorobanServer.fundAddress(TEST_ENVELOPE_SIGNER.publicKey()),
-      sorobanServer.fundAddress(TEST_FEE_PAYER.publicKey()),
+      ...Object.values(flowPayers).map((kp) => fundResilient(kp.publicKey())),
+      ...Object.values(sponsoredEnvelopeSigners).map((kp) => fundResilient(kp.publicKey())),
+      fundResilient(TEST_RECIPIENT),
+      fundResilient(TEST_FEE_PAYER.publicKey()),
     ])
-  }, 30_000)
+  }, 180_000)
 
   it('flow 1: push, unsponsored', async () => {
-    const tx = await runChargeFlow({
+    const tx = await runChargeFlowWithRetry(() => ({
       serverMethod: makeServerMethod(),
-      clientMethod: clientCharge({ keypair: TEST_PAYER, mode: 'push' }),
-    })
-    expectPlainEnvelope(tx, TEST_PAYER)
-  }, 120_000)
+      clientMethod: clientCharge({ keypair: flowPayers.flow1, mode: 'push' }),
+    }))
+    expectPlainEnvelope(tx, flowPayers.flow1)
+  }, 240_000)
 
   it('flow 2: push, unsponsored + FeeBump (client-wrapped)', async () => {
-    const tx = await runChargeFlow({
+    const tx = await runChargeFlowWithRetry(() => ({
       serverMethod: makeServerMethod(),
       clientMethod: feeBumpChargeClient({
-        payerKP: TEST_PAYER,
+        payerKP: flowPayers.flow2,
         feeBumpKP: TEST_FEE_PAYER,
         mode: 'push',
       }),
-    })
-    expectFeeBumpEnvelope(tx, TEST_FEE_PAYER, TEST_PAYER)
-  }, 120_000)
+    }))
+    expectFeeBumpEnvelope(tx, TEST_FEE_PAYER, flowPayers.flow2)
+  }, 240_000)
 
   it('flow 3: pull, unsponsored', async () => {
-    const tx = await runChargeFlow({
+    const tx = await runChargeFlowWithRetry(() => ({
       serverMethod: makeServerMethod(),
-      clientMethod: clientCharge({ keypair: TEST_PAYER }),
-    })
-    expectPlainEnvelope(tx, TEST_PAYER)
-  }, 120_000)
+      clientMethod: clientCharge({ keypair: flowPayers.flow3 }),
+    }))
+    expectPlainEnvelope(tx, flowPayers.flow3)
+  }, 240_000)
 
   it('flow 4: pull, unsponsored + FeeBump (client-wrapped)', async () => {
-    const tx = await runChargeFlow({
+    const tx = await runChargeFlowWithRetry(() => ({
       serverMethod: makeServerMethod(),
       clientMethod: feeBumpChargeClient({
-        payerKP: TEST_PAYER,
+        payerKP: flowPayers.flow4,
         feeBumpKP: TEST_FEE_PAYER,
         mode: 'pull',
       }),
-    })
-    expectFeeBumpEnvelope(tx, TEST_FEE_PAYER, TEST_PAYER)
-  }, 120_000)
+    }))
+    expectFeeBumpEnvelope(tx, TEST_FEE_PAYER, flowPayers.flow4)
+  }, 240_000)
 
   it('flow 5: pull, sponsored', async () => {
-    const tx = await runChargeFlow({
-      serverMethod: makeServerMethod({ envelopeSigner: TEST_ENVELOPE_SIGNER }),
-      clientMethod: clientCharge({ keypair: TEST_PAYER }),
-    })
-    expectPlainEnvelope(tx, TEST_ENVELOPE_SIGNER)
-  }, 120_000)
+    const tx = await runChargeFlowWithRetry(() => ({
+      serverMethod: makeServerMethod({ envelopeSigner: sponsoredEnvelopeSigners.flow5 }),
+      clientMethod: clientCharge({ keypair: flowPayers.flow5 }),
+    }))
+    expectPlainEnvelope(tx, sponsoredEnvelopeSigners.flow5)
+  }, 240_000)
 
   it('flow 6: pull, sponsored + FeeBump', async () => {
-    const tx = await runChargeFlow({
+    const tx = await runChargeFlowWithRetry(() => ({
       serverMethod: makeServerMethod({
-        envelopeSigner: TEST_ENVELOPE_SIGNER,
+        envelopeSigner: sponsoredEnvelopeSigners.flow6,
         feeBumpSigner: TEST_FEE_PAYER,
       }),
-      clientMethod: clientCharge({ keypair: TEST_PAYER }),
-    })
-    expectFeeBumpEnvelope(tx, TEST_FEE_PAYER, TEST_ENVELOPE_SIGNER)
-  }, 120_000)
+      clientMethod: clientCharge({ keypair: flowPayers.flow6 }),
+    }))
+    expectFeeBumpEnvelope(tx, TEST_FEE_PAYER, sponsoredEnvelopeSigners.flow6)
+  }, 240_000)
 })

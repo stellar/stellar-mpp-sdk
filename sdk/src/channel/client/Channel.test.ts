@@ -1,6 +1,7 @@
 import { Address, Keypair, Networks, hash, nativeToScVal, xdr } from '@stellar/stellar-sdk'
 import { Challenge, Store } from 'mppx'
 import { describe, expect, it, vi } from 'vitest'
+import { StellarMppError } from '../../shared/errors.js'
 
 const mockGetAccount = vi.fn()
 const mockSimulateTransaction = vi.fn()
@@ -174,19 +175,18 @@ describe('channel createCredential voucher', () => {
     expect(decoded.payload.signature).toMatch(/^[0-9a-f]{128}$/)
   })
 
-  it('computes cumulative amount from previous + requested', async () => {
+  it('adds the requested amount to the locally tracked baseline', async () => {
     const commitmentBytes = buildCommitment({ amount: 2_500_000n })
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
-    const method = makeMethod()
-    const challenge = mockChallenge({
-      amount: '500000',
-      methodDetails: {
-        reference: crypto.randomUUID(),
-        network: 'stellar:testnet',
-        cumulativeAmount: '2000000', // previous cumulative
-      },
+    const store = Store.memory()
+    // The client has already signed a cumulative of 2000000 locally.
+    await store.put(`stellar:channel:client:stellar:testnet:${CHANNEL_ADDRESS}:cumulative`, {
+      amount: '2000000',
     })
+
+    const method = makeMethod({ store })
+    const challenge = mockChallenge({ amount: '500000' })
 
     const credential = await method.createCredential({
       challenge: challenge as any,
@@ -195,7 +195,7 @@ describe('channel createCredential voucher', () => {
 
     const token = credential.replace(/^Payment\s+/, '')
     const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
-    // 2000000 + 500000 = 2500000
+    // local baseline 2000000 + requested 500000 = 2500000
     expect(decoded.payload.amount).toBe('2500000')
   })
 
@@ -304,7 +304,7 @@ describe('client-side cumulative tracking (store)', () => {
     expect(stored.amount).toBe('1000000') // 0 + 1000000
   })
 
-  it('uses locally tracked cumulative over lower server-reported value', async () => {
+  it('uses the locally tracked cumulative and ignores the server-reported value', async () => {
     const commitmentBytes = buildCommitment({ amount: 6_000_000n })
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
@@ -315,13 +315,13 @@ describe('client-side cumulative tracking (store)', () => {
     })
 
     const method = makeMethod({ store })
-    // Server reports 2000000 even though the locally tracked value is 5000000.
+    // Server reports a different cumulative; the client must ignore it.
     const challenge = mockChallenge({
       amount: '1000000',
       methodDetails: {
         reference: crypto.randomUUID(),
         network: 'stellar:testnet',
-        cumulativeAmount: '2000000', // server under-reports local state
+        cumulativeAmount: '2000000',
       },
     })
 
@@ -332,42 +332,8 @@ describe('client-side cumulative tracking (store)', () => {
 
     const token = credential.replace(/^Payment\s+/, '')
     const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
-    // Uses local (5000000) not server-reported (2000000) as base → 5000000 + 1000000 = 6000000
+    // local baseline 5000000 (server-reported 2000000 ignored) + 1000000 = 6000000
     expect(decoded.payload.amount).toBe('6000000')
-  })
-
-  it('uses server-reported cumulative when no local state exists (first connection)', async () => {
-    const commitmentBytes = buildCommitment({ amount: 3_500_000n })
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
-
-    const store = Store.memory() // empty — no prior local state
-    const method = makeMethod({ store })
-    const challenge = mockChallenge({
-      amount: '500000',
-      methodDetails: {
-        reference: crypto.randomUUID(),
-        network: 'stellar:testnet',
-        cumulativeAmount: '3000000', // server reports existing cumulative
-      },
-    })
-
-    const credential = await method.createCredential({
-      challenge: challenge as any,
-      context: {} as any,
-    })
-
-    const token = credential.replace(/^Payment\s+/, '')
-    const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
-    // No local state → falls back to server-reported 3000000 + 500000 = 3500000
-    expect(decoded.payload.amount).toBe('3500000')
-
-    // And persists the new cumulative for next call
-    const stored = (await store.get(
-      `stellar:channel:client:stellar:testnet:${CHANNEL_ADDRESS}:cumulative`,
-    )) as {
-      amount: string
-    }
-    expect(stored.amount).toBe('3500000')
   })
 
   it('default in-memory store prevents cumulative reset across calls', async () => {
@@ -407,22 +373,22 @@ describe('client-side cumulative tracking (store)', () => {
 
     const token = credential2.replace(/^Payment\s+/, '')
     const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
-    // Default in-memory store tracked 1000000 from first call,
-    // so it uses max(1000000, 0) + 500000 = 1500000 instead of 0 + 500000
+    // Default in-memory store tracked 1000000 from the first call, so the
+    // local baseline 1000000 + 500000 = 1500000 (server-reported 0 is ignored).
     expect(decoded.payload.amount).toBe('1500000')
   })
 
-  it('defaults to in-memory store when store is omitted', async () => {
-    const commitmentBytes = buildCommitment({ amount: 2_500_000n })
+  it('defaults to an in-memory store with a zero baseline, ignoring the server-reported cumulative', async () => {
+    const commitmentBytes = buildCommitment({ amount: 500_000n })
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
-    const method = makeMethod() // defaults to Store.memory()
+    const method = makeMethod() // defaults to Store.memory(), cold → baseline 0
     const challenge = mockChallenge({
       amount: '500000',
       methodDetails: {
         reference: crypto.randomUUID(),
         network: 'stellar:testnet',
-        cumulativeAmount: '2000000',
+        cumulativeAmount: '2000000', // server-reported value is ignored
       },
     })
 
@@ -433,8 +399,38 @@ describe('client-side cumulative tracking (store)', () => {
 
     const token = credential.replace(/^Payment\s+/, '')
     const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
-    // In-memory store has no prior state: uses server-reported 2000000 + 500000 = 2500000
-    expect(decoded.payload.amount).toBe('2500000')
+    // cold in-memory store → baseline 0 + requested 500000 = 500000
+    expect(decoded.payload.amount).toBe('500000')
+  })
+})
+
+describe('cumulative baseline trust', () => {
+  it('ignores an inflated server-reported cumulative and signs only the local baseline plus the requested amount', async () => {
+    // Fresh client (cold in-memory store → local baseline 0). A rogue server
+    // claims a large existing cumulative; the client must not adopt it as the
+    // baseline, otherwise it would sign a close-valid commitment draining the
+    // channel while believing it authorised a single stroop.
+    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(buildCommitment({ amount: 1n })))
+
+    const method = makeMethod()
+    const challenge = mockChallenge({
+      amount: '1',
+      methodDetails: {
+        reference: crypto.randomUUID(),
+        network: 'stellar:testnet',
+        cumulativeAmount: '9999999999',
+      },
+    })
+
+    const credential = await method.createCredential({
+      challenge: challenge as any,
+      context: {} as any,
+    })
+
+    const token = credential.replace(/^Payment\s+/, '')
+    const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
+    // local baseline 0 + requested 1 = 1, never 9999999999 + 1
+    expect(decoded.payload.amount).toBe('1')
   })
 })
 
@@ -467,6 +463,54 @@ describe('network validation', () => {
     await expect(
       method.createCredential({ challenge: challenge as any, context: {} as any }),
     ).rejects.toThrow('Unsupported Stellar network identifier: "testnet"')
+  })
+})
+
+describe('network pinning', () => {
+  it('rejects a server-advertised network that does not match the pinned network', async () => {
+    mockSimulateTransaction.mockClear()
+
+    const method = channel({
+      commitmentKey: TEST_KEYPAIR,
+      allowedChannels: [CHANNEL_ADDRESS],
+      network: 'stellar:testnet',
+    } as Parameters<typeof channel>[0])
+    const challenge = mockChallenge({
+      methodDetails: {
+        reference: crypto.randomUUID(),
+        network: 'stellar:pubnet',
+        cumulativeAmount: '0',
+      },
+    })
+
+    await expect(
+      method.createCredential({ challenge: challenge as any, context: {} as any }),
+    ).rejects.toThrow(/network mismatch/i)
+
+    // Rejection must happen before any simulation/signing.
+    expect(mockSimulateTransaction).not.toHaveBeenCalled()
+  })
+
+  it('signs when the server-advertised network matches the pinned network', async () => {
+    mockSimulateTransaction.mockResolvedValueOnce(
+      successSimResult(buildCommitment({ amount: 1_000_000n })),
+    )
+
+    const method = channel({
+      commitmentKey: TEST_KEYPAIR,
+      allowedChannels: [CHANNEL_ADDRESS],
+      network: 'stellar:testnet',
+    } as Parameters<typeof channel>[0])
+    const challenge = mockChallenge() // methodDetails.network === 'stellar:testnet'
+
+    const credential = await method.createCredential({
+      challenge: challenge as any,
+      context: {} as any,
+    })
+
+    const token = credential.replace(/^Payment\s+/, '')
+    const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
+    expect(decoded.payload.signature).toMatch(/^[0-9a-f]{128}$/)
   })
 })
 
@@ -610,5 +654,65 @@ describe('commitment byte-binding', () => {
     const token = credential.replace(/^Payment\s+/, '')
     const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
     expect(decoded.payload.signature).toMatch(/^[0-9a-f]{128}$/)
+  })
+})
+
+describe('channel client amount validation', () => {
+  it('rejects a malformed counterparty amount with a typed error', async () => {
+    const method = makeMethod({ allowedChannels: [CHANNEL_ADDRESS] })
+    const challenge = mockChallenge({ amount: '100abc' })
+
+    await expect(
+      method.createCredential({ challenge: challenge as any, context: {} as any }),
+    ).rejects.toThrow(StellarMppError)
+  })
+
+  it('rejects a counterparty amount exceeding the signed i128 maximum with a typed error', async () => {
+    const method = makeMethod({ allowedChannels: [CHANNEL_ADDRESS] })
+    const challenge = mockChallenge({ amount: (2n ** 127n).toString() })
+
+    await expect(
+      method.createCredential({ challenge: challenge as any, context: {} as any }),
+    ).rejects.toThrow(StellarMppError)
+  })
+
+  it('rejects a cumulativeAmount override exceeding the signed i128 maximum with a typed error', async () => {
+    const method = makeMethod({ allowedChannels: [CHANNEL_ADDRESS] })
+    const challenge = mockChallenge()
+
+    await expect(
+      method.createCredential({
+        challenge: challenge as any,
+        context: { cumulativeAmount: (2n ** 127n).toString() } as any,
+      }),
+    ).rejects.toThrow(StellarMppError)
+  })
+
+  it('rejects a cumulative total whose sum overflows the signed i128 maximum with a typed error', async () => {
+    const store = Store.memory()
+    await store.put(`stellar:channel:client:stellar:testnet:${CHANNEL_ADDRESS}:cumulative`, {
+      amount: (2n ** 127n - 1n).toString(),
+    })
+    const method = makeMethod({ store, allowedChannels: [CHANNEL_ADDRESS] })
+    const challenge = mockChallenge({ amount: '1000000' })
+
+    await expect(
+      method.createCredential({ challenge: challenge as any, context: {} as any }),
+    ).rejects.toThrow(StellarMppError)
+  })
+})
+
+describe('channel client simulation error handling', () => {
+  it('wraps a simulation failure in a typed StellarMppError', async () => {
+    // A counterparty-forced network/channel mismatch makes prepare_commitment
+    // simulation fail. simulateCall throws a SimulationContractError, which is
+    // not a StellarMppError; the client must surface it as a typed error.
+    mockSimulateTransaction.mockResolvedValueOnce({ error: 'contract trapped' })
+    const method = makeMethod({ allowedChannels: [CHANNEL_ADDRESS] })
+    const challenge = mockChallenge()
+
+    await expect(
+      method.createCredential({ challenge: challenge as any, context: {} as any }),
+    ).rejects.toThrow(StellarMppError)
   })
 })

@@ -30,6 +30,13 @@ export class SimulationTimeoutError extends Error {
 
 export interface SimulateOptions {
   timeoutMs?: number
+  /**
+   * Authorization mode passed to the RPC. Defaults to the RPC's recording mode,
+   * which ignores any supplied authorization. Use `'enforce'` to validate the
+   * supplied authorization entries against ledger state before relying on the
+   * simulation result.
+   */
+  authMode?: rpc.Api.SimulationAuthMode
 }
 
 /**
@@ -53,12 +60,12 @@ export async function simulateCall(
   tx: Transaction | FeeBumpTransaction,
   opts: SimulateOptions = {},
 ): Promise<rpc.Api.SimulateTransactionSuccessResponse> {
-  const { timeoutMs = DEFAULT_SIMULATION_TIMEOUT_MS } = opts
+  const { timeoutMs = DEFAULT_SIMULATION_TIMEOUT_MS, authMode } = opts
 
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
     const result = await Promise.race([
-      rpcServer.simulateTransaction(tx),
+      rpcServer.simulateTransaction(tx, undefined, authMode),
       new Promise<never>((_, reject) => {
         timer = setTimeout(
           () => reject(new SimulationTimeoutError(`Simulation timed out after ${timeoutMs}ms`)),

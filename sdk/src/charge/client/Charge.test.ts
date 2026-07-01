@@ -20,6 +20,7 @@ import {
   STELLAR_TESTNET,
   USDC_SAC_TESTNET,
 } from '../../constants.js'
+import { StellarMppError } from '../../shared/errors.js'
 
 // ── Mocks ──────────────────────────────────────────────────────────────────
 const mockGetAccount = vi.fn()
@@ -118,6 +119,61 @@ function buildMockPrepareTxAuthEntry() {
   return new TransactionBuilder(account, {
     fee: '100',
     networkPassphrase: 'Test SDF Network ; September 2015',
+  })
+    .addOperation(transferOp)
+    .setTimeout(180)
+    .build()
+}
+
+const ATTACKER = Keypair.random().publicKey()
+const OTHER_TOKEN = 'CAYGVE5AUQQ2XNXWOXHH5VPGRHYX4APUAOWA4VOBI3VGMOYJ2IJ6VJG5'
+
+function transferArgs(from: string, to: string, amount: bigint) {
+  return [
+    nativeToScVal(from, { type: 'address' }),
+    nativeToScVal(to, { type: 'address' }),
+    nativeToScVal(amount, { type: 'i128' }),
+  ]
+}
+
+function transferInvocation(
+  contractAddress: string,
+  args: xdr.ScVal[],
+  subInvocations: xdr.SorobanAuthorizedInvocation[] = [],
+) {
+  return new xdr.SorobanAuthorizedInvocation({
+    function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(
+      new xdr.InvokeContractArgs({
+        contractAddress: new Address(contractAddress).toScAddress(),
+        functionName: 'transfer',
+        args,
+      }),
+    ),
+    subInvocations,
+  })
+}
+
+// Builds a prepared transaction whose single transfer operation carries one
+// Soroban authorization entry with the given root invocation. Used to model a
+// malicious `currency` contract whose auth tree differs from the intended
+// transfer the client believes it is paying.
+async function buildTxWithAuthInvocation(opts: {
+  source: string
+  rootInvocation: xdr.SorobanAuthorizedInvocation
+}) {
+  const account = new Account(opts.source, '0')
+  const contract = new Contract(USDC_SAC_TESTNET)
+  const transferOp = contract.call(
+    'transfer',
+    new Address(TEST_KEYPAIR.publicKey()).toScVal(),
+    new Address(RECIPIENT).toScVal(),
+    nativeToScVal(100000n, { type: 'i128' }),
+  )
+  const auth = await authorizeInvocation(TEST_KEYPAIR, 1000, opts.rootInvocation)
+  transferOp.body().invokeHostFunctionOp().auth().push(auth)
+  return new TransactionBuilder(account, {
+    fee: '100',
+    networkPassphrase: NETWORK_PASSPHRASE[STELLAR_TESTNET],
   })
     .addOperation(transferOp)
     .setTimeout(180)
@@ -572,6 +628,85 @@ describe('charge createCredential', () => {
     expect(capturedTransaction.memo.type).toBe('none')
   })
 
+  it('refuses to sign a sponsored auth tree carrying hidden sub-invocations', async () => {
+    const account = new Account(TEST_KEYPAIR.publicKey(), '0')
+    mockGetAccount.mockResolvedValueOnce(account)
+    const maliciousRoot = transferInvocation(
+      USDC_SAC_TESTNET,
+      transferArgs(TEST_KEYPAIR.publicKey(), RECIPIENT, 100000n),
+      [
+        transferInvocation(
+          OTHER_TOKEN,
+          transferArgs(TEST_KEYPAIR.publicKey(), ATTACKER, 999999999n),
+        ),
+      ],
+    )
+    mockPrepareTransaction.mockResolvedValueOnce(
+      await buildTxWithAuthInvocation({ source: ALL_ZEROS, rootInvocation: maliciousRoot }),
+    )
+    mockGetLatestLedger.mockResolvedValueOnce({ sequence: 50 })
+
+    const method = charge({ keypair: TEST_KEYPAIR, mode: 'pull' })
+    const challenge = mockChallenge({
+      methodDetails: { network: 'stellar:testnet', feePayer: true },
+    })
+
+    await expect(
+      method.createCredential({ challenge: challenge as any, context: {} as any }),
+    ).rejects.toThrow(/sub-invocation/i)
+  })
+
+  it('refuses to sign an unsponsored auth tree carrying hidden sub-invocations', async () => {
+    const account = new Account(TEST_KEYPAIR.publicKey(), '0')
+    mockGetAccount.mockResolvedValueOnce(account)
+    const maliciousRoot = transferInvocation(
+      USDC_SAC_TESTNET,
+      transferArgs(TEST_KEYPAIR.publicKey(), RECIPIENT, 100000n),
+      [
+        transferInvocation(
+          OTHER_TOKEN,
+          transferArgs(TEST_KEYPAIR.publicKey(), ATTACKER, 999999999n),
+        ),
+      ],
+    )
+    mockPrepareTransaction.mockResolvedValueOnce(
+      await buildTxWithAuthInvocation({
+        source: TEST_KEYPAIR.publicKey(),
+        rootInvocation: maliciousRoot,
+      }),
+    )
+
+    const method = charge({ keypair: TEST_KEYPAIR, mode: 'pull' })
+    const challenge = mockChallenge()
+
+    await expect(
+      method.createCredential({ challenge: challenge as any, context: {} as any }),
+    ).rejects.toThrow(/sub-invocation/i)
+  })
+
+  it('refuses to sign when the authorized transfer does not match the requested payment', async () => {
+    const account = new Account(TEST_KEYPAIR.publicKey(), '0')
+    mockGetAccount.mockResolvedValueOnce(account)
+    // Root invocation diverts the transfer to the attacker instead of the recipient.
+    const divertedRoot = transferInvocation(
+      USDC_SAC_TESTNET,
+      transferArgs(TEST_KEYPAIR.publicKey(), ATTACKER, 100000n),
+    )
+    mockPrepareTransaction.mockResolvedValueOnce(
+      await buildTxWithAuthInvocation({
+        source: TEST_KEYPAIR.publicKey(),
+        rootInvocation: divertedRoot,
+      }),
+    )
+
+    const method = charge({ keypair: TEST_KEYPAIR, mode: 'pull' })
+    const challenge = mockChallenge()
+
+    await expect(
+      method.createCredential({ challenge: challenge as any, context: {} as any }),
+    ).rejects.toThrow(/does not match the requested payment/i)
+  })
+
   it('uses pubnet DID component for public network', async () => {
     const account = new Account(TEST_KEYPAIR.publicKey(), '0')
     mockGetAccount.mockResolvedValueOnce(account)
@@ -635,5 +770,25 @@ describe('network validation', () => {
     await expect(
       method.createCredential({ challenge: challenge as any, context: {} as any }),
     ).rejects.toThrow('Unsupported Stellar network identifier: "testnet"')
+  })
+})
+
+describe('charge client amount validation', () => {
+  it('rejects a counterparty amount exceeding the signed i128 maximum with a typed error', async () => {
+    const method = charge({ keypair: TEST_KEYPAIR })
+    const challenge = mockChallenge({ amount: (2n ** 127n).toString() })
+
+    await expect(
+      method.createCredential({ challenge: challenge as any, context: {} as any }),
+    ).rejects.toThrow(StellarMppError)
+  })
+
+  it('rejects a malformed counterparty amount with a typed error', async () => {
+    const method = charge({ keypair: TEST_KEYPAIR })
+    const challenge = mockChallenge({ amount: '100abc' })
+
+    await expect(
+      method.createCredential({ challenge: challenge as any, context: {} as any }),
+    ).rejects.toThrow(StellarMppError)
   })
 })

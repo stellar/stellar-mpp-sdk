@@ -195,4 +195,25 @@ describe('getChannelState', () => {
       }),
     ).rejects.toThrow('Failed to simulate')
   })
+
+  it('rejects when an RPC call hangs past the simulation timeout', async () => {
+    vi.useFakeTimers()
+    try {
+      // A hung RPC never settles; without a JS-level timeout getChannelState would
+      // stall indefinitely, holding the per-channel verification lock.
+      mockSimulateTransaction.mockImplementation(() => new Promise(() => {}))
+      mockGetLedgerEntries.mockResolvedValue(makeLedgerEntryWithoutCloseEffective())
+      mockGetLatestLedger.mockResolvedValue({ sequence: 5000 })
+
+      const statePromise = getChannelState({
+        channel: CHANNEL_ADDRESS,
+        simulationTimeoutMs: 1000,
+      })
+      const assertion = expect(statePromise).rejects.toThrow(/timed out/i)
+      await vi.advanceTimersByTimeAsync(1000)
+      await assertion
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

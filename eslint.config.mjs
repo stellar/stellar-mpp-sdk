@@ -32,6 +32,6 @@ export default tseslint.config(
     },
   },
   {
-    ignores: ['dist/', 'node_modules/', 'demo/', '**/*.test.ts'],
+    ignores: ['dist/', 'node_modules/', 'demo/', 'tmp/', 'worktrees/', '**/*.test.ts'],
   },
 )

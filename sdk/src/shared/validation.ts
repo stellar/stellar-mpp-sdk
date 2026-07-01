@@ -35,18 +35,32 @@ export function resolveNetworkId(network: unknown): NetworkId {
   )
 }
 
+/** Largest value representable by a signed 128-bit integer (Soroban `i128`). */
+export const I128_MAX = 2n ** 127n - 1n
+
 /**
- * Validates that `amount` is a positive integer string with no leading zeros.
+ * Validates that `amount` is a positive integer string with no leading zeros and
+ * does not exceed the signed `i128` maximum.
  *
- * Intended for base-unit (stroops) values before they are converted to `BigInt`.
+ * Intended for base-unit (stroops) values before they are converted to `BigInt`
+ * and then to a Soroban `i128` ScVal. The upper bound is required because
+ * `nativeToScVal(value, { type: 'i128' })` throws an untyped `RangeError` for
+ * out-of-range magnitudes; bounding here keeps the failure a typed
+ * {@link StellarMppError}.
  *
  * @param amount - The string to validate.
- * @throws {StellarMppError} If the string is not a strictly positive integer without leading zeros.
+ * @throws {StellarMppError} If the string is not a strictly positive integer
+ *   without leading zeros, or if it exceeds the signed i128 maximum.
  */
 export function validateAmount(amount: string): void {
   if (!/^[1-9]\d*$/.test(amount)) {
     throw new StellarMppError(
       `Invalid amount: "${amount}" must be a positive integer string without leading zeros`,
+    )
+  }
+  if (BigInt(amount) > I128_MAX) {
+    throw new StellarMppError(
+      `Invalid amount: "${amount}" exceeds the signed i128 maximum (${I128_MAX.toString()})`,
     )
   }
 }

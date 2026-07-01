@@ -1,6 +1,6 @@
 {
   "name": "@stellar/mpp",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Stellar blockchain payment method for the Machine Payments Protocol (MPP)",
   "type": "module",
   "packageManager": "pnpm@10.33.0",
@@ -73,21 +73,21 @@
     "@eslint/js": "^10.0.1",
     "@stellar/stellar-sdk": "^15.1.0",
     "@types/express": "^5.0.6",
-    "@types/node": "^25.9.1",
-    "@vitest/coverage-v8": "^4.1.8",
-    "eslint": "^10.4.1",
+    "@types/node": "^26.0.0",
+    "@vitest/coverage-v8": "^4.1.9",
+    "eslint": "^10.5.0",
     "express": "^5.2.1",
     "express-rate-limit": "^8.5.2",
     "helmet": "^8.2.0",
-    "mppx": "^0.6.29",
+    "mppx": "^0.6.31",
     "pino": "^10.3.1",
     "pino-http": "^11.0.0",
-    "prettier": "^3.8.3",
+    "prettier": "^3.8.4",
     "tsx": "^4.22.4",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.60.1",
-    "viem": "^2.52.0",
-    "vitest": "^4.1.8"
+    "typescript-eslint": "^8.62.0",
+    "viem": "^2.53.1",
+    "vitest": "^4.1.9"
   },
   "pnpm": {
     "overrides": {

@@ -38,11 +38,7 @@ vi.mock('@stellar/stellar-sdk', async (importOriginal) => {
 
 const { charge: serverCharge } = await import('../../../server/Charge.js')
 
-function testHash(label: string): string {
-  return Buffer.from(label).toString('hex').padEnd(64, '0').slice(0, 64)
-}
-
-function buildTransferTxXdr(): string {
+function buildTransferTx() {
   const account = new Account(PAYER.publicKey(), '0')
   const contract = new Contract(USDC_SAC_TESTNET)
   const transferOp = contract.call(
@@ -59,7 +55,7 @@ function buildTransferTxXdr(): string {
     .setTimeout(180)
     .build()
   tx.sign(PAYER)
-  return tx.toXDR()
+  return tx
 }
 
 function makeSignedHashCredential(hash: string) {
@@ -100,11 +96,13 @@ describe('charge cross-process replay protection', () => {
 
   it('rejects the duplicate tx hash when two independent instances race the same hash on a shared atomic store', async () => {
     const sharedStore = Store.memory()
-    const hash = testHash('integration-push-mode-hash')
+    const tx = buildTransferTx()
+    // Present the real on-chain hash; dedup is keyed on the canonical inner hash.
+    const hash = tx.hash().toString('hex')
 
     mockGetTransaction.mockResolvedValue({
       status: 'SUCCESS',
-      envelopeXdr: buildTransferTxXdr(),
+      envelopeXdr: tx.toXDR(),
     })
 
     const method1 = serverCharge({
