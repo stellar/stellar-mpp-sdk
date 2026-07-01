@@ -708,11 +708,23 @@ export function charge(parameters: charge.Parameters) {
             claimedAt: new Date().toISOString(),
           })
 
+          // The signed transaction can be included on-chain any time until its
+          // timeBounds.maxTime. Wait for the settlement result across that whole
+          // validity window — not just the shorter default poll budget — so a
+          // payment that confirms late is still credited instead of being
+          // abandoned while it can still land, which would leave the payer
+          // debited on-chain with no receipt. Once maxTime has passed the
+          // transaction can no longer be applied, so giving up then is safe.
+          const settlement = settlementPollBudget(broadcastInnerTx, {
+            pollTimeoutMs,
+            pollMaxAttempts,
+            pollDelayMs,
+          })
           try {
             await pollTransaction(rpcServer, sendResult.hash, {
-              maxAttempts: pollMaxAttempts,
+              maxAttempts: settlement.maxAttempts,
               delayMs: pollDelayMs,
-              timeoutMs: pollTimeoutMs,
+              timeoutMs: settlement.timeoutMs,
               semaphore: pollSemaphore,
             })
           } catch (error) {
@@ -955,6 +967,39 @@ export function charge(parameters: charge.Parameters) {
 // ---------------------------------------------------------------------------
 // Verification helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Derives the polling budget for awaiting a broadcast pull-mode settlement.
+ *
+ * A signed transaction stays valid until its `timeBounds.maxTime`, so the
+ * server must keep polling across that window instead of the shorter default
+ * budget; otherwise a payment that confirms late is abandoned while it can
+ * still land on-chain, leaving the payer debited with no receipt. The
+ * configured `pollTimeoutMs` is used both as the floor and as grace beyond
+ * `maxTime` (to catch a transfer included in the final valid ledger), and
+ * `maxAttempts` is scaled so the wall-clock timeout — not a premature attempt
+ * cap — governs when polling for a still-valid transaction stops.
+ *
+ * Falls back to the configured budget when the transaction carries no usable
+ * upper time bound.
+ */
+function settlementPollBudget(
+  broadcastTx: Transaction,
+  budget: { pollTimeoutMs: number; pollMaxAttempts: number; pollDelayMs: number },
+): { timeoutMs: number; maxAttempts: number } {
+  const { pollTimeoutMs, pollMaxAttempts, pollDelayMs } = budget
+  const maxTimeSeconds = broadcastTx.timeBounds ? parseInt(broadcastTx.timeBounds.maxTime, 10) : NaN
+  if (!Number.isFinite(maxTimeSeconds) || maxTimeSeconds <= 0) {
+    return { timeoutMs: pollTimeoutMs, maxAttempts: pollMaxAttempts }
+  }
+  const msUntilInvalid = maxTimeSeconds * 1000 - Date.now()
+  const timeoutMs = Math.max(pollTimeoutMs, msUntilInvalid + pollTimeoutMs)
+  // With a minimum inter-poll spacing of pollDelayMs, this many attempts more
+  // than covers the timeout window, so the wall-clock timeout is what stops the
+  // poll rather than the attempt count.
+  const attemptsForWindow = Math.ceil(timeoutMs / Math.max(pollDelayMs, 1)) + 1
+  return { timeoutMs, maxAttempts: Math.max(pollMaxAttempts, attemptsForWindow) }
+}
 
 /**
  * Returns whether an authorization entry's root invocation is exactly the

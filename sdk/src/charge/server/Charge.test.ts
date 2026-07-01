@@ -19,6 +19,7 @@ import {
 import { Challenge, Credential, Store } from 'mppx'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ALL_ZEROS, USDC_SAC_TESTNET } from '../../constants.js'
+import { DEFAULT_POLL_MAX_ATTEMPTS } from '../../shared/defaults.js'
 
 const mockGetTransaction = vi.fn()
 const mockGetAccount = vi.fn()
@@ -1973,6 +1974,8 @@ function buildTransferTx(opts: {
   amount: bigint
   currency: string
   memo?: { type: 'hash'; value: Buffer }
+  /** Absolute timeBounds.maxTime (unix seconds). Defaults to a 180s window. */
+  maxTimeSeconds?: number
 }) {
   const account = new Account(opts.source, '0')
   const contract = new Contract(opts.currency)
@@ -1989,7 +1992,13 @@ function buildTransferTx(opts: {
   if (opts.memo) {
     builder.addMemo(Memo.hash(opts.memo.value))
   }
-  return builder.addOperation(transferOp).setTimeout(180).build()
+  builder.addOperation(transferOp)
+  if (opts.maxTimeSeconds !== undefined) {
+    builder.setTimebounds(0, opts.maxTimeSeconds)
+  } else {
+    builder.setTimeout(180)
+  }
+  return builder.build()
 }
 
 /**
@@ -2892,7 +2901,19 @@ describe('charge pull-mode settlement rollback', () => {
       pollDelayMs: 1,
       pollTimeoutMs: 50,
     })
-    const cred = signedTransferCredential()
+    // Build the payment with a validity window that has just elapsed, so polling
+    // across that window stops promptly with the settlement still unconfirmed.
+    const expiredMaxTime = Math.floor(Date.now() / 1000)
+    const tx = buildTransferTx({
+      source: PAYER.publicKey(),
+      from: PAYER.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+      maxTimeSeconds: expiredMaxTime,
+    })
+    tx.sign(PAYER)
+    const cred = makeTransactionCredential(tx.toXDR())
 
     mockSimulateTransaction.mockResolvedValue({
       result: { retval: null },
@@ -2912,6 +2933,53 @@ describe('charge pull-mode settlement rollback', () => {
     await expect(
       method.verify({ credential: cred as any, request: cred.challenge.request }),
     ).rejects.toThrow('Challenge already used')
+  })
+
+  it('settles a payment that confirms after the default poll budget but within the transaction validity window', async () => {
+    const store = Store.memory()
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store,
+      // A tiny inter-poll delay keeps the test fast; the default attempt budget
+      // is left in place so the transaction confirms only after that budget
+      // would have been exhausted.
+      pollDelayMs: 1,
+    })
+    const cred = signedTransferCredential()
+
+    mockSimulateTransaction.mockResolvedValue({
+      result: { retval: null },
+      events: [defaultMockEvent()],
+      transactionData: new SorobanDataBuilder(),
+    })
+    mockSendTransaction.mockResolvedValue({ hash: 'late-confirm-hash', status: 'PENDING' })
+
+    // The transaction is broadcast (PENDING) and stays unconfirmed for more poll
+    // attempts than the default budget (DEFAULT_POLL_MAX_ATTEMPTS), then lands
+    // on-chain — still well inside its 180s timeBounds.maxTime. The server must
+    // keep polling across the transaction's validity window and credit the
+    // payment rather than abandoning it while it can still confirm.
+    const confirmsAfterAttempts = DEFAULT_POLL_MAX_ATTEMPTS + 5
+    let getTransactionCalls = 0
+    mockGetTransaction.mockImplementation(() => {
+      getTransactionCalls += 1
+      return Promise.resolve(
+        getTransactionCalls > confirmsAfterAttempts
+          ? { status: 'SUCCESS' }
+          : { status: 'NOT_FOUND' },
+      )
+    })
+
+    const receipt = await method.verify({
+      credential: cred as any,
+      request: cred.challenge.request,
+    })
+
+    expect(receipt.status).toBe('success')
+    expect(receipt.reference).toBe('late-confirm-hash')
+    // Proof the server polled past the default budget instead of giving up at it.
+    expect(getTransactionCalls).toBeGreaterThan(DEFAULT_POLL_MAX_ATTEMPTS)
   })
 })
 
