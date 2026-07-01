@@ -5,13 +5,14 @@ import { StellarMppError } from './errors.js'
  * Verifies the ed25519 signature(s) carried by a Soroban authorization entry's
  * address credentials against the canonical authorization payload.
  *
- * Soroban RPC simulation runs in recording mode and never checks these
- * signatures, so a server that broadcasts a counterparty-supplied transaction
- * without this check would settle one carrying a correctly-shaped but invalidly
- * signed entry — the transaction then fails `require_auth` at apply time and the
- * fee the server paid to broadcast it is wasted. This reconstructs the same
- * preimage `authorizeEntry` signs and the network validates, so an entry that
- * passes here will not be rejected on-chain for a bad authorization signature.
+ * This is defense in depth. The sponsored settlement path also simulates the
+ * transaction in enforce mode, which rejects an invalidly signed entry before
+ * broadcast; verifying the signature here as well keeps the authorization
+ * guarantee independent of the RPC's auth-mode semantics, fails fast before the
+ * rebuild-and-simulate round trip, and surfaces a precise error instead of a
+ * generic simulation failure. It reconstructs the same preimage `authorizeEntry`
+ * signs and the network validates, so an entry that passes here will not be
+ * rejected on-chain for a bad authorization signature.
  *
  * Only stellar-account (ed25519) authorizers are supported, matching the
  * credentials the charge client emits. Source-account and contract (custom

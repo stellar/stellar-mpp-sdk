@@ -922,11 +922,11 @@ export function charge(parameters: charge.Parameters) {
           )
         }
 
-        // Verify the authorization signature itself. Soroban RPC simulation
-        // runs in recording mode and never checks it, so without this a
-        // counterparty could supply a correctly-shaped but invalidly signed
-        // entry; the server would broadcast a transfer that fails require_auth
-        // on-chain and waste the fee it paid to settle it.
+        // Verify the authorization signature itself as defense in depth. The
+        // enforce-mode simulation below also rejects an invalidly signed entry
+        // before broadcast; checking it here keeps the guarantee independent of
+        // the RPC's auth-mode semantics and fails fast, before the rebuild, with
+        // a precise error rather than a generic simulation failure.
         try {
           verifyAuthEntrySignature(entry, networkPassphrase)
         } catch (error) {
