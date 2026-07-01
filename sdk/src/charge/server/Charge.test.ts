@@ -2011,6 +2011,8 @@ async function buildSponsoredEnvelopeWithValidAuth(opts?: {
   amount?: bigint
   expirationLedger?: number
   fee?: number
+  /** Absolute timeBounds.maxTime (unix seconds). Defaults to a 180s window. */
+  maxTimeSeconds?: number
 }) {
   const amount = opts?.amount ?? 10000000n
   const expirationLedger = opts?.expirationLedger ?? 1010
@@ -2020,6 +2022,7 @@ async function buildSponsoredEnvelopeWithValidAuth(opts?: {
     to: RECIPIENT,
     amount,
     currency: USDC_SAC_TESTNET,
+    maxTimeSeconds: opts?.maxTimeSeconds,
   })
   const invokeContractArgs = tx
     .toEnvelope()
@@ -3488,15 +3491,19 @@ describe('charge sponsored path expired challenge', () => {
   it('rejects sponsored transaction when challenge has expired', async () => {
     const signerKp = Keypair.random()
 
+    // An honest client pins the tx validity window to the (already past) challenge
+    // expiry, so the server rejects it as expired rather than for its maxTime.
+    const expirySeconds = Math.floor(Date.now() / 1000) - 60 // 1 minute ago
     const tx = buildTransferTx({
       source: ALL_ZEROS,
       from: PAYER.publicKey(),
       to: RECIPIENT,
       amount: 10000000n,
       currency: USDC_SAC_TESTNET,
+      maxTimeSeconds: expirySeconds,
     })
 
-    const pastDate = new Date(Date.now() - 60_000).toISOString() // 1 minute ago
+    const pastDate = new Date(expirySeconds * 1000).toISOString()
 
     const challenge = Challenge.from({
       id: `test-${crypto.randomUUID()}`,
@@ -3529,6 +3536,110 @@ describe('charge sponsored path expired challenge', () => {
     await expect(
       method.verify({ credential: cred as any, request: cred.challenge.request }),
     ).rejects.toThrow('Challenge has expired')
+  })
+})
+
+describe('charge sponsored path timeBounds', () => {
+  it('rejects a sponsored transaction whose timeBounds.maxTime exceeds the challenge expiry', async () => {
+    const signerKp = Keypair.random()
+
+    const maxTimeSeconds = Math.floor(Date.now() / 1000) + 86400 // 24h from now
+    const envelope = await buildSponsoredEnvelopeWithValidAuth({ maxTimeSeconds })
+
+    // Challenge expires an hour before the transaction's maxTime, so the signed
+    // transaction stays valid — and the settlement poll bound to it stays open —
+    // long after the challenge it settles has lapsed. The bound must reject this
+    // before any on-chain work, so no RPC mocks are queued.
+    const expiresAt = new Date((maxTimeSeconds - 3600) * 1000).toISOString()
+    const challenge = Challenge.from({
+      id: `test-${crypto.randomUUID()}`,
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      expires: expiresAt,
+      request: {
+        amount: '10000000',
+        currency: USDC_SAC_TESTNET,
+        recipient: RECIPIENT,
+        methodDetails: { network: 'stellar:testnet', feePayer: true },
+      },
+    })
+    const cred = Object.assign(
+      Credential.from({
+        challenge,
+        payload: { type: 'transaction', transaction: envelope.toXDR('base64') },
+      }),
+      { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
+    )
+
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      feePayer: { envelopeSigner: signerKp },
+      store: Store.memory(),
+    })
+
+    await expect(
+      method.verify({ credential: cred as any, request: cred.challenge.request }),
+    ).rejects.toThrow('timeBounds.maxTime exceeds challenge expires')
+  })
+
+  it('settles a sponsored transaction whose timeBounds.maxTime equals the challenge expiry', async () => {
+    const signerKp = Keypair.random()
+
+    mockGetAccount.mockResolvedValueOnce(new Account(signerKp.publicKey(), '100'))
+    mockGetLatestLedger.mockResolvedValueOnce({ sequence: 1000 })
+    mockSimulateTransaction.mockResolvedValueOnce({
+      result: { retval: null },
+      events: [defaultMockEvent()],
+      transactionData: new SorobanDataBuilder(),
+    })
+    mockSendTransaction.mockResolvedValueOnce({
+      hash: 'sponsored-maxtime-at-expiry',
+      status: 'PENDING',
+    })
+    mockGetTransaction.mockResolvedValueOnce({ status: 'SUCCESS' })
+
+    // Mirror an honest sponsored client, which pins maxTime to the challenge
+    // expiry: the bound is an upper limit, so an exact match must still settle.
+    const maxTimeSeconds = Math.floor(Date.now() / 1000) + 600
+    const envelope = await buildSponsoredEnvelopeWithValidAuth({ maxTimeSeconds })
+
+    const expiresAt = new Date(maxTimeSeconds * 1000).toISOString()
+    const challenge = Challenge.from({
+      id: `test-${crypto.randomUUID()}`,
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      expires: expiresAt,
+      request: {
+        amount: '10000000',
+        currency: USDC_SAC_TESTNET,
+        recipient: RECIPIENT,
+        methodDetails: { network: 'stellar:testnet', feePayer: true },
+      },
+    })
+    const cred = Object.assign(
+      Credential.from({
+        challenge,
+        payload: { type: 'transaction', transaction: envelope.toXDR('base64') },
+      }),
+      { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
+    )
+
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      feePayer: { envelopeSigner: signerKp },
+      store: Store.memory(),
+    })
+
+    const receipt = await method.verify({
+      credential: cred as any,
+      request: cred.challenge.request,
+    })
+    expect(receipt.status).toBe('success')
+    expect(receipt.reference).toBe('sponsored-maxtime-at-expiry')
   })
 })
 
@@ -3571,14 +3682,20 @@ describe('charge validateAuthEntries (sponsored path)', () => {
     })
   }
 
-  /** Builds a sponsored transaction XDR with the given auth entries injected. */
-  function buildSponsoredTxWithAuth(authEntries: xdr.SorobanAuthorizationEntry[]) {
+  /** Builds a sponsored transaction XDR with the given auth entries injected.
+   * Accepts an optional maxTime (unix seconds) so a fixture can pin the tx's
+   * validity window to its challenge expiry, mirroring an honest client. */
+  function buildSponsoredTxWithAuth(
+    authEntries: xdr.SorobanAuthorizationEntry[],
+    maxTimeSeconds?: number,
+  ) {
     const tx = buildTransferTx({
       source: ALL_ZEROS,
       from: PAYER.publicKey(),
       to: RECIPIENT,
       amount: 10000000n,
       currency: USDC_SAC_TESTNET,
+      maxTimeSeconds,
     })
     const envelope = tx.toEnvelope()
     envelope.v1().tx().operations()[0].body().invokeHostFunctionOp().auth(authEntries)
@@ -3654,7 +3771,8 @@ describe('charge validateAuthEntries (sponsored path)', () => {
   it('rejects auth entry with signatureExpirationLedger exceeding the challenge expiry', async () => {
     // challenge expires in ~60s → maxLedger = latestSequence(1000) + ceil(60/5) = 1012
     // auth entry expiration 99999 >> 1012 → rejected
-    const futureExpiry = new Date(Date.now() + 60_000).toISOString()
+    const expirySeconds = Math.floor(Date.now() / 1000) + 60
+    const futureExpiry = new Date(expirySeconds * 1000).toISOString()
     const authEntry = new xdr.SorobanAuthorizationEntry({
       credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
         new xdr.SorobanAddressCredentials({
@@ -3669,7 +3787,10 @@ describe('charge validateAuthEntries (sponsored path)', () => {
 
     mockGetLatestLedger.mockResolvedValueOnce({ sequence: 1000 })
 
-    const cred = makeSponsoredCredential(buildSponsoredTxWithAuth([authEntry]), futureExpiry)
+    const cred = makeSponsoredCredential(
+      buildSponsoredTxWithAuth([authEntry], expirySeconds),
+      futureExpiry,
+    )
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -3685,7 +3806,8 @@ describe('charge validateAuthEntries (sponsored path)', () => {
   it('accepts auth entry with signatureExpirationLedger within the challenge expiry', async () => {
     // challenge expires in ~60s → maxLedger = 1000 + ceil(60/5) = 1012
     // auth entry expiration 1010 ≤ 1012 → accepted
-    const futureExpiry = new Date(Date.now() + 60_000).toISOString()
+    const expirySeconds = Math.floor(Date.now() / 1000) + 60
+    const futureExpiry = new Date(expirySeconds * 1000).toISOString()
     const unsignedAuthEntry = new xdr.SorobanAuthorizationEntry({
       credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
         new xdr.SorobanAddressCredentials({
@@ -3709,7 +3831,10 @@ describe('charge validateAuthEntries (sponsored path)', () => {
     mockSendTransaction.mockResolvedValueOnce({ hash: 'valid-auth-hash', status: 'PENDING' })
     mockGetTransaction.mockResolvedValueOnce({ status: 'SUCCESS' })
 
-    const cred = makeSponsoredCredential(buildSponsoredTxWithAuth([authEntry]), futureExpiry)
+    const cred = makeSponsoredCredential(
+      buildSponsoredTxWithAuth([authEntry], expirySeconds),
+      futureExpiry,
+    )
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -3729,7 +3854,8 @@ describe('charge validateAuthEntries (sponsored path)', () => {
     // The client and server read the latest ledger at different moments from a load-balanced
     // RPC, so the client's view can sit a few ledgers ahead. Expiration 1015 is just past the
     // strict bound but within the ledger-skew tolerance, so it must still be accepted.
-    const futureExpiry = new Date(Date.now() + 60_000).toISOString()
+    const expirySeconds = Math.floor(Date.now() / 1000) + 60
+    const futureExpiry = new Date(expirySeconds * 1000).toISOString()
     const unsignedAuthEntry = new xdr.SorobanAuthorizationEntry({
       credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
         new xdr.SorobanAddressCredentials({
@@ -3753,7 +3879,10 @@ describe('charge validateAuthEntries (sponsored path)', () => {
     mockSendTransaction.mockResolvedValueOnce({ hash: 'skew-within-hash', status: 'PENDING' })
     mockGetTransaction.mockResolvedValueOnce({ status: 'SUCCESS' })
 
-    const cred = makeSponsoredCredential(buildSponsoredTxWithAuth([authEntry]), futureExpiry)
+    const cred = makeSponsoredCredential(
+      buildSponsoredTxWithAuth([authEntry], expirySeconds),
+      futureExpiry,
+    )
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -3771,7 +3900,8 @@ describe('charge validateAuthEntries (sponsored path)', () => {
   it('rejects an auth entry expiring beyond the ledger-skew tolerance', async () => {
     // Strict maxLedger 1012 + ledger-skew tolerance (10) = 1022; expiration 1023 is beyond it
     // and must still be rejected, so the tolerance does not become an open-ended extension.
-    const futureExpiry = new Date(Date.now() + 60_000).toISOString()
+    const expirySeconds = Math.floor(Date.now() / 1000) + 60
+    const futureExpiry = new Date(expirySeconds * 1000).toISOString()
     const authEntry = new xdr.SorobanAuthorizationEntry({
       credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
         new xdr.SorobanAddressCredentials({
@@ -3786,7 +3916,10 @@ describe('charge validateAuthEntries (sponsored path)', () => {
 
     mockGetLatestLedger.mockResolvedValueOnce({ sequence: 1000 })
 
-    const cred = makeSponsoredCredential(buildSponsoredTxWithAuth([authEntry]), futureExpiry)
+    const cred = makeSponsoredCredential(
+      buildSponsoredTxWithAuth([authEntry], expirySeconds),
+      futureExpiry,
+    )
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,

@@ -527,6 +527,8 @@ export function charge(parameters: charge.Parameters) {
           if (envelopeKP !== undefined && tx.source === ALL_ZEROS) {
             // ── Sponsored path ──────────────────────────────────────────
 
+            assertTxValidityWithinChallenge(tx, expiresTimestamp)
+
             await validateAuthEntries(tx, envelopeKP.publicKey(), expiresTimestamp, {
               currency: expectedCurrency,
               from: expectedFrom,
@@ -612,18 +614,7 @@ export function charge(parameters: charge.Parameters) {
           } else {
             // ── Unsponsored path ────────────────────────────────────────
 
-            if (expiresTimestamp && tx.timeBounds) {
-              const maxTime = parseInt(tx.timeBounds.maxTime, 10)
-              if (maxTime > expiresTimestamp) {
-                throw new PaymentVerificationError(
-                  `${LOG_PREFIX} Transaction timeBounds.maxTime exceeds challenge expires.`,
-                  {
-                    maxTime,
-                    expires: expiresTimestamp,
-                  },
-                )
-              }
-            }
+            assertTxValidityWithinChallenge(tx, expiresTimestamp)
 
             const simResponse = await simulateTransfer(tx)
             validateSimulationEvents(simResponse.events!, {
@@ -999,6 +990,28 @@ function settlementPollBudget(
   // poll rather than the attempt count.
   const attemptsForWindow = Math.ceil(timeoutMs / Math.max(pollDelayMs, 1)) + 1
   return { timeoutMs, maxAttempts: Math.max(pollMaxAttempts, attemptsForWindow) }
+}
+
+/**
+ * Rejects a pull-mode transaction whose validity window outlives the challenge
+ * it settles. The signed transaction can be included on-chain any time up to its
+ * `timeBounds.maxTime`, and settlement waits for that whole window (see
+ * {@link settlementPollBudget}); bounding it to the challenge expiry keeps a
+ * counterparty from pinning the settlement wait open long after the challenge
+ * has lapsed. Applied to both the sponsored and unsponsored pull paths.
+ */
+function assertTxValidityWithinChallenge(
+  tx: Transaction,
+  expiresTimestamp: number | undefined,
+): void {
+  if (!expiresTimestamp || !tx.timeBounds) return
+  const maxTime = parseInt(tx.timeBounds.maxTime, 10)
+  if (maxTime > expiresTimestamp) {
+    throw new PaymentVerificationError(
+      `${LOG_PREFIX} Transaction timeBounds.maxTime exceeds challenge expires.`,
+      { maxTime, expires: expiresTimestamp },
+    )
+  }
 }
 
 /**
