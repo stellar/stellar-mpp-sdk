@@ -22,6 +22,7 @@ import { pollTransaction } from '../../../../shared/poll.js'
 import { resolveNetworkId } from '../../../../shared/validation.js'
 import { charge as chargeMethod } from '../../../Methods.js'
 import { charge as serverCharge } from '../../../server/Charge.js'
+import { fundResilient } from '../fund.js'
 
 // Account setup for legacy hash rejection testing.
 // Separate from the e2e suite; this is a single legacy credential test.
@@ -60,10 +61,10 @@ function handlerAsFetch(
 describe('legacy hash credential rejection (allowUnsignedPush: false)', () => {
   beforeAll(async () => {
     await Promise.all([
-      sorobanServer.fundAddress(TEST_PAYER.publicKey()),
-      sorobanServer.fundAddress(TEST_RECIPIENT),
+      fundResilient(sorobanServer, TEST_PAYER.publicKey()),
+      fundResilient(sorobanServer, TEST_RECIPIENT),
     ])
-  }, 30_000)
+  }, 180_000)
 
   it('default server rejects legacy hash credential without consuming hash', async () => {
     // Create default server method (allowUnsignedPush: false is now the default)

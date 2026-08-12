@@ -26,6 +26,7 @@ import { resolveNetworkId } from '../../../../shared/validation.js'
 import { charge as chargeMethod } from '../../../Methods.js'
 import { charge as serverCharge } from '../../../server/Charge.js'
 import { charge as clientCharge } from '../../../client/Charge.js'
+import { fundResilient } from '../fund.js'
 
 // Every flow gets its own payer so a mid-broadcast failure in one flow cannot
 // poison a later flow through a shared on-chain sequence. Sponsored flows also
@@ -119,7 +120,8 @@ function feeBumpChargeClient(opts: {
       if (mode === 'push') {
         const result = await sorobanServer.sendTransaction(feeBumpTx)
         if (result.status !== 'PENDING') {
-          throw new Error(`Broadcast failed: sendTransaction returned ${result.status}`)
+          const reason = result.errorResult?.result().switch().name ?? 'unknown'
+          throw new Error(`Broadcast failed: sendTransaction returned ${result.status} (${reason})`)
         }
         await pollTransaction(sorobanServer, result.hash, {})
         const canonicalHash = result.hash.toLowerCase()
@@ -298,40 +300,15 @@ function expectFeeBumpEnvelope(
   return outerEnv
 }
 
-// Friendbot and the Soroban RPC are separate services: friendbot submits the
-// funding tx via Horizon, and the RPC ingests it a few ledgers later. fundAddress
-// polls the RPC immediately, so it can throw NOT_FOUND / "Account not found" even
-// though funding succeeded. Retry against account visibility, tolerating the lag
-// and the "already funded" error from a prior attempt that did land.
-async function fundResilient(pubkey: string): Promise<void> {
-  const deadlineMs = Date.now() + 90_000
-  let lastError: unknown
-  while (Date.now() < deadlineMs) {
-    try {
-      await sorobanServer.getAccount(pubkey)
-      return
-    } catch (err) {
-      lastError = err
-    }
-    try {
-      await sorobanServer.fundAddress(pubkey)
-    } catch (err) {
-      lastError = err
-    }
-    await new Promise((resolve) => setTimeout(resolve, 3_000))
-  }
-  throw new Error(
-    `Funding ${pubkey} timed out: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
-  )
-}
-
 describe('charge e2e (testnet)', () => {
   beforeAll(async () => {
     await Promise.all([
-      ...Object.values(flowPayers).map((kp) => fundResilient(kp.publicKey())),
-      ...Object.values(sponsoredEnvelopeSigners).map((kp) => fundResilient(kp.publicKey())),
-      fundResilient(TEST_RECIPIENT),
-      fundResilient(TEST_FEE_PAYER.publicKey()),
+      ...Object.values(flowPayers).map((kp) => fundResilient(sorobanServer, kp.publicKey())),
+      ...Object.values(sponsoredEnvelopeSigners).map((kp) =>
+        fundResilient(sorobanServer, kp.publicKey()),
+      ),
+      fundResilient(sorobanServer, TEST_RECIPIENT),
+      fundResilient(sorobanServer, TEST_FEE_PAYER.publicKey()),
     ])
   }, 180_000)
 

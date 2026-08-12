@@ -92,14 +92,55 @@ echo ""
 echo "═══ Step 1: Creating funded testnet accounts ═══"
 echo ""
 
+# The Soroban RPC ingests newly created accounts and contracts asynchronously, so
+# retry read-only queries that would otherwise race testnet propagation.
+retry() {
+  local out
+  for _ in $(seq 1 20); do
+    if out=$("$@" 2>/dev/null); then
+      echo "$out"
+      return 0
+    fi
+    sleep 3
+  done
+  "$@"
+}
+
+# Friendbot returns before the account is visible to the Soroban RPC, so wait for
+# it rather than racing the deploy against testnet propagation.
+wait_for_account() {
+  npx tsx -e "
+import { rpc } from '@stellar/stellar-sdk'
+const server = new rpc.Server('https://soroban-testnet.stellar.org')
+// The RPC endpoint is load balanced and nodes ingest at different rates, so
+// require several consecutive hits before treating the account as visible.
+void (async () => {
+  let streak = 0
+  for (let i = 0; i < 40; i++) {
+    try {
+      await server.getAccount('$1')
+      if (++streak === 3) process.exit(0)
+    } catch {
+      streak = 0
+    }
+    await new Promise((r) => setTimeout(r, 2000))
+  }
+  console.error('account $1 was not funded (friendbot unavailable?)')
+  process.exit(1)
+})()
+"
+}
+
 echo "  Creating funder account..."
 stellar keys generate "$FUNDER" --fund --network testnet --overwrite 2>/dev/null
 FUNDER_ADDR=$(stellar keys address "$FUNDER")
+wait_for_account "$FUNDER_ADDR"
 echo "  ✔ Funder:    $FUNDER_ADDR"
 
 echo "  Creating recipient account..."
 stellar keys generate "$RECIPIENT" --fund --network testnet --overwrite 2>/dev/null
 RECIPIENT_ADDR=$(stellar keys address "$RECIPIENT")
+wait_for_account "$RECIPIENT_ADDR"
 echo "  ✔ Recipient: $RECIPIENT_ADDR"
 
 echo ""
@@ -154,13 +195,27 @@ echo "  ✔ Contract:  $CONTRACT"
 
 echo ""
 echo "  Channel balance after deploy:"
-BALANCE_BEFORE=$(stellar contract invoke \
+BALANCE_BEFORE=$(retry stellar contract invoke \
   --id "$CONTRACT" \
   --source "$FUNDER" \
   --network testnet \
   --send=no \
   -- balance)
 echo "    $BALANCE_BEFORE stroops"
+
+# Same load-balancing caveat as accounts: make sure every RPC node has ingested
+# the new contract before the server starts simulating against it.
+CONTRACT_STREAK=0
+for _ in $(seq 1 40); do
+  if stellar contract invoke --id "$CONTRACT" --source "$FUNDER" --network testnet \
+    --send=no -- balance >/dev/null 2>&1; then
+    CONTRACT_STREAK=$((CONTRACT_STREAK + 1))
+    [ "$CONTRACT_STREAK" -ge 3 ] && break
+  else
+    CONTRACT_STREAK=0
+  fi
+  sleep 3
+done
 
 echo ""
 

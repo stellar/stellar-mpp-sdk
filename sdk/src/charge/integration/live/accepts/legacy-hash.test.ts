@@ -22,6 +22,7 @@ import { pollTransaction } from '../../../../shared/poll.js'
 import { resolveNetworkId } from '../../../../shared/validation.js'
 import { charge as chargeMethod } from '../../../Methods.js'
 import { charge as serverCharge } from '../../../server/Charge.js'
+import { fundResilient } from '../fund.js'
 
 // Account setup for legacy hash acceptance testing.
 // Separate from the e2e suite; this is a single legacy credential test.
@@ -60,10 +61,10 @@ function handlerAsFetch(
 describe('legacy hash credential acceptance (allowUnsignedPush: true opt-in)', () => {
   beforeAll(async () => {
     await Promise.all([
-      sorobanServer.fundAddress(TEST_PAYER.publicKey()),
-      sorobanServer.fundAddress(TEST_RECIPIENT),
+      fundResilient(sorobanServer, TEST_PAYER.publicKey()),
+      fundResilient(sorobanServer, TEST_RECIPIENT),
     ])
-  }, 30_000)
+  }, 180_000)
 
   it('server with explicit allowUnsignedPush: true accepts legacy hash credential and settles on-chain', async () => {
     // Create server method with explicit allowUnsignedPush: true for legacy acceptance
@@ -142,8 +143,15 @@ describe('legacy hash credential acceptance (allowUnsignedPush: true opt-in)', (
     expect(receipt.method).toBe('stellar')
     expect(receipt.reference).toBe(canonicalHash)
 
-    // Verify the on-chain transaction is real and matches the reference
-    const onChainTx = await sorobanServer.getTransaction(receipt.reference)
+    // Verify the on-chain transaction is real and matches the reference. The RPC
+    // is load balanced, so poll: a node that has not ingested the tx yet answers
+    // NOT_FOUND even though the server already confirmed it.
+    let onChainTx = await sorobanServer.getTransaction(receipt.reference)
+    const deadlineMs = Date.now() + 60_000
+    while (onChainTx.status === Api.GetTransactionStatus.NOT_FOUND && Date.now() < deadlineMs) {
+      await new Promise((resolve) => setTimeout(resolve, 2_000))
+      onChainTx = await sorobanServer.getTransaction(receipt.reference)
+    }
     expect(onChainTx.status).toBe(Api.GetTransactionStatus.SUCCESS)
     const successfulTx = onChainTx as Api.GetSuccessfulTransactionResponse
     expect(successfulTx.txHash).toEqual(receipt.reference)
