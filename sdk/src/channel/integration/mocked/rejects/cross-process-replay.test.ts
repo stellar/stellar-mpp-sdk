@@ -1,5 +1,7 @@
 import { Keypair } from '@stellar/stellar-sdk'
 import { Challenge, Credential, Store } from 'mppx'
+import { STELLAR_TESTNET } from '../../../../constants.js'
+import { buildCommitmentMessage } from '../../../commitment.js'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 // Cross-process replay protection: two independent server
@@ -40,7 +42,13 @@ function makeSignedCredential(opts: {
   challengeAmount: string
   previousCumulative?: string
 }) {
-  const sig = COMMITMENT_KEY.sign(opts.commitmentBytes)
+  const sig = COMMITMENT_KEY.sign(
+    buildCommitmentMessage({
+      channel: CHANNEL_ADDRESS,
+      amount: opts.cumulativeAmount,
+      network: STELLAR_TESTNET,
+    }),
+  )
   const sigHex = Buffer.from(sig).toString('hex')
   const challenge = Challenge.from({
     id: `test-${crypto.randomUUID()}`,
