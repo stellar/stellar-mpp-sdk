@@ -1,4 +1,4 @@
-import { hash, scValToNative, xdr } from '@stellar/stellar-sdk'
+import { Address, hash, nativeToScVal, scValToNative, xdr } from '@stellar/stellar-sdk'
 import { NETWORK_PASSPHRASE, type NetworkId } from '../constants.js'
 import { StellarMppError } from '../shared/errors.js'
 
@@ -16,6 +16,51 @@ export interface ExpectedCommitment {
   amount: bigint
   /** Network the commitment must be scoped to. */
   network: NetworkId
+}
+
+/**
+ * Builds the commitment message locally, byte-for-byte identical to what the
+ * one-way-channel contract's `prepare_commitment` returns.
+ *
+ * The message is the XDR of an `ScVal::Map` with four entries — `amount`,
+ * `channel`, `domain`, `network` — which Soroban requires in ascending key
+ * order (already alphabetical here). Every field is known before a request
+ * arrives: the amount comes from the voucher, the channel and network from
+ * configuration, and the domain is a constant. Nothing about the message
+ * depends on chain state, so constructing it needs no RPC.
+ *
+ * Building rather than fetching also removes a trust dependency: bytes fetched
+ * from an unauthenticated simulation must be checked field by field (see
+ * {@link assertCommitmentBinds}) before they can be signed or verified against.
+ * Bytes built here are correct by construction.
+ *
+ * The one risk is drifting from the contract's encoding. The live parity test
+ * in `integration/live` guards that by comparing this output against a real
+ * `prepare_commitment` call.
+ *
+ * @param expected - The channel, amount and network to bind the commitment to.
+ * @returns XDR-encoded commitment bytes — the exact message the client signs.
+ */
+export function buildCommitmentMessage(expected: ExpectedCommitment): Buffer {
+  const networkId = hash(Buffer.from(NETWORK_PASSPHRASE[expected.network]))
+  return xdr.ScVal.scvMap([
+    new xdr.ScMapEntry({
+      key: nativeToScVal('amount', { type: 'symbol' }),
+      val: nativeToScVal(expected.amount, { type: 'i128' }),
+    }),
+    new xdr.ScMapEntry({
+      key: nativeToScVal('channel', { type: 'symbol' }),
+      val: new Address(expected.channel).toScVal(),
+    }),
+    new xdr.ScMapEntry({
+      key: nativeToScVal('domain', { type: 'symbol' }),
+      val: nativeToScVal(COMMITMENT_DOMAIN, { type: 'symbol' }),
+    }),
+    new xdr.ScMapEntry({
+      key: nativeToScVal('network', { type: 'symbol' }),
+      val: xdr.ScVal.scvBytes(networkId),
+    }),
+  ]).toXDR()
 }
 
 /**
