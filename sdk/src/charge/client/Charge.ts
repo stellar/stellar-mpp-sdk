@@ -18,6 +18,7 @@ import {
   DEFAULT_LEDGER_CLOSE_TIME,
   DEFAULT_TIMEOUT,
   NETWORK_PASSPHRASE,
+  type NetworkId,
   SOROBAN_RPC_URLS,
 } from '../../constants.js'
 import * as Methods from '../Methods.js'
@@ -137,6 +138,7 @@ export function charge(parameters: charge.Parameters) {
     decimals = DEFAULT_DECIMALS,
     keypair: keypairParam,
     mode: defaultMode = 'pull',
+    network: pinnedNetwork,
     onProgress,
     pollDelayMs = DEFAULT_POLL_DELAY_MS,
     pollMaxAttempts = DEFAULT_POLL_MAX_ATTEMPTS,
@@ -162,6 +164,13 @@ export function charge(parameters: charge.Parameters) {
       const { amount, currency, recipient } = request
 
       const network = resolveNetworkId(request.methodDetails?.network)
+
+      if (pinnedNetwork && network !== pinnedNetwork) {
+        throw new StellarMppError(
+          `Network mismatch: server advertised "${network}" ` +
+            `but this client is pinned to "${pinnedNetwork}".`,
+        )
+      }
 
       onProgress?.({
         type: 'challenge',
@@ -420,6 +429,13 @@ export declare namespace charge {
     keypair?: Keypair
     /** Number of decimal places for the token. @default 7 */
     decimals?: number
+    /**
+     * Network the client is pinned to (e.g. `'stellar:testnet'`).
+     *
+     * When set, a challenge advertising any other network is rejected. When
+     * omitted, the network is taken from the server-advertised value.
+     */
+    network?: NetworkId
     /** Custom Soroban RPC URL. Defaults based on network. */
     rpcUrl?: string
     /**

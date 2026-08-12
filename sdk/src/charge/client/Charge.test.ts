@@ -779,6 +779,45 @@ describe('network validation', () => {
   })
 })
 
+describe('network pinning', () => {
+  it('rejects a server-advertised network that does not match the pinned network', async () => {
+    mockGetAccount.mockClear()
+    mockPrepareTransaction.mockClear()
+
+    const method = charge({ keypair: TEST_KEYPAIR, network: STELLAR_TESTNET })
+    const challenge = mockChallenge({
+      methodDetails: { network: 'stellar:pubnet' },
+    })
+
+    await expect(
+      method.createCredential({ challenge: challenge as any, context: {} as any }),
+    ).rejects.toThrow(/network mismatch/i)
+
+    // Rejection must happen before any RPC/simulation/signing.
+    expect(mockGetAccount).not.toHaveBeenCalled()
+    expect(mockPrepareTransaction).not.toHaveBeenCalled()
+  })
+
+  it('signs when the server-advertised network matches the pinned network', async () => {
+    const account = new Account(TEST_KEYPAIR.publicKey(), '0')
+    mockGetAccount.mockResolvedValueOnce(account)
+    const mockTx = buildMockPreparedTx()
+    mockPrepareTransaction.mockResolvedValueOnce(await mockTx)
+
+    const method = charge({ keypair: TEST_KEYPAIR, network: STELLAR_TESTNET })
+    const challenge = mockChallenge() // methodDetails.network === 'stellar:testnet'
+
+    const credential = await method.createCredential({
+      challenge: challenge as any,
+      context: {} as any,
+    })
+
+    const token = credential.replace(/^Payment\s+/, '')
+    const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
+    expect(decoded.payload.type).toBe('transaction')
+  })
+})
+
 describe('charge client amount validation', () => {
   it('rejects a counterparty amount exceeding the signed i128 maximum with a typed error', async () => {
     const method = charge({ keypair: TEST_KEYPAIR })

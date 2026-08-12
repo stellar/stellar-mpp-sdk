@@ -8,6 +8,7 @@ import {
   parseContractAddress,
   parseHexKey,
   parseCommaSeparatedList,
+  parseNetworkId,
   parseNumber,
 } from './env.js'
 
@@ -167,6 +168,32 @@ describe('parseContractAddress', () => {
     expect(() => parseContractAddress('CONTRACT')).toThrow(
       'must be a valid contract address (C...)',
     )
+  })
+})
+
+describe('parseNetworkId', () => {
+  beforeEach(() => {
+    vi.unstubAllEnvs()
+  })
+
+  it('returns the configured network identifier', () => {
+    vi.stubEnv('STELLAR_NETWORK', 'stellar:pubnet')
+    expect(parseNetworkId()).toBe('stellar:pubnet')
+  })
+
+  it('defaults to testnet when unset', () => {
+    delete process.env.STELLAR_NETWORK
+    expect(parseNetworkId()).toBe('stellar:testnet')
+  })
+
+  it('reads the named env var', () => {
+    vi.stubEnv('CLIENT_NETWORK', 'stellar:pubnet')
+    expect(parseNetworkId('CLIENT_NETWORK')).toBe('stellar:pubnet')
+  })
+
+  it('throws on an unsupported network identifier', () => {
+    vi.stubEnv('STELLAR_NETWORK', 'stellar:futurenet')
+    expect(() => parseNetworkId()).toThrow('Unsupported Stellar network identifier')
   })
 })
 

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Allow clients to pin the Stellar network they sign for [#64](https://github.com/stellar/stellar-mpp-sdk/pull/64)
+  - Charge client: add an optional `network` parameter that rejects a challenge whose advertised network differs, matching the pinning already available on the channel client. Unpinned clients keep the current behaviour of adopting the server-advertised network.
+  - Add `parseNetworkId` to `@stellar/mpp/env`, and pin the network in the charge, fee-bump and channel client examples.
+
 ### Security
 
 - Pin transitive development dependencies (`ip-address`, `postcss`, `brace-expansion`) via `pnpm.overrides` to clear advisories in third-party packages. All three are build- and test-time only, so the published package is unaffected [#62](https://github.com/stellar/stellar-mpp-sdk/pull/62)

@@ -227,7 +227,7 @@ const data = await response.json()
 | `@stellar/mpp/channel`        | `channel` (method schema)                                                                                                                                                                                                                                                        |
 | `@stellar/mpp/channel/client` | `stellar`, `channel`, `Mppx`                                                                                                                                                                                                                                                     |
 | `@stellar/mpp/channel/server` | `stellar`, `channel`, `close`, `getChannelState`, `watchChannel`, `resolveKeypair`, `Mppx`, `Store`, `Expires`, `ChannelState` (type), `ChannelEvent` (type)                                                                                                                     |
-| `@stellar/mpp/env`            | `parseRequired`, `parseOptional`, `parsePort`, `parseStellarPublicKey`, `parseStellarSecretKey`, `parseContractAddress`, `parseHexKey`, `parseCommaSeparatedList`, `parseNumber`                                                                                                 |
+| `@stellar/mpp/env`            | `parseRequired`, `parseOptional`, `parsePort`, `parseStellarPublicKey`, `parseStellarSecretKey`, `parseContractAddress`, `parseHexKey`, `parseNetworkId`, `parseCommaSeparatedList`, `parseNumber`                                                                               |
 
 ### Server options (charge)
 
@@ -259,6 +259,7 @@ stellar.charge({
   keypair?: Keypair,              // Stellar Keypair (or use secretKey)
   secretKey?: string,             // Stellar secret key (S...)
   mode?: 'push' | 'pull',        // default: 'pull'
+  network?: 'stellar:testnet' | 'stellar:pubnet', // pin the network to sign for (default: server-advertised)
   timeout?: number,               // tx timeout in seconds (default: 180)
   decimals?: number,              // default: 7
   rpcUrl?: string,                // custom Soroban RPC URL
