@@ -34,6 +34,10 @@ describe('assertRpcServesNetwork', () => {
     await expect(
       assertRpcServesNetwork(server, 'https://mismatch.example.com', STELLAR_TESTNET),
     ).rejects.toThrow('does not serve "stellar:testnet"')
+
+    // Only confirmed endpoints are cached, so a rejection is not remembered as
+    // a verdict: the second call has to ask again rather than reusing the first.
+    expect(server.getNetwork).toHaveBeenCalledTimes(2)
   })
 
   it('keeps the endpoint URL out of the error, which may carry an API key', async () => {

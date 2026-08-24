@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Add `parseNetworkId` to `@stellar/mpp/env`, and pin the network in the charge, fee-bump and channel client examples.
   - Charge client: a caller-supplied `rpcUrl` is now checked against the resolved network before any chain state is read from it, so the resource footprint, fees and authorization validity window cannot be read from a different chain than the one being signed for. Bounded by `simulationTimeoutMs`, which the charge client previously accepted but ignored. Default endpoints are derived from the network and need no check.
   - Charge client: the pre-signing transfer guard now also confirms the prepared transaction is bound to the intended network, so the chain is part of what the client checks before signing rather than an implicit assumption.
-  - Correct the mainnet USDC and XLM SEP-41 token address constants, which were malformed and rejected by `StrKey.isValidContract`, and assert every `SAC_ADDRESSES` entry is a valid contract address so a bad literal cannot ship again.
+  - Correct the mainnet USDC and XLM SEP-41 token address constants, which were malformed and rejected by `StrKey.isValidContract`, and assert every entry both parses as a contract address and matches the value derived from its asset and network, so neither a malformed nor a well-formed-but-wrong literal can ship again. The constants table in the README is corrected to match.
 
 ### Security
 

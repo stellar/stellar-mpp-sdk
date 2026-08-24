@@ -1,4 +1,4 @@
-import { StrKey } from '@stellar/stellar-sdk'
+import { Asset, Networks, StrKey } from '@stellar/stellar-sdk'
 import { describe, expect, it } from 'vitest'
 import * as constants from './constants.js'
 
@@ -58,6 +58,25 @@ describe('constants', () => {
         expect(StrKey.isValidContract(address), `${network} ${symbol} (${address})`).toBe(true)
       }
     }
+  })
+
+  // Stronger than the shape check above: a SAC address is derived from the
+  // asset and the network, so the expected value can be recomputed rather than
+  // trusted. This catches a wrong-but-well-formed address, which validation
+  // alone cannot.
+  it('exports SAC addresses that match the ones derived from the asset', () => {
+    // Circulating USDC issuers, which are what make the derivations reproducible.
+    const usdcMainnetIssuer = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+    const usdcTestnetIssuer = 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5'
+
+    expect(constants.XLM_SAC_MAINNET).toBe(Asset.native().contractId(Networks.PUBLIC))
+    expect(constants.XLM_SAC_TESTNET).toBe(Asset.native().contractId(Networks.TESTNET))
+    expect(constants.USDC_SAC_MAINNET).toBe(
+      new Asset('USDC', usdcMainnetIssuer).contractId(Networks.PUBLIC),
+    )
+    expect(constants.USDC_SAC_TESTNET).toBe(
+      new Asset('USDC', usdcTestnetIssuer).contractId(Networks.TESTNET),
+    )
   })
 
   it('exports DEFAULT_DECIMALS as 7', () => {
