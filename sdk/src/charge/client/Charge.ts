@@ -61,7 +61,18 @@ import {
  * const response = await fetch('https://api.example.com/resource')
  * ```
  */
-type ExpectedTransfer = { currency: string; from: string; to: string; amount: bigint }
+type ExpectedTransfer = {
+  currency: string
+  from: string
+  to: string
+  amount: bigint
+  /**
+   * Passphrase the client intends to bind its signature to. Held here rather
+   * than read at the signing site so the network is part of the guard's
+   * contract: a transfer is only ever "expected" on a specific chain.
+   */
+  networkPassphrase: string
+}
 
 /**
  * Verifies that a Soroban authorization invocation authorizes only the intended
@@ -121,7 +132,19 @@ function assertInvocationIsExactTransfer(
 function assertTransactionAuthorizesOnlyTransfer(
   tx: StellarXdr.Transaction,
   expected: ExpectedTransfer,
+  signingPassphrase: string,
 ): void {
+  // A Stellar keypair is valid on every network independently, so a signature
+  // bound to the wrong passphrase is not rejected — it authorizes the transfer
+  // on that other chain. The auth tree carries no network of its own, so the
+  // passphrase the envelope will actually be signed under is checked here,
+  // where the rest of the payment's terms are already being confirmed.
+  if (signingPassphrase !== expected.networkPassphrase) {
+    throw new StellarMppError(
+      'Refusing to sign: the transaction is bound to a different network than the requested payment.',
+    )
+  }
+
   for (const op of tx.operations()) {
     const body = op.body()
     if (body.switch().value !== StellarXdr.OperationType.invokeHostFunction().value) {
@@ -165,6 +188,9 @@ export function charge(parameters: charge.Parameters) {
 
       const network = resolveNetworkId(request.methodDetails?.network)
 
+      // Enforce network pinning: reject if the server-advertised network does
+      // not match the one the client is configured for, so a server cannot
+      // induce a signature valid on a different network than intended.
       if (pinnedNetwork && network !== pinnedNetwork) {
         throw new StellarMppError(
           `Network mismatch: server advertised "${network}" ` +
@@ -200,6 +226,9 @@ export function charge(parameters: charge.Parameters) {
         from: clientKP.publicKey(),
         to: recipient,
         amount: stellarAmount,
+        // Deliberately derived from the pin where one is configured, so the
+        // pre-signing guard still holds if the check above is ever bypassed.
+        networkPassphrase: NETWORK_PASSPHRASE[pinnedNetwork ?? network],
       }
 
       const effectiveMode = context?.mode ?? defaultMode
@@ -292,7 +321,11 @@ export function charge(parameters: charge.Parameters) {
 
         // Confirm the simulated auth tree is exactly the intended transfer
         // before authorizing any entry.
-        assertTransactionAuthorizesOnlyTransfer(v1.tx(), expectedTransfer)
+        assertTransactionAuthorizesOnlyTransfer(
+          v1.tx(),
+          expectedTransfer,
+          prepared.networkPassphrase,
+        )
 
         for (const op of v1.tx().operations()) {
           const body = op.body()
@@ -358,7 +391,11 @@ export function charge(parameters: charge.Parameters) {
 
       // The envelope signature authorizes the entire Soroban auth tree, so
       // confirm it is exactly the intended transfer before signing.
-      assertTransactionAuthorizesOnlyTransfer(prepared.toEnvelope().v1().tx(), expectedTransfer)
+      assertTransactionAuthorizesOnlyTransfer(
+        prepared.toEnvelope().v1().tx(),
+        expectedTransfer,
+        prepared.networkPassphrase,
+      )
 
       onProgress?.({ type: 'signing' })
       prepared.sign(clientKP)

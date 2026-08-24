@@ -4,6 +4,7 @@ import {
   Contract,
   Keypair,
   Memo,
+  Networks,
   Operation,
   TransactionBuilder,
   authorizeInvocation,
@@ -17,6 +18,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   ALL_ZEROS,
   NETWORK_PASSPHRASE,
+  STELLAR_PUBNET,
   STELLAR_TESTNET,
   USDC_SAC_TESTNET,
 } from '../../constants.js'
@@ -69,7 +71,7 @@ function mockChallenge(overrides: Record<string, unknown> = {}) {
   })
 }
 
-function buildMockPreparedTx() {
+function buildMockPreparedTx(networkPassphrase = 'Test SDF Network ; September 2015') {
   const account = new Account(TEST_KEYPAIR.publicKey(), '0')
   const contract = new Contract(USDC_SAC_TESTNET)
   const transferOp = contract.call(
@@ -80,7 +82,7 @@ function buildMockPreparedTx() {
   )
   return new TransactionBuilder(account, {
     fee: '100',
-    networkPassphrase: 'Test SDF Network ; September 2015',
+    networkPassphrase,
   })
     .addOperation(transferOp)
     .setTimeout(180)
@@ -716,7 +718,7 @@ describe('charge createCredential', () => {
   it('uses pubnet DID component for public network', async () => {
     const account = new Account(TEST_KEYPAIR.publicKey(), '0')
     mockGetAccount.mockResolvedValueOnce(account)
-    const mockTx = buildMockPreparedTx()
+    const mockTx = buildMockPreparedTx(Networks.PUBLIC)
     mockPrepareTransaction.mockResolvedValueOnce(await mockTx)
 
     const method = charge({ keypair: TEST_KEYPAIR })
@@ -796,6 +798,38 @@ describe('network pinning', () => {
     // Rejection must happen before any RPC/simulation/signing.
     expect(mockGetAccount).not.toHaveBeenCalled()
     expect(mockPrepareTransaction).not.toHaveBeenCalled()
+  })
+
+  it('signs for pubnet when both the pin and the advertised network are pubnet', async () => {
+    const account = new Account(TEST_KEYPAIR.publicKey(), '0')
+    mockGetAccount.mockResolvedValueOnce(account)
+    mockPrepareTransaction.mockResolvedValueOnce(await buildMockPreparedTx(Networks.PUBLIC))
+
+    const method = charge({ keypair: TEST_KEYPAIR, network: STELLAR_PUBNET })
+    const challenge = mockChallenge({ methodDetails: { network: 'stellar:pubnet' } })
+
+    const credential = await method.createCredential({
+      challenge: challenge as any,
+      context: {} as any,
+    })
+
+    const token = credential.replace(/^Payment\s+/, '')
+    const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
+    expect(decoded.source).toBe(`did:pkh:stellar:pubnet:${TEST_KEYPAIR.publicKey()}`)
+  })
+
+  it('refuses to sign a prepared transaction bound to another network', async () => {
+    const account = new Account(TEST_KEYPAIR.publicKey(), '0')
+    mockGetAccount.mockResolvedValueOnce(account)
+    // The challenge and the pin both say testnet, but simulation came back with
+    // an envelope bound to pubnet — signing it would authorize the transfer there.
+    mockPrepareTransaction.mockResolvedValueOnce(await buildMockPreparedTx(Networks.PUBLIC))
+
+    const method = charge({ keypair: TEST_KEYPAIR, network: STELLAR_TESTNET })
+
+    await expect(
+      method.createCredential({ challenge: mockChallenge() as any, context: {} as any }),
+    ).rejects.toThrow(/bound to a different network/i)
   })
 
   it('signs when the server-advertised network matches the pinned network', async () => {
