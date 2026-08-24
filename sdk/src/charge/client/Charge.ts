@@ -25,6 +25,7 @@ import * as Methods from '../Methods.js'
 import { fromBaseUnits } from '../Methods.js'
 import { StellarMppError } from '../../shared/errors.js'
 import { resolveKeypair } from '../../shared/keypairs.js'
+import { assertRpcServesNetwork } from '../../shared/rpc-network.js'
 import { resolveNetworkId, validateAmount } from '../../shared/validation.js'
 import { scValToBigInt } from '../../shared/scval.js'
 import { pollTransaction } from '../../shared/poll.js'
@@ -168,7 +169,7 @@ export function charge(parameters: charge.Parameters) {
     pollTimeoutMs = DEFAULT_POLL_TIMEOUT_MS,
     rpcUrl,
     secretKey,
-    simulationTimeoutMs: _simulationTimeoutMs = DEFAULT_SIMULATION_TIMEOUT_MS,
+    simulationTimeoutMs = DEFAULT_SIMULATION_TIMEOUT_MS,
     timeout = DEFAULT_TIMEOUT,
   } = parameters
 
@@ -208,6 +209,14 @@ export function charge(parameters: charge.Parameters) {
       const resolvedRpcUrl = rpcUrl ?? SOROBAN_RPC_URLS[network]
       const networkPassphrase = NETWORK_PASSPHRASE[network]
       const server = new rpc.Server(resolvedRpcUrl)
+
+      // A caller-supplied endpoint is an unverified claim about which chain it
+      // serves. Confirm it before simulating, so the resource footprint, fees
+      // and authorization validity window are all read from the same chain the
+      // transfer is being signed for. A URL the SDK picked is bound already.
+      if (rpcUrl) {
+        await assertRpcServesNetwork(server, rpcUrl, network, simulationTimeoutMs)
+      }
 
       // Validate the counterparty-supplied amount before converting it: an
       // out-of-range or malformed value would otherwise surface as an untyped
@@ -473,7 +482,12 @@ export declare namespace charge {
      * omitted, the network is taken from the server-advertised value.
      */
     network?: NetworkId
-    /** Custom Soroban RPC URL. Defaults based on network. */
+    /**
+     * Custom Soroban RPC URL. Defaults based on network.
+     *
+     * A URL supplied here is checked against the resolved network before any
+     * chain state is read from it, and rejected if it serves a different one.
+     */
     rpcUrl?: string
     /**
      * Controls how the charge transaction is submitted.
@@ -495,7 +509,10 @@ export declare namespace charge {
     pollDelayMs?: number
     /** Overall poll timeout in ms. @default 20_000 */
     pollTimeoutMs?: number
-    /** Simulation timeout in ms. @default 10_000 */
+    /**
+     * Timeout in ms for simulation-adjacent RPC calls, including the check that
+     * a caller-supplied `rpcUrl` serves the expected network. @default 10_000
+     */
     simulationTimeoutMs?: number
   }
 }

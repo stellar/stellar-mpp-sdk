@@ -30,6 +30,7 @@ const mockPrepareTransaction = vi.fn()
 const mockGetLatestLedger = vi.fn()
 const mockSendTransaction = vi.fn()
 const mockGetTransaction = vi.fn()
+const mockGetNetwork = vi.fn()
 
 vi.mock('@stellar/stellar-sdk', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@stellar/stellar-sdk')>()
@@ -43,6 +44,7 @@ vi.mock('@stellar/stellar-sdk', async (importOriginal) => {
         this.getLatestLedger = mockGetLatestLedger
         this.sendTransaction = mockSendTransaction
         this.getTransaction = mockGetTransaction
+        this.getNetwork = mockGetNetwork
       }),
     },
   }
@@ -798,6 +800,63 @@ describe('network pinning', () => {
     // Rejection must happen before any RPC/simulation/signing.
     expect(mockGetAccount).not.toHaveBeenCalled()
     expect(mockPrepareTransaction).not.toHaveBeenCalled()
+  })
+
+  it('refuses to use a custom rpcUrl that serves a different network', async () => {
+    mockGetAccount.mockClear()
+    mockPrepareTransaction.mockClear()
+    mockGetNetwork.mockResolvedValueOnce({ passphrase: Networks.PUBLIC, protocolVersion: '22' })
+
+    const method = charge({
+      keypair: TEST_KEYPAIR,
+      network: STELLAR_TESTNET,
+      rpcUrl: 'https://charge-mismatch.example.com',
+    })
+
+    await expect(
+      method.createCredential({ challenge: mockChallenge() as any, context: {} as any }),
+    ).rejects.toThrow(/does not serve "stellar:testnet"/)
+
+    // Rejection must happen before any chain state is read or signed over.
+    expect(mockGetAccount).not.toHaveBeenCalled()
+    expect(mockPrepareTransaction).not.toHaveBeenCalled()
+  })
+
+  it('accepts a custom rpcUrl that serves the expected network', async () => {
+    mockGetNetwork.mockResolvedValueOnce({
+      passphrase: Networks.TESTNET,
+      protocolVersion: '22',
+    })
+    mockGetAccount.mockResolvedValueOnce(new Account(TEST_KEYPAIR.publicKey(), '0'))
+    mockPrepareTransaction.mockResolvedValueOnce(await buildMockPreparedTx())
+
+    const method = charge({
+      keypair: TEST_KEYPAIR,
+      network: STELLAR_TESTNET,
+      rpcUrl: 'https://charge-match.example.com',
+    })
+
+    const credential = await method.createCredential({
+      challenge: mockChallenge() as any,
+      context: {} as any,
+    })
+
+    const token = credential.replace(/^Payment\s+/, '')
+    const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
+    expect(decoded.payload.type).toBe('transaction')
+  })
+
+  it('does not query the endpoint when rpcUrl is left to the default', async () => {
+    mockGetNetwork.mockClear()
+    mockGetAccount.mockResolvedValueOnce(new Account(TEST_KEYPAIR.publicKey(), '0'))
+    mockPrepareTransaction.mockResolvedValueOnce(await buildMockPreparedTx())
+
+    const method = charge({ keypair: TEST_KEYPAIR, network: STELLAR_TESTNET })
+
+    await method.createCredential({ challenge: mockChallenge() as any, context: {} as any })
+
+    // A default URL is derived from the resolved network, so it needs no check.
+    expect(mockGetNetwork).not.toHaveBeenCalled()
   })
 
   it('signs for pubnet when both the pin and the advertised network are pubnet', async () => {
