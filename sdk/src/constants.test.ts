@@ -1,3 +1,4 @@
+import { StrKey } from '@stellar/stellar-sdk'
 import { describe, expect, it } from 'vitest'
 import * as constants from './constants.js'
 
@@ -25,7 +26,7 @@ describe('constants', () => {
 
   it('exports USDC SAC contract addresses', () => {
     expect(constants.USDC_SAC_MAINNET).toBe(
-      'CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI',
+      'CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75',
     )
     expect(constants.USDC_SAC_TESTNET).toBe(
       'CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA',
@@ -34,7 +35,7 @@ describe('constants', () => {
 
   it('exports XLM SAC contract addresses', () => {
     expect(constants.XLM_SAC_MAINNET).toBe(
-      'CAS3J7GYLGVE45MR3HPSFG352DAANEV5GGMFTO3IZIE4JMCDALQO57Y',
+      'CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA',
     )
     expect(constants.XLM_SAC_TESTNET).toBe(
       'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC',
@@ -46,6 +47,17 @@ describe('constants', () => {
     expect(constants.SAC_ADDRESSES[STELLAR_TESTNET].USDC).toBe(constants.USDC_SAC_TESTNET)
     expect(constants.SAC_ADDRESSES[STELLAR_PUBNET].XLM).toBe(constants.XLM_SAC_MAINNET)
     expect(constants.SAC_ADDRESSES[STELLAR_TESTNET].XLM).toBe(constants.XLM_SAC_TESTNET)
+  })
+
+  // A malformed literal here is not a cosmetic problem: every entry is exported
+  // as public API and fed straight to `new Contract(...)`, so a bad address
+  // surfaces as an opaque failure inside the SDK rather than at the call site.
+  it('exports SAC_ADDRESSES entries that are all valid contract addresses', () => {
+    for (const [network, tokens] of Object.entries(constants.SAC_ADDRESSES)) {
+      for (const [symbol, address] of Object.entries(tokens)) {
+        expect(StrKey.isValidContract(address), `${network} ${symbol} (${address})`).toBe(true)
+      }
+    }
   })
 
   it('exports DEFAULT_DECIMALS as 7', () => {
