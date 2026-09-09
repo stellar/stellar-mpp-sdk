@@ -266,6 +266,7 @@ stellar.charge({
   pollDelayMs?: number,           // delay between poll attempts in ms (default: 1,000)
   pollTimeoutMs?: number,         // overall poll timeout in ms (default: 20,000)
   simulationTimeoutMs?: number,   // simulation timeout in ms (default: 10,000)
+  useUpgradedAuth?: boolean,      // request CAP-71 V2 auth entries in sponsored flows (default: false)
   onProgress?: (event) => void,   // lifecycle callback
 })
 ```

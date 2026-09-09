@@ -3849,6 +3849,107 @@ describe('charge validateAuthEntries (sponsored path)', () => {
     expect(receipt.status).toBe('success')
   })
 
+  it('accepts a CAP-71 V2 (address-bound) auth entry signed by the payer', async () => {
+    const expirySeconds = Math.floor(Date.now() / 1000) + 60
+    const futureExpiry = new Date(expirySeconds * 1000).toISOString()
+    const unsignedAuthEntry = new xdr.SorobanAuthorizationEntry({
+      credentials: xdr.SorobanCredentials.sorobanCredentialsAddressV2(
+        new xdr.SorobanAddressCredentials({
+          address: new Address(PAYER.publicKey()).toScAddress(),
+          nonce: xdr.Int64.fromString('0'),
+          signatureExpirationLedger: 1010,
+          signature: xdr.ScVal.scvVec([]),
+        }),
+      ),
+      rootInvocation: makeRootInvocation(),
+    })
+    // authorizeEntry keeps the V2 arm and signs the address-bound preimage.
+    const authEntry = await authorizeEntry(unsignedAuthEntry, PAYER, 1010, NETWORK_PASSPHRASE)
+    expect(authEntry.credentials().switch().name).toBe('sorobanCredentialsAddressV2')
+
+    mockGetLatestLedger.mockResolvedValueOnce({ sequence: 1000 })
+    mockGetAccount.mockResolvedValueOnce(new Account(signerKp.publicKey(), '100'))
+    mockSimulateTransaction.mockResolvedValueOnce({
+      result: { retval: null },
+      events: [defaultMockEvent()],
+      transactionData: new SorobanDataBuilder(),
+    })
+    mockSendTransaction.mockResolvedValueOnce({ hash: 'valid-v2-auth-hash', status: 'PENDING' })
+    mockGetTransaction.mockResolvedValueOnce({ status: 'SUCCESS' })
+
+    const cred = makeSponsoredCredential(
+      buildSponsoredTxWithAuth([authEntry], expirySeconds),
+      futureExpiry,
+    )
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      feePayer: { envelopeSigner: signerKp },
+      store: Store.memory(),
+    })
+
+    const receipt = await method.verify({
+      credential: cred as any,
+      request: cred.challenge.request,
+    })
+    expect(receipt.status).toBe('success')
+  })
+
+  it('rejects a V2 auth entry whose address matches the server signing key', async () => {
+    const authEntry = new xdr.SorobanAuthorizationEntry({
+      credentials: xdr.SorobanCredentials.sorobanCredentialsAddressV2(
+        new xdr.SorobanAddressCredentials({
+          address: new Address(signerKp.publicKey()).toScAddress(),
+          nonce: xdr.Int64.fromString('0'),
+          signatureExpirationLedger: 1010,
+          signature: xdr.ScVal.scvVec([]),
+        }),
+      ),
+      rootInvocation: makeRootInvocation(),
+    })
+
+    const cred = makeSponsoredCredential(buildSponsoredTxWithAuth([authEntry]))
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      feePayer: { envelopeSigner: signerKp },
+      store: Store.memory(),
+    })
+
+    await expect(
+      method.verify({ credential: cred as any, request: cred.challenge.request }),
+    ).rejects.toThrow('Server address must not appear in client auth entries')
+  })
+
+  it('rejects auth entry using delegated (CAP-71) credentials', async () => {
+    const authEntry = new xdr.SorobanAuthorizationEntry({
+      credentials: xdr.SorobanCredentials.sorobanCredentialsAddressWithDelegates(
+        new xdr.SorobanAddressCredentialsWithDelegates({
+          addressCredentials: new xdr.SorobanAddressCredentials({
+            address: new Address(PAYER.publicKey()).toScAddress(),
+            nonce: xdr.Int64.fromString('0'),
+            signatureExpirationLedger: 1010,
+            signature: xdr.ScVal.scvVec([]),
+          }),
+          delegates: [],
+        }),
+      ),
+      rootInvocation: makeRootInvocation(),
+    })
+
+    const cred = makeSponsoredCredential(buildSponsoredTxWithAuth([authEntry]))
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      feePayer: { envelopeSigner: signerKp },
+      store: Store.memory(),
+    })
+
+    await expect(
+      method.verify({ credential: cred as any, request: cred.challenge.request }),
+    ).rejects.toThrow('Only address-type auth entries are permitted')
+  })
+
   it('accepts an auth entry expiring a few ledgers past the strict bound (RPC ledger-view skew)', async () => {
     // Latest ledger 1000, challenge expires in ~60s → strict maxLedger = 1000 + ceil(60/5) = 1012.
     // The client and server read the latest ledger at different moments from a load-balanced

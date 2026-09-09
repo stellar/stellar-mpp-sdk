@@ -66,12 +66,12 @@
     "zod": "^4.4.3"
   },
   "peerDependencies": {
-    "@stellar/stellar-sdk": "^16.0.1",
+    "@stellar/stellar-sdk": "^16.3.0",
     "mppx": "^0.8.1"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@stellar/stellar-sdk": "^16.0.1",
+    "@stellar/stellar-sdk": "^16.3.0",
     "@types/express": "^5.0.6",
     "@types/node": "^26.0.1",
     "@vitest/coverage-v8": "^4.1.9",

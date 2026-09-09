@@ -5,6 +5,7 @@ import {
   Networks,
   StrKey,
   authorizeInvocation,
+  buildAuthorizationEntryPreimage,
   hash,
   nativeToScVal,
   scValToNative,
@@ -43,6 +44,54 @@ async function signedEntryFor(signer: Keypair): Promise<xdr.SorobanAuthorization
     invocation: transferInvocation(signer.publicKey()),
     publicKey: signer.publicKey(),
     networkPassphrase: NETWORK,
+  })
+}
+
+/**
+ * Builds an unsigned entry for `signer` under the given credential arm, then
+ * signs it over `preimage`. Used to cross the arms deliberately: a V2 entry
+ * carrying a V1-preimage signature (or vice versa) is exactly what an attacker
+ * who replays a legacy signature into the new arm would present.
+ */
+function entrySignedOver(
+  signer: Keypair,
+  arm: 'address' | 'addressV2',
+  preimage: 'address' | 'addressV2',
+): xdr.SorobanAuthorizationEntry {
+  const rootInvocation = transferInvocation(signer.publicKey())
+  const unsignedCreds = new xdr.SorobanAddressCredentials({
+    address: new Address(signer.publicKey()).toScAddress(),
+    nonce: new xdr.Int64(1),
+    signatureExpirationLedger: VALID_UNTIL_LEDGER,
+    signature: xdr.ScVal.scvVec([]),
+  })
+  const wrap = (creds: xdr.SorobanAddressCredentials, which: 'address' | 'addressV2') =>
+    which === 'address'
+      ? xdr.SorobanCredentials.sorobanCredentialsAddress(creds)
+      : xdr.SorobanCredentials.sorobanCredentialsAddressV2(creds)
+
+  // The SDK derives the preimage from the arm, so build the preimage from an
+  // entry wrapped in `preimage`'s arm, then attach the signature to `arm`.
+  const preimageEntry = new xdr.SorobanAuthorizationEntry({
+    credentials: wrap(unsignedCreds, preimage),
+    rootInvocation,
+  })
+  const payload = hash(
+    buildAuthorizationEntryPreimage(preimageEntry, VALID_UNTIL_LEDGER, NETWORK).toXDR(),
+  )
+  const sig = nativeToScVal(
+    { public_key: signer.rawPublicKey(), signature: signer.sign(payload) },
+    { type: { public_key: ['symbol', null], signature: ['symbol', null] } },
+  )
+  const signedCreds = new xdr.SorobanAddressCredentials({
+    address: unsignedCreds.address(),
+    nonce: unsignedCreds.nonce(),
+    signatureExpirationLedger: VALID_UNTIL_LEDGER,
+    signature: xdr.ScVal.scvVec([sig]),
+  })
+  return new xdr.SorobanAuthorizationEntry({
+    credentials: wrap(signedCreds, arm),
+    rootInvocation,
   })
 }
 
@@ -177,5 +226,92 @@ describe('verifyAuthEntrySignature', () => {
 
     expect(StrKey.encodeEd25519PublicKey(Buffer.from(sig.public_key))).toBe(signer.publicKey())
     expect(sig.signature.length).toBe(64)
+  })
+
+  // ── CAP-71 V2 (address-bound) credentials ──────────────────────────────
+
+  it('accepts a V2 entry signed by the authorizing account', async () => {
+    const signer = Keypair.random()
+    const entry = await authorizeInvocation({
+      signer,
+      validUntilLedgerSeq: VALID_UNTIL_LEDGER,
+      invocation: transferInvocation(signer.publicKey()),
+      publicKey: signer.publicKey(),
+      networkPassphrase: NETWORK,
+      authV2: true,
+    })
+    expect(entry.credentials().switch().name).toBe('sorobanCredentialsAddressV2')
+
+    expect(() => verifyAuthEntrySignature(entry, NETWORK)).not.toThrow()
+  })
+
+  it('verifies the same signature payload the SDK signs for both arms', () => {
+    // Pins the verifier to the SDK's preimage derivation per arm, so a change
+    // in either side is caught here rather than on-chain.
+    const signer = Keypair.random()
+    expect(() =>
+      verifyAuthEntrySignature(entrySignedOver(signer, 'address', 'address'), NETWORK),
+    ).not.toThrow()
+    expect(() =>
+      verifyAuthEntrySignature(entrySignedOver(signer, 'addressV2', 'addressV2'), NETWORK),
+    ).not.toThrow()
+  })
+
+  it('rejects a V2 entry carrying a signature over the legacy V1 preimage', () => {
+    const signer = Keypair.random()
+    const entry = entrySignedOver(signer, 'addressV2', 'address')
+
+    expect(() => verifyAuthEntrySignature(entry, NETWORK)).toThrow(
+      'does not match the authorization payload',
+    )
+  })
+
+  it('rejects a V1 entry carrying a signature over the V2 address-bound preimage', () => {
+    const signer = Keypair.random()
+    const entry = entrySignedOver(signer, 'address', 'addressV2')
+
+    expect(() => verifyAuthEntrySignature(entry, NETWORK)).toThrow(
+      'does not match the authorization payload',
+    )
+  })
+
+  it('rejects a V2 entry signed by a key other than the authorizing account', async () => {
+    const authorizer = Keypair.random()
+    const attacker = Keypair.random()
+    const entry = await authorizeInvocation({
+      signer: (preimage: xdr.HashIdPreimage) => ({
+        signature: attacker.sign(hash(preimage.toXDR())),
+        publicKey: attacker.publicKey(),
+      }),
+      validUntilLedgerSeq: VALID_UNTIL_LEDGER,
+      invocation: transferInvocation(authorizer.publicKey()),
+      publicKey: authorizer.publicKey(),
+      networkPassphrase: NETWORK,
+      authV2: true,
+    })
+
+    expect(() => verifyAuthEntrySignature(entry, NETWORK)).toThrow(
+      'key other than the authorizing account',
+    )
+  })
+
+  it('rejects delegated credentials, which wrap address credentials but cannot be verified here', () => {
+    const signer = Keypair.random()
+    const entry = new xdr.SorobanAuthorizationEntry({
+      credentials: xdr.SorobanCredentials.sorobanCredentialsAddressWithDelegates(
+        new xdr.SorobanAddressCredentialsWithDelegates({
+          addressCredentials: new xdr.SorobanAddressCredentials({
+            address: new Address(signer.publicKey()).toScAddress(),
+            nonce: new xdr.Int64(1),
+            signatureExpirationLedger: VALID_UNTIL_LEDGER,
+            signature: xdr.ScVal.scvVec([]),
+          }),
+          delegates: [],
+        }),
+      ),
+      rootInvocation: transferInvocation(signer.publicKey()),
+    })
+
+    expect(() => verifyAuthEntrySignature(entry, NETWORK)).toThrow('address credentials')
   })
 })

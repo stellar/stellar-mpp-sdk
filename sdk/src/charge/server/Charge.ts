@@ -43,6 +43,7 @@ import {
   DEFAULT_MAX_PUSH_PAYMENT_AGE_SECONDS,
 } from '../../shared/defaults.js'
 import { Semaphore } from '../../shared/semaphore.js'
+import { getAddressCredentials } from '../../shared/getAddressCredentials.js'
 
 type ChargePayload = z.output<(typeof Methods.charge)['schema']['credential']['payload']>
 type ChargeRequest = z.output<(typeof Methods.charge)['schema']['request']>
@@ -869,21 +870,14 @@ export function charge(parameters: charge.Parameters) {
       let transferAuthorized = false
       for (const entry of authEntries) {
         const credentials = entry.credentials()
+        const addressCred = getAddressCredentials(credentials)
 
-        // Reject non-address credential types — only sorobanCredentialsAddress is
-        // permitted. Source-account credentials would be implicitly authorized by the
-        // server's envelope signature, allowing the client to piggyback operations.
-        if (
-          credentials.switch().value !==
-          xdr.SorobanCredentialsType.sorobanCredentialsAddress().value
-        ) {
+        if (!addressCred) {
           throw new PaymentVerificationError(
             `${LOG_PREFIX} Only address-type auth entries are permitted.`,
             { credentialType: credentials.switch().name },
           )
         }
-
-        const addressCred = credentials.address()
 
         const entryAddress = Address.fromScAddress(addressCred.address())
         if (entryAddress.toString() === serverAddress.toString()) {

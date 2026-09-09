@@ -4,6 +4,7 @@ import {
   BASE_FEE,
   Contract,
   Keypair,
+  Transaction,
   TransactionBuilder,
   authorizeEntry,
   nativeToScVal,
@@ -27,6 +28,7 @@ import { resolveKeypair } from '../../shared/keypairs.js'
 import { resolveNetworkId, validateAmount } from '../../shared/validation.js'
 import { scValToBigInt } from '../../shared/scval.js'
 import { pollTransaction } from '../../shared/poll.js'
+import { getAddressCredentials } from '../../shared/getAddressCredentials.js'
 import {
   DEFAULT_POLL_MAX_ATTEMPTS,
   DEFAULT_POLL_DELAY_MS,
@@ -132,6 +134,27 @@ function assertTransactionAuthorizesOnlyTransfer(
   }
 }
 
+/**
+ * Simulates `tx` and assembles the footprint, resource fee, and recorded auth
+ * entries onto it. Equivalent to `rpc.Server.prepareTransaction`, except that
+ * `useUpgradedAuth` is forwarded to the RPC so it records CAP-71 V2
+ * (address-bound) auth entries when requested.
+ */
+async function prepareForSigning(
+  server: rpc.Server,
+  tx: Transaction,
+  useUpgradedAuth: boolean,
+): Promise<Transaction> {
+  if (!useUpgradedAuth) {
+    return server.prepareTransaction(tx)
+  }
+  const simulation = await server.simulateTransaction(tx, undefined, undefined, true)
+  if (rpc.Api.isSimulationError(simulation)) {
+    throw new StellarMppError(`Simulation failed: ${simulation.error}`)
+  }
+  return rpc.assembleTransaction(tx, simulation).build()
+}
+
 export function charge(parameters: charge.Parameters) {
   const {
     decimals = DEFAULT_DECIMALS,
@@ -145,6 +168,7 @@ export function charge(parameters: charge.Parameters) {
     secretKey,
     simulationTimeoutMs: _simulationTimeoutMs = DEFAULT_SIMULATION_TIMEOUT_MS,
     timeout = DEFAULT_TIMEOUT,
+    useUpgradedAuth = false,
   } = parameters
 
   if (!keypairParam && !secretKey) {
@@ -260,7 +284,7 @@ export function charge(parameters: charge.Parameters) {
         }
 
         const unsignedTx = sponsoredBuilder.build()
-        const prepared = await server.prepareTransaction(unsignedTx)
+        const prepared = await prepareForSigning(server, unsignedTx, useUpgradedAuth)
 
         const latestLedger = await server.getLatestLedger()
         let validUntilLedger: number
@@ -293,10 +317,12 @@ export function charge(parameters: charge.Parameters) {
           const authEntries = body.invokeHostFunctionOp().auth()
           for (let i = 0; i < authEntries.length; i++) {
             const entry = authEntries[i]
-            if (
-              entry.credentials().switch().value ===
-              StellarXdr.SorobanCredentialsType.sorobanCredentialsAddress().value
-            ) {
+            // Sign both the legacy V1 arm and the CAP-71 V2 arm; simulation
+            // returns V2 entries once the RPC (or the SDK default) opts into
+            // upgraded auth. `authorizeEntry` picks the matching preimage for
+            // each arm. Anything else (source-account, delegated) is left
+            // untouched and rejected by the server's credential checks.
+            if (getAddressCredentials(entry.credentials())) {
               authEntries[i] = await authorizeEntry(
                 entry,
                 clientKP,
@@ -345,7 +371,7 @@ export function charge(parameters: charge.Parameters) {
       const transaction = builder.build()
 
       // Simulate to attach Soroban resource data
-      const prepared = await server.prepareTransaction(transaction)
+      const prepared = await prepareForSigning(server, transaction, useUpgradedAuth)
 
       // The envelope signature authorizes the entire Soroban auth tree, so
       // confirm it is exactly the intended transfer before signing.
@@ -444,5 +470,18 @@ export declare namespace charge {
     pollTimeoutMs?: number
     /** Simulation timeout in ms. @default 10_000 */
     simulationTimeoutMs?: number
+    /**
+     * Ask simulation to record CAP-71 `SOROBAN_CREDENTIALS_ADDRESS_V2`
+     * (address-bound) authorization entries instead of the legacy
+     * `SOROBAN_CREDENTIALS_ADDRESS` arm. Only affects sponsored flows, where the
+     * client signs auth entries rather than the envelope. Requires an RPC on a
+     * CAP-71 network (Protocol 28+).
+     *
+     * `false` matches stellar-sdk 16's `prepareTransaction` default; stellar-sdk
+     * 17 flips its own default to `true`.
+     *
+     * @default false
+     */
+    useUpgradedAuth?: boolean
   }
 }

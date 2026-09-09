@@ -7,15 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Raise the `@stellar/stellar-sdk` peer dependency to `^16.3.0` (from `^16.0.1`) — consumers must bump. Development builds track the same version [#TBD](https://github.com/stellar/stellar-mpp-sdk/pull/TBD)
+- Move Soroban RPC calls in channel credential verification (commitment-signature simulation and the on-chain state query) out of the cumulative lock, so a slow RPC no longer stalls every concurrent payer on a channel. The authoritative cumulative check and write still run under the lock. Adds a `verifyMaxConcurrent` channel server option (default 10) bounding how many verifications may hold RPC calls at once [#61](https://github.com/stellar/stellar-mpp-sdk/pull/61)
+- Upgrade dependencies to the latest versions clearing the 7-day `minimumReleaseAge` soak, including the `@stellar/stellar-sdk` (`^16.0.1`, major) and `mppx` (`^0.8.1`) peer dependencies — consumers should bump both [#54](https://github.com/stellar/stellar-mpp-sdk/pull/54)
+
+### Fixed
+
+- Accept CAP-71 `SOROBAN_CREDENTIALS_ADDRESS_V2` auth entries alongside the legacy address arm across the charge client signing loop, the sponsored-flow server checks, and off-chain signature verification. The verifier now derives the signature payload with the SDK's `buildAuthorizationEntryPreimage`, so V2 entries are checked against the address-bound preimage the network validates; delegated credentials remain rejected. The charge client gains a `useUpgradedAuth` option that asks simulation for V2 entries in sponsored flows. The `@stellar/stellar-sdk` peer minimum rises to 16.3.0, whose `simulateTransaction` accepts the `useUpgradedAuth` flag [#TBD](https://github.com/stellar/stellar-mpp-sdk/pull/TBD)
+
 ### Security
 
 - Pin transitive development dependencies (`ip-address`, `postcss`, `brace-expansion`) via `pnpm.overrides` to clear advisories in third-party packages. All three are build- and test-time only, so the published package is unaffected [#62](https://github.com/stellar/stellar-mpp-sdk/pull/62)
   - Drop the now-redundant `form-data` and `vite` overrides — their parents' ranges already resolve to a patched version unaided
-
-### Changed
-
-- Move Soroban RPC calls in channel credential verification (commitment-signature simulation and the on-chain state query) out of the cumulative lock, so a slow RPC no longer stalls every concurrent payer on a channel. The authoritative cumulative check and write still run under the lock. Adds a `verifyMaxConcurrent` channel server option (default 10) bounding how many verifications may hold RPC calls at once [#61](https://github.com/stellar/stellar-mpp-sdk/pull/61)
-- Upgrade dependencies to the latest versions clearing the 7-day `minimumReleaseAge` soak, including the `@stellar/stellar-sdk` (`^16.0.1`, major) and `mppx` (`^0.8.1`) peer dependencies — consumers should bump both [#54](https://github.com/stellar/stellar-mpp-sdk/pull/54)
 
 ## [0.7.1]
 
