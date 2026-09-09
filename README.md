@@ -296,7 +296,7 @@ stellar.channel({
   pollDelayMs?: number,           // delay between poll attempts in ms (default: 1,000)
   pollTimeoutMs?: number,         // overall poll timeout in ms (default: 20,000)
   simulationTimeoutMs?: number,   // simulation timeout in ms (default: 10,000)
-  verifyMaxConcurrent?: number, // max verifications making RPC calls at once (default: 10)
+  verifyMaxConcurrent?: number, // max concurrent on-chain state reads (default: 10)
   logger?: Logger,                // structured logger (default: no-op)
 })
 ```

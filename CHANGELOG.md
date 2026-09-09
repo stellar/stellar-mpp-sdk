@@ -9,11 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Build the channel commitment message locally instead of fetching it from an unauthenticated `prepare_commitment` simulation. The server previously verified a client's signature against bytes returned by RPC while crediting the amount from the credential payload, so a compromised or intercepted RPC endpoint could have returned a commitment for a smaller amount than the one being credited. The bytes are now derived from the amount, channel and network the server already holds, so they cannot disagree with what is credited [#64](https://github.com/stellar/stellar-mpp-sdk/pull/64)
 - Pin transitive development dependencies (`ip-address`, `postcss`, `brace-expansion`) via `pnpm.overrides` to clear advisories in third-party packages. All three are build- and test-time only, so the published package is unaffected [#62](https://github.com/stellar/stellar-mpp-sdk/pull/62)
   - Drop the now-redundant `form-data` and `vite` overrides — their parents' ranges already resolve to a patched version unaided
 
 ### Changed
 
+- Remove the per-voucher `prepare_commitment` RPC round trip from both channel client and server. The commitment message is fully determined by the amount, channel, network and a constant domain separator, so it is now built locally: signing and verification are CPU-only, and a payer no longer needs RPC reachability to sign a voucher. A live parity test (`integration/live`) asserts the local encoding matches the deployed contract byte-for-byte, replacing the contract round trip as the drift guard. `verifyMaxConcurrent` now bounds only the on-chain state read; the client's `rpcUrl` and `simulationTimeoutMs` options are deprecated and ignored [#64](https://github.com/stellar/stellar-mpp-sdk/pull/64)
 - Move Soroban RPC calls in channel credential verification (commitment-signature simulation and the on-chain state query) out of the cumulative lock, so a slow RPC no longer stalls every concurrent payer on a channel. The authoritative cumulative check and write still run under the lock. Adds a `verifyMaxConcurrent` channel server option (default 10) bounding how many verifications may hold RPC calls at once [#61](https://github.com/stellar/stellar-mpp-sdk/pull/61)
 - Upgrade dependencies to the latest versions clearing the 7-day `minimumReleaseAge` soak, including the `@stellar/stellar-sdk` (`^16.0.1`, major) and `mppx` (`^0.8.1`) peer dependencies — consumers should bump both [#54](https://github.com/stellar/stellar-mpp-sdk/pull/54)
 

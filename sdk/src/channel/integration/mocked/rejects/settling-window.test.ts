@@ -1,5 +1,7 @@
 import { Account, Keypair } from '@stellar/stellar-sdk'
 import { Challenge, Credential, Store } from 'mppx'
+import { STELLAR_TESTNET } from '../../../../constants.js'
+import { buildCommitmentMessage } from '../../../commitment.js'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 // End-to-end settling-window rejection.
@@ -56,7 +58,15 @@ function makeSignedCredential(opts: {
   challengeAmount: string
   previousCumulative?: string
 }) {
-  const sigHex = Buffer.from(COMMITMENT_KEY.sign(opts.commitmentBytes)).toString('hex')
+  const sigHex = Buffer.from(
+    COMMITMENT_KEY.sign(
+      buildCommitmentMessage({
+        channel: CHANNEL_ADDRESS,
+        amount: opts.cumulativeAmount,
+        network: STELLAR_TESTNET,
+      }),
+    ),
+  ).toString('hex')
   const challenge = Challenge.from({
     id: `test-${crypto.randomUUID()}`,
     realm: 'localhost',
