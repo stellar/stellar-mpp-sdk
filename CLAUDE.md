@@ -9,7 +9,7 @@ Stellar MPP SDK — a TypeScript SDK implementing Stellar blockchain payment met
 - **Charge**: One-time on-chain SEP-41 token transfers with pull/push credential modes
 - **Channel**: Off-chain payment commitments via one-way payment channel contracts (batch settlement on close)
 
-Built on the `mppx` framework. Peer dependencies: `@stellar/stellar-sdk` (^15.1.0) and `mppx` (^0.6.29).
+Built on the `mppx` framework. Peer dependencies: `@stellar/stellar-sdk` (^16.3.0) and `mppx` (^0.8.1).
 
 ## Terminology
 

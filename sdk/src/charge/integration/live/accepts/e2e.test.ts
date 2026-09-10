@@ -41,10 +41,14 @@ const flowPayers = {
   flow4: Keypair.random(),
   flow5: Keypair.random(),
   flow6: Keypair.random(),
+  flow5v2: Keypair.random(),
+  flow6v2: Keypair.random(),
 }
 const sponsoredEnvelopeSigners = {
   flow5: Keypair.random(),
   flow6: Keypair.random(),
+  flow5v2: Keypair.random(),
+  flow6v2: Keypair.random(),
 }
 const TEST_RECIPIENT = Keypair.random().publicKey()
 const TEST_FEE_PAYER = Keypair.random()
@@ -223,8 +227,15 @@ async function runChargeFlow(opts: {
 // broadcast under load, or a just-broadcast tx is briefly invisible to a
 // load-balanced RPC node. They warrant retrying the whole round-trip. A genuine
 // rejection (e.g. enforce-mode auth failure) does not match and propagates.
+//
+// `Response.clone: Body has already been consumed` is mppx@0.8.1's client
+// masking whatever error createCredential threw (it clones the already-read 402
+// while building its payment.failed payload). It hides the real cause, which in
+// this suite is overwhelmingly a just-funded account not yet visible to the RPC,
+// so treat it as retryable; a persistent failure still surfaces after the
+// retries are exhausted.
 const TRANSIENT_BROADCAST_ERROR =
-  /sendTransaction returned ERROR|Broadcast failed|not found on-chain|NOT_FOUND|Account not found|did not settle/i
+  /sendTransaction returned ERROR|Broadcast failed|not found on-chain|NOT_FOUND|Account not found|did not settle|Body has already been consumed/i
 
 /**
  * Runs a charge round-trip, retrying the whole flow on transient testnet
@@ -296,6 +307,25 @@ function expectFeeBumpEnvelope(
   expect(innerEnv.signatures.length).toBe(1)
   expect(innerEnv.signatures[0].hint()).toEqual(innerKP.signatureHint())
   return outerEnv
+}
+
+/**
+ * Asserts every auth entry on the settled inner transaction carries the CAP-71
+ * V2 (address-bound) credential arm, i.e. the server did not downgrade or
+ * rebuild the client's entries on the way to the chain.
+ */
+function expectV2AuthEntries(inner: Transaction): void {
+  const arms = inner
+    .toEnvelope()
+    .v1()
+    .tx()
+    .operations()
+    .filter((op) => op.body().switch().name === 'invokeHostFunction')
+    .flatMap((op) => op.body().invokeHostFunctionOp().auth())
+    .map((entry) => entry.credentials().switch().name)
+
+  expect(arms.length).toBeGreaterThan(0)
+  expect([...new Set(arms)]).toEqual(['sorobanCredentialsAddressV2'])
 }
 
 // Friendbot and the Soroban RPC are separate services: friendbot submits the
@@ -392,5 +422,26 @@ describe('charge e2e (testnet)', () => {
       clientMethod: clientCharge({ keypair: flowPayers.flow6 }),
     }))
     expectFeeBumpEnvelope(tx, TEST_FEE_PAYER, sponsoredEnvelopeSigners.flow6)
+  }, 240_000)
+
+  it('flow 5 (V2): pull, sponsored, CAP-71 address-bound credentials', async () => {
+    const tx = await runChargeFlowWithRetry(() => ({
+      serverMethod: makeServerMethod({ envelopeSigner: sponsoredEnvelopeSigners.flow5v2 }),
+      clientMethod: clientCharge({ keypair: flowPayers.flow5v2, useUpgradedAuth: true }),
+    }))
+    const inner = expectPlainEnvelope(tx, sponsoredEnvelopeSigners.flow5v2)
+    expectV2AuthEntries(inner)
+  }, 240_000)
+
+  it('flow 6 (V2): pull, sponsored + FeeBump, CAP-71 address-bound credentials', async () => {
+    const tx = await runChargeFlowWithRetry(() => ({
+      serverMethod: makeServerMethod({
+        envelopeSigner: sponsoredEnvelopeSigners.flow6v2,
+        feeBumpSigner: TEST_FEE_PAYER,
+      }),
+      clientMethod: clientCharge({ keypair: flowPayers.flow6v2, useUpgradedAuth: true }),
+    }))
+    const outer = expectFeeBumpEnvelope(tx, TEST_FEE_PAYER, sponsoredEnvelopeSigners.flow6v2)
+    expectV2AuthEntries(outer.innerTransaction)
   }, 240_000)
 })

@@ -5,8 +5,11 @@ import {
   Keypair,
   Memo,
   Operation,
+  SorobanDataBuilder,
   TransactionBuilder,
   authorizeInvocation,
+  buildAuthorizationEntryPreimage,
+  hash,
   nativeToScVal,
   xdr,
   scValToNative,
@@ -28,6 +31,7 @@ const mockPrepareTransaction = vi.fn()
 const mockGetLatestLedger = vi.fn()
 const mockSendTransaction = vi.fn()
 const mockGetTransaction = vi.fn()
+const mockSimulateTransaction = vi.fn()
 
 vi.mock('@stellar/stellar-sdk', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@stellar/stellar-sdk')>()
@@ -41,6 +45,7 @@ vi.mock('@stellar/stellar-sdk', async (importOriginal) => {
         this.getLatestLedger = mockGetLatestLedger
         this.sendTransaction = mockSendTransaction
         this.getTransaction = mockGetTransaction
+        this.simulateTransaction = mockSimulateTransaction
       }),
     },
   }
@@ -69,22 +74,29 @@ function mockChallenge(overrides: Record<string, unknown> = {}) {
   })
 }
 
-function buildMockPreparedTx() {
-  const account = new Account(TEST_KEYPAIR.publicKey(), '0')
-  const contract = new Contract(USDC_SAC_TESTNET)
-  const transferOp = contract.call(
+/** The SEP-41 transfer operation the client pays with, as the SDK builds it. */
+function buildTransferOp() {
+  return new Contract(USDC_SAC_TESTNET).call(
     'transfer',
     new Address(TEST_KEYPAIR.publicKey()).toScVal(),
     new Address(RECIPIENT).toScVal(),
     nativeToScVal(100000n, { type: 'i128' }),
   )
-  return new TransactionBuilder(account, {
+}
+
+/** Wraps an operation in a testnet transaction sourced from `source`. */
+function buildTx(source: string, op: xdr.Operation) {
+  return new TransactionBuilder(new Account(source, '0'), {
     fee: '100',
-    networkPassphrase: 'Test SDF Network ; September 2015',
+    networkPassphrase: NETWORK_PASSPHRASE[STELLAR_TESTNET],
   })
-    .addOperation(transferOp)
+    .addOperation(op)
     .setTimeout(180)
     .build()
+}
+
+function buildMockPreparedTx() {
+  return buildTx(TEST_KEYPAIR.publicKey(), buildTransferOp())
 }
 
 function buildMockPrepareTxAuthEntry() {
@@ -162,14 +174,7 @@ async function buildTxWithAuthInvocation(opts: {
   source: string
   rootInvocation: xdr.SorobanAuthorizedInvocation
 }) {
-  const account = new Account(opts.source, '0')
-  const contract = new Contract(USDC_SAC_TESTNET)
-  const transferOp = contract.call(
-    'transfer',
-    new Address(TEST_KEYPAIR.publicKey()).toScVal(),
-    new Address(RECIPIENT).toScVal(),
-    nativeToScVal(100000n, { type: 'i128' }),
-  )
+  const transferOp = buildTransferOp()
   const auth = await authorizeInvocation({
     signer: TEST_KEYPAIR,
     validUntilLedgerSeq: 1000,
@@ -177,13 +182,126 @@ async function buildTxWithAuthInvocation(opts: {
     networkPassphrase: NETWORK_PASSPHRASE[STELLAR_TESTNET],
   })
   transferOp.body().invokeHostFunctionOp().auth().push(auth)
-  return new TransactionBuilder(account, {
-    fee: '100',
-    networkPassphrase: NETWORK_PASSPHRASE[STELLAR_TESTNET],
+  return buildTx(opts.source, transferOp)
+}
+
+type CredentialArm = 'address' | 'addressV2' | 'addressWithDelegates'
+
+// One *unsigned* auth entry for the client's transfer, under the given
+// credential arm. V1 is what pre-CAP-71 RPCs return; V2 is what an RPC (or SDK)
+// opted into upgraded auth returns; delegated is an arm the client cannot sign.
+function unsignedAuthEntry(arm: CredentialArm) {
+  const addressCredentials = new xdr.SorobanAddressCredentials({
+    address: new Address(TEST_KEYPAIR.publicKey()).toScAddress(),
+    nonce: new xdr.Int64(1),
+    signatureExpirationLedger: 0,
+    signature: xdr.ScVal.scvVoid(),
   })
-    .addOperation(transferOp)
-    .setTimeout(180)
-    .build()
+
+  let credentials: xdr.SorobanCredentials
+  switch (arm) {
+    case 'address':
+      credentials = xdr.SorobanCredentials.sorobanCredentialsAddress(addressCredentials)
+      break
+    case 'addressV2':
+      credentials = xdr.SorobanCredentials.sorobanCredentialsAddressV2(addressCredentials)
+      break
+    case 'addressWithDelegates':
+      credentials = xdr.SorobanCredentials.sorobanCredentialsAddressWithDelegates(
+        new xdr.SorobanAddressCredentialsWithDelegates({ addressCredentials, delegates: [] }),
+      )
+      break
+  }
+
+  return new xdr.SorobanAuthorizationEntry({
+    credentials,
+    rootInvocation: transferInvocation(
+      USDC_SAC_TESTNET,
+      transferArgs(TEST_KEYPAIR.publicKey(), RECIPIENT, 100000n),
+    ),
+  })
+}
+
+// Mocks the sponsored pull-mode flow: `prepareTransaction` hands back the
+// transfer tx carrying one unsigned auth entry for the client to sign.
+function mockSponsoredPrepare(arm: CredentialArm) {
+  const transferOp = buildTransferOp()
+  transferOp.body().invokeHostFunctionOp().auth().push(unsignedAuthEntry(arm))
+
+  mockGetAccount.mockResolvedValueOnce(new Account(TEST_KEYPAIR.publicKey(), '0'))
+  mockPrepareTransaction.mockResolvedValueOnce(buildTx(ALL_ZEROS, transferOp))
+  mockGetLatestLedger.mockResolvedValueOnce({ sequence: 50 })
+}
+
+// Mocks the same flow under `useUpgradedAuth`, where the client simulates
+// directly and the unsigned entry comes back on the simulation result (which
+// `assembleTransaction` then folds into the prepared tx).
+function mockSponsoredSimulation(arm: 'address' | 'addressV2') {
+  mockGetAccount.mockResolvedValueOnce(new Account(TEST_KEYPAIR.publicKey(), '0'))
+  mockSimulateTransaction.mockResolvedValueOnce({
+    _parsed: true,
+    id: 'sim-1',
+    latestLedger: 50,
+    events: [],
+    minResourceFee: '100',
+    transactionData: new SorobanDataBuilder(),
+    result: { auth: [unsignedAuthEntry(arm)], retval: xdr.ScVal.scvVoid() },
+  })
+  mockGetLatestLedger.mockResolvedValueOnce({ sequence: 50 })
+}
+
+// Runs pull mode against a sponsored (feePayer) challenge and returns the
+// transaction the client put in its credential.
+async function createSponsoredTx(opts: { useUpgradedAuth?: boolean } = {}) {
+  const method = charge({ keypair: TEST_KEYPAIR, mode: 'pull', ...opts })
+  const credential = await method.createCredential({
+    challenge: mockChallenge({
+      methodDetails: { network: 'stellar:testnet', feePayer: true },
+    }) as any,
+    context: {} as any,
+  })
+  return decodeCredentialTx(credential)
+}
+
+// Decodes a `Payment <base64 token>` credential back into its JSON body.
+function decodeCredential(credential: string) {
+  return JSON.parse(Buffer.from(credential.replace(/^Payment\s+/, ''), 'base64').toString('utf8'))
+}
+
+// The transaction carried by a decoded `type: 'transaction'` credential.
+function decodeCredentialTx(credential: string): Transaction {
+  return TransactionBuilder.fromXDR(
+    decodeCredential(credential).payload.transaction,
+    NETWORK_PASSPHRASE[STELLAR_TESTNET],
+  ) as Transaction
+}
+
+// The one auth entry the client is expected to have put on the transaction.
+function soleAuthEntry(tx: Transaction) {
+  const op = tx.operations[0] as Operation.InvokeHostFunction
+  expect(op.auth?.length).toBe(1)
+  return op.auth![0]
+}
+
+// Checks the client's signature independently of the SDK's own verifier: the
+// signature must be over the preimage the network derives for the entry's arm.
+function expectSignedByClient(
+  entry: xdr.SorobanAuthorizationEntry,
+  addressCredentials: xdr.SorobanAddressCredentials,
+) {
+  const [sig] = scValToNative(addressCredentials.signature()) as Array<{
+    public_key: Uint8Array
+    signature: Uint8Array
+  }>
+  expect(Buffer.from(sig.public_key)).toEqual(TEST_KEYPAIR.rawPublicKey())
+  const payload = hash(
+    buildAuthorizationEntryPreimage(
+      entry,
+      addressCredentials.signatureExpirationLedger(),
+      NETWORK_PASSPHRASE[STELLAR_TESTNET],
+    ).toXDR(),
+  )
+  expect(TEST_KEYPAIR.verify(payload, Buffer.from(sig.signature))).toBe(true)
 }
 
 // ── Construction tests ─────────────────────────────────────────────────────
@@ -288,8 +406,7 @@ describe('charge createCredential', () => {
     })
 
     // Decode the credential
-    const token = credential.replace(/^Payment\s+/, '')
-    const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
+    const decoded = decodeCredential(credential)
 
     expect(decoded.payload.type).toBe('transaction')
     expect(typeof decoded.payload.transaction).toBe('string')
@@ -314,12 +431,8 @@ describe('charge createCredential', () => {
     })
 
     // Decode the credential and transaction
-    const token = credential.replace(/^Payment\s+/, '')
-    const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
-    const tx = TransactionBuilder.fromXDR(
-      decoded.payload.transaction,
-      NETWORK_PASSPHRASE[STELLAR_TESTNET],
-    ) as Transaction
+    const decoded = decodeCredential(credential)
+    const tx = decodeCredentialTx(credential)
     const op = tx.operations[0] as Operation.InvokeHostFunction
 
     // Should still be a valid transaction payload, but an unsigned envelope
@@ -397,8 +510,7 @@ describe('charge createCredential', () => {
     expect(types).toContain('paid')
 
     // Decode to verify signedHash payload and sourceSignature
-    const token = credential.replace(/^Payment\s+/, '')
-    const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
+    const decoded = decodeCredential(credential)
     expect(decoded.payload.type).toBe('signedHash')
     expect(decoded.payload.hash).toBe('push-tx-hash-abc')
 
@@ -487,8 +599,7 @@ describe('charge createCredential', () => {
     })
 
     // Should produce a transaction credential
-    const token = credential.replace(/^Payment\s+/, '')
-    const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
+    const decoded = decodeCredential(credential)
     expect(decoded.payload.type).toBe('transaction')
   })
 
@@ -533,8 +644,7 @@ describe('charge createCredential', () => {
     })
 
     // Should produce a transaction credential (legacy behavior)
-    const token = credential.replace(/^Payment\s+/, '')
-    const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
+    const decoded = decodeCredential(credential)
     expect(decoded.payload.type).toBe('transaction')
   })
 
@@ -554,8 +664,7 @@ describe('charge createCredential', () => {
         context: {} as any,
       })
 
-      const token = credential.replace(/^Payment\s+/, '')
-      const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
+      const decoded = decodeCredential(credential)
       expect(decoded.payload.type).not.toBe('hash')
     }
 
@@ -587,8 +696,7 @@ describe('charge createCredential', () => {
         context: {} as any,
       })
 
-      const token = credential.replace(/^Payment\s+/, '')
-      const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
+      const decoded = decodeCredential(credential)
       expect(decoded.payload.type).not.toBe('hash')
       expect(decoded.payload.type).toBe('signedHash')
     }
@@ -632,6 +740,97 @@ describe('charge createCredential', () => {
     expect(capturedTransaction).toBeDefined()
     // TransactionBuilder uses Memo.none() by default, not undefined
     expect(capturedTransaction.memo.type).toBe('none')
+  })
+
+  // ── CAP-71 credential arms in the sponsored path ─────────────────────────
+
+  it('signs a V1 auth entry returned by simulation over the legacy preimage', async () => {
+    mockSponsoredPrepare('address')
+
+    const entry = soleAuthEntry(await createSponsoredTx())
+    const creds = entry.credentials()
+
+    expect(creds.switch().name).toBe('sorobanCredentialsAddress')
+    expectSignedByClient(entry, creds.address())
+  })
+
+  it('signs a CAP-71 V2 auth entry returned by simulation over the address-bound preimage', async () => {
+    mockSponsoredPrepare('addressV2')
+
+    const entry = soleAuthEntry(await createSponsoredTx())
+    const creds = entry.credentials()
+
+    // The arm must be preserved: downgrading to V1 would produce an entry the
+    // network rejects once V2 is mandatory.
+    expect(creds.switch().name).toBe('sorobanCredentialsAddressV2')
+    expect(Address.fromScAddress(creds.addressV2().address()).toString()).toBe(
+      TEST_KEYPAIR.publicKey(),
+    )
+    expect(creds.addressV2().signatureExpirationLedger()).toBeGreaterThan(50)
+    expectSignedByClient(entry, creds.addressV2())
+  })
+
+  it('does not sign a delegated-credentials auth entry returned by simulation', async () => {
+    mockSponsoredPrepare('addressWithDelegates')
+
+    const creds = soleAuthEntry(await createSponsoredTx()).credentials()
+
+    expect(creds.switch().name).toBe('sorobanCredentialsAddressWithDelegates')
+    // Left exactly as simulation produced it; the server rejects this arm.
+    expect(creds.addressWithDelegates().addressCredentials().signature().switch().name).toBe(
+      'scvVoid',
+    )
+  })
+
+  // ── useUpgradedAuth ──────────────────────────────────────────────────────
+
+  it('requests V2 auth entries from simulation when useUpgradedAuth is set', async () => {
+    mockPrepareTransaction.mockClear()
+    mockSimulateTransaction.mockClear()
+    mockSponsoredSimulation('addressV2')
+
+    const tx = await createSponsoredTx({ useUpgradedAuth: true })
+
+    // Simulation is asked for upgraded auth; prepareTransaction (which cannot
+    // pass the flag on stellar-sdk 16) is bypassed.
+    expect(mockPrepareTransaction).not.toHaveBeenCalled()
+    expect(mockSimulateTransaction).toHaveBeenCalledTimes(1)
+    expect(mockSimulateTransaction.mock.calls[0][3]).toBe(true)
+
+    expect(tx.source).toBe(ALL_ZEROS)
+    expect(tx.signatures.length).toBe(0)
+    const entry = soleAuthEntry(tx)
+    const creds = entry.credentials()
+    expect(creds.switch().name).toBe('sorobanCredentialsAddressV2')
+    expect(creds.addressV2().signatureExpirationLedger()).toBeGreaterThan(50)
+    expectSignedByClient(entry, creds.addressV2())
+  })
+
+  it('keeps using prepareTransaction (legacy V1 entries) when useUpgradedAuth is off', async () => {
+    mockPrepareTransaction.mockClear()
+    mockSimulateTransaction.mockClear()
+    mockSponsoredPrepare('address')
+
+    const creds = soleAuthEntry(await createSponsoredTx()).credentials()
+
+    expect(mockSimulateTransaction).not.toHaveBeenCalled()
+    expect(mockPrepareTransaction).toHaveBeenCalledTimes(1)
+    expect(creds.switch().name).toBe('sorobanCredentialsAddress')
+  })
+
+  it('surfaces a simulation error when useUpgradedAuth is set', async () => {
+    mockGetAccount.mockResolvedValueOnce(new Account(TEST_KEYPAIR.publicKey(), '0'))
+    mockSimulateTransaction.mockResolvedValueOnce({
+      _parsed: true,
+      id: 'sim-err',
+      latestLedger: 50,
+      events: [],
+      error: 'HostError: Error(Contract, #10)',
+    })
+
+    await expect(createSponsoredTx({ useUpgradedAuth: true })).rejects.toThrow(
+      /Simulation failed: HostError/,
+    )
   })
 
   it('refuses to sign a sponsored auth tree carrying hidden sub-invocations', async () => {
@@ -729,8 +928,7 @@ describe('charge createCredential', () => {
       context: {} as any,
     })
 
-    const token = credential.replace(/^Payment\s+/, '')
-    const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
+    const decoded = decodeCredential(credential)
     expect(decoded.source).toMatch(/^did:pkh:stellar:pubnet:G/)
   })
 })

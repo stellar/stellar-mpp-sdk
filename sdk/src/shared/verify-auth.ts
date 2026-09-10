@@ -1,5 +1,14 @@
-import { Address, Keypair, StrKey, hash, scValToNative, xdr } from '@stellar/stellar-sdk'
+import {
+  Address,
+  Keypair,
+  StrKey,
+  buildAuthorizationEntryPreimage,
+  hash,
+  scValToNative,
+  xdr,
+} from '@stellar/stellar-sdk'
 import { StellarMppError } from './errors.js'
+import { getAddressCredentials } from './getAddressCredentials.js'
 
 /**
  * Verifies the ed25519 signature(s) carried by a Soroban authorization entry's
@@ -27,13 +36,12 @@ export function verifyAuthEntrySignature(
   networkPassphrase: string,
 ): void {
   const credentials = entry.credentials()
-  if (credentials.switch().value !== xdr.SorobanCredentialsType.sorobanCredentialsAddress().value) {
+  const addressCred = getAddressCredentials(credentials)
+  if (!addressCred) {
     throw new StellarMppError('Auth entry must use address credentials to verify its signature.', {
       credentialType: credentials.switch().name,
     })
   }
-
-  const addressCred = credentials.address()
 
   const authorizer = addressCred.address()
   if (authorizer.switch().value !== xdr.ScAddressType.scAddressTypeAccount().value) {
@@ -44,13 +52,16 @@ export function verifyAuthEntrySignature(
   }
   const authorizerPublicKey = Address.fromScAddress(authorizer).toString()
 
-  const preimage = xdr.HashIdPreimage.envelopeTypeSorobanAuthorization(
-    new xdr.HashIdPreimageSorobanAuthorization({
-      networkId: hash(Buffer.from(networkPassphrase)),
-      nonce: addressCred.nonce(),
-      invocation: entry.rootInvocation(),
-      signatureExpirationLedger: addressCred.signatureExpirationLedger(),
-    }),
+  // The SDK derives the preimage from the credential arm: the legacy
+  // `sorobanCredentialsAddress` arm signs `ENVELOPE_TYPE_SOROBAN_AUTHORIZATION`,
+  // while the CAP-71 `sorobanCredentialsAddressV2` arm signs the address-bound
+  // `ENVELOPE_TYPE_SOROBAN_AUTHORIZATION_WITH_ADDRESS` preimage. Reusing the
+  // same builder `authorizeEntry` signs with keeps verifier and signer in
+  // lockstep, so a signature over the wrong arm's preimage is rejected.
+  const preimage = buildAuthorizationEntryPreimage(
+    entry,
+    addressCred.signatureExpirationLedger(),
+    networkPassphrase,
   )
   const payload = hash(preimage.toXDR())
 
