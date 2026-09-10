@@ -315,18 +315,17 @@ function expectFeeBumpEnvelope(
  * rebuild the client's entries on the way to the chain.
  */
 function expectV2AuthEntries(inner: Transaction): void {
-  const ops = inner.toEnvelope().v1().tx().operations()
-  const arms = ops.flatMap((op) =>
-    op.body().switch().name === 'invokeHostFunction'
-      ? op
-          .body()
-          .invokeHostFunctionOp()
-          .auth()
-          .map((e) => e.credentials().switch().name)
-      : [],
-  )
+  const arms = inner
+    .toEnvelope()
+    .v1()
+    .tx()
+    .operations()
+    .filter((op) => op.body().switch().name === 'invokeHostFunction')
+    .flatMap((op) => op.body().invokeHostFunctionOp().auth())
+    .map((entry) => entry.credentials().switch().name)
+
   expect(arms.length).toBeGreaterThan(0)
-  expect(arms.every((a) => a === 'sorobanCredentialsAddressV2')).toBe(true)
+  expect([...new Set(arms)]).toEqual(['sorobanCredentialsAddressV2'])
 }
 
 // Friendbot and the Soroban RPC are separate services: friendbot submits the

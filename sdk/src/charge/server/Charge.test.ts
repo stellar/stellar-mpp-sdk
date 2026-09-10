@@ -3650,6 +3650,9 @@ describe('charge sponsored path timeBounds', () => {
 describe('charge validateAuthEntries (sponsored path)', () => {
   const signerKp = Keypair.random()
 
+  /** The ledger an auth entry expires at unless a test pins its own. */
+  const AUTH_EXPIRY_LEDGER = 1010
+
   // Reset the broadcast spy before each test so the "never broadcast" assertions
   // reflect only the test under inspection (no module-level beforeEach resets it).
   beforeEach(() => {
@@ -3658,15 +3661,17 @@ describe('charge validateAuthEntries (sponsored path)', () => {
 
   /** Reuses the InvokeContractArgs from a real transfer op to keep the root
    *  invocation valid for XDR serialization purposes. */
-  function makeRootInvocation(subInvocations: xdr.SorobanAuthorizedInvocation[] = []) {
+  function transferContractArgs(
+    opts: { from?: string; to?: string; amount?: bigint } = {},
+  ): xdr.InvokeContractArgs {
     const tx = buildTransferTx({
       source: PAYER.publicKey(),
-      from: PAYER.publicKey(),
-      to: RECIPIENT,
-      amount: 10000000n,
+      from: opts.from ?? PAYER.publicKey(),
+      to: opts.to ?? RECIPIENT,
+      amount: opts.amount ?? 10000000n,
       currency: USDC_SAC_TESTNET,
     })
-    const invokeContractArgs = tx
+    return tx
       .toEnvelope()
       .v1()
       .tx()
@@ -3675,11 +3680,69 @@ describe('charge validateAuthEntries (sponsored path)', () => {
       .invokeHostFunctionOp()
       .hostFunction()
       .invokeContract()
+  }
+
+  /** The root invocation an honest client authorizes: the requested transfer,
+   *  with no sub-invocations. */
+  function makeRootInvocation(
+    opts: {
+      args?: xdr.InvokeContractArgs
+      subInvocations?: xdr.SorobanAuthorizedInvocation[]
+    } = {},
+  ) {
     return new xdr.SorobanAuthorizedInvocation({
-      function:
-        xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(invokeContractArgs),
-      subInvocations,
+      function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(
+        opts.args ?? transferContractArgs(),
+      ),
+      subInvocations: opts.subInvocations ?? [],
     })
+  }
+
+  type AuthEntryOpts = {
+    /** Authorizing address; defaults to the payer. */
+    address?: string
+    /** Credential arm: legacy V1, CAP-71 V2, or CAP-71 delegated. */
+    arm?: 'address' | 'addressV2' | 'addressWithDelegates'
+    expirationLedger?: number
+    signature?: xdr.ScVal
+    rootInvocation?: xdr.SorobanAuthorizedInvocation
+  }
+
+  /** An *unsigned* auth entry authorizing the requested transfer. */
+  function makeAuthEntry(opts: AuthEntryOpts = {}) {
+    const credentials = new xdr.SorobanAddressCredentials({
+      address: new Address(opts.address ?? PAYER.publicKey()).toScAddress(),
+      nonce: xdr.Int64.fromString('0'),
+      signatureExpirationLedger: opts.expirationLedger ?? AUTH_EXPIRY_LEDGER,
+      signature: opts.signature ?? xdr.ScVal.scvVec([]),
+    })
+    return new xdr.SorobanAuthorizationEntry({
+      credentials:
+        opts.arm === 'addressV2'
+          ? xdr.SorobanCredentials.sorobanCredentialsAddressV2(credentials)
+          : opts.arm === 'addressWithDelegates'
+            ? xdr.SorobanCredentials.sorobanCredentialsAddressWithDelegates(
+                new xdr.SorobanAddressCredentialsWithDelegates({
+                  addressCredentials: credentials,
+                  delegates: [],
+                }),
+              )
+            : xdr.SorobanCredentials.sorobanCredentialsAddress(credentials),
+      rootInvocation: opts.rootInvocation ?? makeRootInvocation(),
+    })
+  }
+
+  /** The same entry signed by `signer` (the payer by default), as an honest
+   *  client sends it. `authorizeEntry` preserves the credential arm. */
+  function makeSignedAuthEntry(opts: AuthEntryOpts & { signer?: Keypair } = {}) {
+    const signer = opts.signer ?? PAYER
+    const expirationLedger = opts.expirationLedger ?? AUTH_EXPIRY_LEDGER
+    return authorizeEntry(
+      makeAuthEntry({ address: signer.publicKey(), ...opts, expirationLedger }),
+      signer,
+      expirationLedger,
+      NETWORK_PASSPHRASE,
+    )
   }
 
   /** Builds a sponsored transaction XDR with the given auth entries injected.
@@ -3723,6 +3786,43 @@ describe('charge validateAuthEntries (sponsored path)', () => {
     )
   }
 
+  /** A sponsored credential whose challenge expires in `expiresInSeconds`, with
+   *  the tx's maxTime pinned to the same instant as an honest client would. */
+  function makeCredentialExpiringIn(
+    expiresInSeconds: number,
+    authEntries: xdr.SorobanAuthorizationEntry[],
+  ) {
+    const expirySeconds = Math.floor(Date.now() / 1000) + expiresInSeconds
+    return makeSponsoredCredential(
+      buildSponsoredTxWithAuth(authEntries, expirySeconds),
+      new Date(expirySeconds * 1000).toISOString(),
+    )
+  }
+
+  /** Mocks the RPC round-trip a successful sponsored settlement makes. */
+  function mockSuccessfulSettlement(hash: string, latestLedger = 1000) {
+    mockGetLatestLedger.mockResolvedValueOnce({ sequence: latestLedger })
+    mockGetAccount.mockResolvedValueOnce(new Account(signerKp.publicKey(), '100'))
+    mockSimulateTransaction.mockResolvedValueOnce({
+      result: { retval: null },
+      events: [defaultMockEvent()],
+      transactionData: new SorobanDataBuilder(),
+    })
+    mockSendTransaction.mockResolvedValueOnce({ hash, status: 'PENDING' })
+    mockGetTransaction.mockResolvedValueOnce({ status: 'SUCCESS' })
+  }
+
+  /** Verifies a credential against the sponsoring server method under test. */
+  function verifySponsored(cred: ReturnType<typeof makeSponsoredCredential>) {
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      feePayer: { envelopeSigner: signerKp },
+      store: Store.memory(),
+    })
+    return method.verify({ credential: cred as any, request: cred.challenge.request })
+  }
+
   it('rejects auth entry using source-account credentials', async () => {
     const authEntry = new xdr.SorobanAuthorizationEntry({
       credentials: xdr.SorobanCredentials.sorobanCredentialsSourceAccount(),
@@ -3730,224 +3830,76 @@ describe('charge validateAuthEntries (sponsored path)', () => {
     })
 
     const cred = makeSponsoredCredential(buildSponsoredTxWithAuth([authEntry]))
-    const method = charge({
-      recipient: RECIPIENT,
-      currency: USDC_SAC_TESTNET,
-      feePayer: { envelopeSigner: signerKp },
-      store: Store.memory(),
-    })
 
-    await expect(
-      method.verify({ credential: cred as any, request: cred.challenge.request }),
-    ).rejects.toThrow('Only address-type auth entries are permitted')
+    await expect(verifySponsored(cred)).rejects.toThrow(
+      'Only address-type auth entries are permitted',
+    )
+  })
+
+  it('rejects auth entry using delegated (CAP-71) credentials', async () => {
+    const cred = makeSponsoredCredential(
+      buildSponsoredTxWithAuth([makeAuthEntry({ arm: 'addressWithDelegates' })]),
+    )
+
+    await expect(verifySponsored(cred)).rejects.toThrow(
+      'Only address-type auth entries are permitted',
+    )
   })
 
   it('rejects auth entry whose address matches the server signing key', async () => {
-    const authEntry = new xdr.SorobanAuthorizationEntry({
-      credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
-        new xdr.SorobanAddressCredentials({
-          address: new Address(signerKp.publicKey()).toScAddress(),
-          nonce: xdr.Int64.fromString('0'),
-          signatureExpirationLedger: 1010,
-          signature: xdr.ScVal.scvVoid(),
-        }),
-      ),
-      rootInvocation: makeRootInvocation(),
-    })
+    const cred = makeSponsoredCredential(
+      buildSponsoredTxWithAuth([makeAuthEntry({ address: signerKp.publicKey() })]),
+    )
 
-    const cred = makeSponsoredCredential(buildSponsoredTxWithAuth([authEntry]))
-    const method = charge({
-      recipient: RECIPIENT,
-      currency: USDC_SAC_TESTNET,
-      feePayer: { envelopeSigner: signerKp },
-      store: Store.memory(),
-    })
+    await expect(verifySponsored(cred)).rejects.toThrow(
+      'Server address must not appear in client auth entries',
+    )
+  })
 
-    await expect(
-      method.verify({ credential: cred as any, request: cred.challenge.request }),
-    ).rejects.toThrow('Server address must not appear in client auth entries')
+  it('rejects a V2 auth entry whose address matches the server signing key', async () => {
+    const cred = makeSponsoredCredential(
+      buildSponsoredTxWithAuth([
+        makeAuthEntry({ address: signerKp.publicKey(), arm: 'addressV2' }),
+      ]),
+    )
+
+    await expect(verifySponsored(cred)).rejects.toThrow(
+      'Server address must not appear in client auth entries',
+    )
   })
 
   it('rejects auth entry with signatureExpirationLedger exceeding the challenge expiry', async () => {
     // challenge expires in ~60s → maxLedger = latestSequence(1000) + ceil(60/5) = 1012
     // auth entry expiration 99999 >> 1012 → rejected
-    const expirySeconds = Math.floor(Date.now() / 1000) + 60
-    const futureExpiry = new Date(expirySeconds * 1000).toISOString()
-    const authEntry = new xdr.SorobanAuthorizationEntry({
-      credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
-        new xdr.SorobanAddressCredentials({
-          address: new Address(PAYER.publicKey()).toScAddress(),
-          nonce: xdr.Int64.fromString('0'),
-          signatureExpirationLedger: 99999,
-          signature: xdr.ScVal.scvVoid(),
-        }),
-      ),
-      rootInvocation: makeRootInvocation(),
-    })
-
     mockGetLatestLedger.mockResolvedValueOnce({ sequence: 1000 })
 
-    const cred = makeSponsoredCredential(
-      buildSponsoredTxWithAuth([authEntry], expirySeconds),
-      futureExpiry,
-    )
-    const method = charge({
-      recipient: RECIPIENT,
-      currency: USDC_SAC_TESTNET,
-      feePayer: { envelopeSigner: signerKp },
-      store: Store.memory(),
-    })
+    const cred = makeCredentialExpiringIn(60, [makeAuthEntry({ expirationLedger: 99999 })])
 
-    await expect(
-      method.verify({ credential: cred as any, request: cred.challenge.request }),
-    ).rejects.toThrow('Auth entry expiration exceeds maximum allowed ledger')
+    await expect(verifySponsored(cred)).rejects.toThrow(
+      'Auth entry expiration exceeds maximum allowed ledger',
+    )
   })
 
   it('accepts auth entry with signatureExpirationLedger within the challenge expiry', async () => {
     // challenge expires in ~60s → maxLedger = 1000 + ceil(60/5) = 1012
     // auth entry expiration 1010 ≤ 1012 → accepted
-    const expirySeconds = Math.floor(Date.now() / 1000) + 60
-    const futureExpiry = new Date(expirySeconds * 1000).toISOString()
-    const unsignedAuthEntry = new xdr.SorobanAuthorizationEntry({
-      credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
-        new xdr.SorobanAddressCredentials({
-          address: new Address(PAYER.publicKey()).toScAddress(),
-          nonce: xdr.Int64.fromString('0'),
-          signatureExpirationLedger: 1010,
-          signature: xdr.ScVal.scvVec([]),
-        }),
-      ),
-      rootInvocation: makeRootInvocation(),
-    })
-    const authEntry = await authorizeEntry(unsignedAuthEntry, PAYER, 1010, NETWORK_PASSPHRASE)
+    mockSuccessfulSettlement('valid-auth-hash')
 
-    mockGetLatestLedger.mockResolvedValueOnce({ sequence: 1000 })
-    mockGetAccount.mockResolvedValueOnce(new Account(signerKp.publicKey(), '100'))
-    mockSimulateTransaction.mockResolvedValueOnce({
-      result: { retval: null },
-      events: [defaultMockEvent()],
-      transactionData: new SorobanDataBuilder(),
-    })
-    mockSendTransaction.mockResolvedValueOnce({ hash: 'valid-auth-hash', status: 'PENDING' })
-    mockGetTransaction.mockResolvedValueOnce({ status: 'SUCCESS' })
+    const cred = makeCredentialExpiringIn(60, [await makeSignedAuthEntry()])
 
-    const cred = makeSponsoredCredential(
-      buildSponsoredTxWithAuth([authEntry], expirySeconds),
-      futureExpiry,
-    )
-    const method = charge({
-      recipient: RECIPIENT,
-      currency: USDC_SAC_TESTNET,
-      feePayer: { envelopeSigner: signerKp },
-      store: Store.memory(),
-    })
-
-    const receipt = await method.verify({
-      credential: cred as any,
-      request: cred.challenge.request,
-    })
-    expect(receipt.status).toBe('success')
+    expect((await verifySponsored(cred)).status).toBe('success')
   })
 
   it('accepts a CAP-71 V2 (address-bound) auth entry signed by the payer', async () => {
-    const expirySeconds = Math.floor(Date.now() / 1000) + 60
-    const futureExpiry = new Date(expirySeconds * 1000).toISOString()
-    const unsignedAuthEntry = new xdr.SorobanAuthorizationEntry({
-      credentials: xdr.SorobanCredentials.sorobanCredentialsAddressV2(
-        new xdr.SorobanAddressCredentials({
-          address: new Address(PAYER.publicKey()).toScAddress(),
-          nonce: xdr.Int64.fromString('0'),
-          signatureExpirationLedger: 1010,
-          signature: xdr.ScVal.scvVec([]),
-        }),
-      ),
-      rootInvocation: makeRootInvocation(),
-    })
     // authorizeEntry keeps the V2 arm and signs the address-bound preimage.
-    const authEntry = await authorizeEntry(unsignedAuthEntry, PAYER, 1010, NETWORK_PASSPHRASE)
+    const authEntry = await makeSignedAuthEntry({ arm: 'addressV2' })
     expect(authEntry.credentials().switch().name).toBe('sorobanCredentialsAddressV2')
 
-    mockGetLatestLedger.mockResolvedValueOnce({ sequence: 1000 })
-    mockGetAccount.mockResolvedValueOnce(new Account(signerKp.publicKey(), '100'))
-    mockSimulateTransaction.mockResolvedValueOnce({
-      result: { retval: null },
-      events: [defaultMockEvent()],
-      transactionData: new SorobanDataBuilder(),
-    })
-    mockSendTransaction.mockResolvedValueOnce({ hash: 'valid-v2-auth-hash', status: 'PENDING' })
-    mockGetTransaction.mockResolvedValueOnce({ status: 'SUCCESS' })
+    mockSuccessfulSettlement('valid-v2-auth-hash')
 
-    const cred = makeSponsoredCredential(
-      buildSponsoredTxWithAuth([authEntry], expirySeconds),
-      futureExpiry,
-    )
-    const method = charge({
-      recipient: RECIPIENT,
-      currency: USDC_SAC_TESTNET,
-      feePayer: { envelopeSigner: signerKp },
-      store: Store.memory(),
-    })
+    const cred = makeCredentialExpiringIn(60, [authEntry])
 
-    const receipt = await method.verify({
-      credential: cred as any,
-      request: cred.challenge.request,
-    })
-    expect(receipt.status).toBe('success')
-  })
-
-  it('rejects a V2 auth entry whose address matches the server signing key', async () => {
-    const authEntry = new xdr.SorobanAuthorizationEntry({
-      credentials: xdr.SorobanCredentials.sorobanCredentialsAddressV2(
-        new xdr.SorobanAddressCredentials({
-          address: new Address(signerKp.publicKey()).toScAddress(),
-          nonce: xdr.Int64.fromString('0'),
-          signatureExpirationLedger: 1010,
-          signature: xdr.ScVal.scvVec([]),
-        }),
-      ),
-      rootInvocation: makeRootInvocation(),
-    })
-
-    const cred = makeSponsoredCredential(buildSponsoredTxWithAuth([authEntry]))
-    const method = charge({
-      recipient: RECIPIENT,
-      currency: USDC_SAC_TESTNET,
-      feePayer: { envelopeSigner: signerKp },
-      store: Store.memory(),
-    })
-
-    await expect(
-      method.verify({ credential: cred as any, request: cred.challenge.request }),
-    ).rejects.toThrow('Server address must not appear in client auth entries')
-  })
-
-  it('rejects auth entry using delegated (CAP-71) credentials', async () => {
-    const authEntry = new xdr.SorobanAuthorizationEntry({
-      credentials: xdr.SorobanCredentials.sorobanCredentialsAddressWithDelegates(
-        new xdr.SorobanAddressCredentialsWithDelegates({
-          addressCredentials: new xdr.SorobanAddressCredentials({
-            address: new Address(PAYER.publicKey()).toScAddress(),
-            nonce: xdr.Int64.fromString('0'),
-            signatureExpirationLedger: 1010,
-            signature: xdr.ScVal.scvVec([]),
-          }),
-          delegates: [],
-        }),
-      ),
-      rootInvocation: makeRootInvocation(),
-    })
-
-    const cred = makeSponsoredCredential(buildSponsoredTxWithAuth([authEntry]))
-    const method = charge({
-      recipient: RECIPIENT,
-      currency: USDC_SAC_TESTNET,
-      feePayer: { envelopeSigner: signerKp },
-      store: Store.memory(),
-    })
-
-    await expect(
-      method.verify({ credential: cred as any, request: cred.challenge.request }),
-    ).rejects.toThrow('Only address-type auth entries are permitted')
+    expect((await verifySponsored(cred)).status).toBe('success')
   })
 
   it('accepts an auth entry expiring a few ledgers past the strict bound (RPC ledger-view skew)', async () => {
@@ -3955,111 +3907,38 @@ describe('charge validateAuthEntries (sponsored path)', () => {
     // The client and server read the latest ledger at different moments from a load-balanced
     // RPC, so the client's view can sit a few ledgers ahead. Expiration 1015 is just past the
     // strict bound but within the ledger-skew tolerance, so it must still be accepted.
-    const expirySeconds = Math.floor(Date.now() / 1000) + 60
-    const futureExpiry = new Date(expirySeconds * 1000).toISOString()
-    const unsignedAuthEntry = new xdr.SorobanAuthorizationEntry({
-      credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
-        new xdr.SorobanAddressCredentials({
-          address: new Address(PAYER.publicKey()).toScAddress(),
-          nonce: xdr.Int64.fromString('0'),
-          signatureExpirationLedger: 1015,
-          signature: xdr.ScVal.scvVec([]),
-        }),
-      ),
-      rootInvocation: makeRootInvocation(),
-    })
-    const authEntry = await authorizeEntry(unsignedAuthEntry, PAYER, 1015, NETWORK_PASSPHRASE)
+    mockSuccessfulSettlement('skew-within-hash')
 
-    mockGetLatestLedger.mockResolvedValueOnce({ sequence: 1000 })
-    mockGetAccount.mockResolvedValueOnce(new Account(signerKp.publicKey(), '100'))
-    mockSimulateTransaction.mockResolvedValueOnce({
-      result: { retval: null },
-      events: [defaultMockEvent()],
-      transactionData: new SorobanDataBuilder(),
-    })
-    mockSendTransaction.mockResolvedValueOnce({ hash: 'skew-within-hash', status: 'PENDING' })
-    mockGetTransaction.mockResolvedValueOnce({ status: 'SUCCESS' })
+    const cred = makeCredentialExpiringIn(60, [
+      await makeSignedAuthEntry({ expirationLedger: 1015 }),
+    ])
 
-    const cred = makeSponsoredCredential(
-      buildSponsoredTxWithAuth([authEntry], expirySeconds),
-      futureExpiry,
-    )
-    const method = charge({
-      recipient: RECIPIENT,
-      currency: USDC_SAC_TESTNET,
-      feePayer: { envelopeSigner: signerKp },
-      store: Store.memory(),
-    })
-
-    const receipt = await method.verify({
-      credential: cred as any,
-      request: cred.challenge.request,
-    })
-    expect(receipt.status).toBe('success')
+    expect((await verifySponsored(cred)).status).toBe('success')
   })
 
   it('rejects an auth entry expiring beyond the ledger-skew tolerance', async () => {
     // Strict maxLedger 1012 + ledger-skew tolerance (10) = 1022; expiration 1023 is beyond it
     // and must still be rejected, so the tolerance does not become an open-ended extension.
-    const expirySeconds = Math.floor(Date.now() / 1000) + 60
-    const futureExpiry = new Date(expirySeconds * 1000).toISOString()
-    const authEntry = new xdr.SorobanAuthorizationEntry({
-      credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
-        new xdr.SorobanAddressCredentials({
-          address: new Address(PAYER.publicKey()).toScAddress(),
-          nonce: xdr.Int64.fromString('0'),
-          signatureExpirationLedger: 1023,
-          signature: xdr.ScVal.scvVoid(),
-        }),
-      ),
-      rootInvocation: makeRootInvocation(),
-    })
-
     mockGetLatestLedger.mockResolvedValueOnce({ sequence: 1000 })
 
-    const cred = makeSponsoredCredential(
-      buildSponsoredTxWithAuth([authEntry], expirySeconds),
-      futureExpiry,
-    )
-    const method = charge({
-      recipient: RECIPIENT,
-      currency: USDC_SAC_TESTNET,
-      feePayer: { envelopeSigner: signerKp },
-      store: Store.memory(),
-    })
+    const cred = makeCredentialExpiringIn(60, [makeAuthEntry({ expirationLedger: 1023 })])
 
-    await expect(
-      method.verify({ credential: cred as any, request: cred.challenge.request }),
-    ).rejects.toThrow('Auth entry expiration exceeds maximum allowed ledger')
+    await expect(verifySponsored(cred)).rejects.toThrow(
+      'Auth entry expiration exceeds maximum allowed ledger',
+    )
   })
 
   it('rejects auth entry that contains sub-invocations', async () => {
-    const subInvocation = makeRootInvocation()
-    const authEntry = new xdr.SorobanAuthorizationEntry({
-      credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
-        new xdr.SorobanAddressCredentials({
-          address: new Address(PAYER.publicKey()).toScAddress(),
-          nonce: xdr.Int64.fromString('0'),
-          signatureExpirationLedger: 1010,
-          signature: xdr.ScVal.scvVoid(),
-        }),
-      ),
-      rootInvocation: makeRootInvocation([subInvocation]),
-    })
-
     mockGetLatestLedger.mockResolvedValueOnce({ sequence: 100 })
 
-    const cred = makeSponsoredCredential(buildSponsoredTxWithAuth([authEntry]))
-    const method = charge({
-      recipient: RECIPIENT,
-      currency: USDC_SAC_TESTNET,
-      feePayer: { envelopeSigner: signerKp },
-      store: Store.memory(),
+    const authEntry = makeAuthEntry({
+      rootInvocation: makeRootInvocation({ subInvocations: [makeRootInvocation()] }),
     })
+    const cred = makeSponsoredCredential(buildSponsoredTxWithAuth([authEntry]))
 
-    await expect(
-      method.verify({ credential: cred as any, request: cred.challenge.request }),
-    ).rejects.toThrow('Auth entries must not contain sub-invocations')
+    await expect(verifySponsored(cred)).rejects.toThrow(
+      'Auth entries must not contain sub-invocations',
+    )
   })
 
   it('rejects auth entry whose signature does not verify', async () => {
@@ -4073,130 +3952,53 @@ describe('charge validateAuthEntries (sponsored path)', () => {
         { type: { public_key: ['symbol', null], signature: ['symbol', null] } },
       ),
     ])
-    const authEntry = new xdr.SorobanAuthorizationEntry({
-      credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
-        new xdr.SorobanAddressCredentials({
-          address: new Address(PAYER.publicKey()).toScAddress(),
-          nonce: xdr.Int64.fromString('0'),
-          signatureExpirationLedger: 1010,
-          signature: forgedSignature,
-        }),
-      ),
-      rootInvocation: makeRootInvocation(),
-    })
 
     mockGetLatestLedger.mockResolvedValueOnce({ sequence: 100 })
 
-    const cred = makeSponsoredCredential(buildSponsoredTxWithAuth([authEntry]))
-    const method = charge({
-      recipient: RECIPIENT,
-      currency: USDC_SAC_TESTNET,
-      feePayer: { envelopeSigner: signerKp },
-      store: Store.memory(),
-    })
+    const cred = makeSponsoredCredential(
+      buildSponsoredTxWithAuth([makeAuthEntry({ signature: forgedSignature })]),
+    )
 
-    await expect(
-      method.verify({ credential: cred as any, request: cred.challenge.request }),
-    ).rejects.toThrow(/signature/i)
-
+    await expect(verifySponsored(cred)).rejects.toThrow(/signature/i)
     expect(mockSendTransaction).not.toHaveBeenCalled()
   })
 
   it('rejects sponsored settlement when no auth entry authorizes the transfer (empty auth)', async () => {
     const cred = makeSponsoredCredential(buildSponsoredTxWithAuth([]))
-    const method = charge({
-      recipient: RECIPIENT,
-      currency: USDC_SAC_TESTNET,
-      feePayer: { envelopeSigner: signerKp },
-      store: Store.memory(),
-    })
 
-    await expect(
-      method.verify({ credential: cred as any, request: cred.challenge.request }),
-    ).rejects.toThrow('No authorization entry authorizes the requested transfer.')
+    await expect(verifySponsored(cred)).rejects.toThrow(
+      'No authorization entry authorizes the requested transfer.',
+    )
     expect(mockSendTransaction).not.toHaveBeenCalled()
   })
 
   it('rejects sponsored settlement when the auth entry authorizer is not the transfer source', async () => {
-    const otherPayer = Keypair.random()
-    const unsignedAuthEntry = new xdr.SorobanAuthorizationEntry({
-      credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
-        new xdr.SorobanAddressCredentials({
-          address: new Address(otherPayer.publicKey()).toScAddress(),
-          nonce: xdr.Int64.fromString('0'),
-          signatureExpirationLedger: 1010,
-          signature: xdr.ScVal.scvVec([]),
-        }),
-      ),
-      rootInvocation: makeRootInvocation(),
-    })
-    const authEntry = await authorizeEntry(unsignedAuthEntry, otherPayer, 1010, NETWORK_PASSPHRASE)
-
     mockGetLatestLedger.mockResolvedValueOnce({ sequence: 100 })
 
+    const authEntry = await makeSignedAuthEntry({ signer: Keypair.random() })
     const cred = makeSponsoredCredential(buildSponsoredTxWithAuth([authEntry]))
-    const method = charge({
-      recipient: RECIPIENT,
-      currency: USDC_SAC_TESTNET,
-      feePayer: { envelopeSigner: signerKp },
-      store: Store.memory(),
-    })
 
-    await expect(
-      method.verify({ credential: cred as any, request: cred.challenge.request }),
-    ).rejects.toThrow('No authorization entry authorizes the requested transfer.')
+    await expect(verifySponsored(cred)).rejects.toThrow(
+      'No authorization entry authorizes the requested transfer.',
+    )
     expect(mockSendTransaction).not.toHaveBeenCalled()
   })
 
   it('rejects sponsored settlement when the auth entry authorizes a different transfer', async () => {
     // A validly-signed entry by the payer, but covering a transfer to a
     // different recipient than the operation actually settles.
-    const otherRecipient = Keypair.random().publicKey()
-    const wrongTx = buildTransferTx({
-      source: PAYER.publicKey(),
-      from: PAYER.publicKey(),
-      to: otherRecipient,
-      amount: 10000000n,
-      currency: USDC_SAC_TESTNET,
-    })
-    const wrongArgs = wrongTx
-      .toEnvelope()
-      .v1()
-      .tx()
-      .operations()[0]
-      .body()
-      .invokeHostFunctionOp()
-      .hostFunction()
-      .invokeContract()
-    const unsignedAuthEntry = new xdr.SorobanAuthorizationEntry({
-      credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
-        new xdr.SorobanAddressCredentials({
-          address: new Address(PAYER.publicKey()).toScAddress(),
-          nonce: xdr.Int64.fromString('0'),
-          signatureExpirationLedger: 1010,
-          signature: xdr.ScVal.scvVec([]),
-        }),
-      ),
-      rootInvocation: new xdr.SorobanAuthorizedInvocation({
-        function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(wrongArgs),
-        subInvocations: [],
-      }),
-    })
-    const authEntry = await authorizeEntry(unsignedAuthEntry, PAYER, 1010, NETWORK_PASSPHRASE)
-
     mockGetLatestLedger.mockResolvedValueOnce({ sequence: 100 })
 
-    const cred = makeSponsoredCredential(buildSponsoredTxWithAuth([authEntry]))
-    const method = charge({
-      recipient: RECIPIENT,
-      currency: USDC_SAC_TESTNET,
-      feePayer: { envelopeSigner: signerKp },
-      store: Store.memory(),
+    const authEntry = await makeSignedAuthEntry({
+      rootInvocation: makeRootInvocation({
+        args: transferContractArgs({ to: Keypair.random().publicKey() }),
+      }),
     })
+    const cred = makeSponsoredCredential(buildSponsoredTxWithAuth([authEntry]))
 
-    await expect(
-      method.verify({ credential: cred as any, request: cred.challenge.request }),
-    ).rejects.toThrow('No authorization entry authorizes the requested transfer.')
+    await expect(verifySponsored(cred)).rejects.toThrow(
+      'No authorization entry authorizes the requested transfer.',
+    )
     expect(mockSendTransaction).not.toHaveBeenCalled()
   })
 
@@ -4204,57 +4006,17 @@ describe('charge validateAuthEntries (sponsored path)', () => {
     // A validly-signed entry by the payer whose transfer invocation carries a
     // non-numeric amount argument. Decoding it must count as "does not authorize
     // the transfer", not surface as an unexpected decode error.
-    const baseTx = buildTransferTx({
-      source: PAYER.publicKey(),
-      from: PAYER.publicKey(),
-      to: RECIPIENT,
-      amount: 10000000n,
-      currency: USDC_SAC_TESTNET,
-    })
-    const transferArgs = baseTx
-      .toEnvelope()
-      .v1()
-      .tx()
-      .operations()[0]
-      .body()
-      .invokeHostFunctionOp()
-      .hostFunction()
-      .invokeContract()
-    transferArgs.args([
-      transferArgs.args()[0],
-      transferArgs.args()[1],
-      xdr.ScVal.scvString('not-a-number'),
-    ])
-    const unsignedAuthEntry = new xdr.SorobanAuthorizationEntry({
-      credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
-        new xdr.SorobanAddressCredentials({
-          address: new Address(PAYER.publicKey()).toScAddress(),
-          nonce: xdr.Int64.fromString('0'),
-          signatureExpirationLedger: 1010,
-          signature: xdr.ScVal.scvVec([]),
-        }),
-      ),
-      rootInvocation: new xdr.SorobanAuthorizedInvocation({
-        function:
-          xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(transferArgs),
-        subInvocations: [],
-      }),
-    })
-    const authEntry = await authorizeEntry(unsignedAuthEntry, PAYER, 1010, NETWORK_PASSPHRASE)
+    const args = transferContractArgs()
+    args.args([args.args()[0], args.args()[1], xdr.ScVal.scvString('not-a-number')])
 
     mockGetLatestLedger.mockResolvedValueOnce({ sequence: 100 })
 
+    const authEntry = await makeSignedAuthEntry({ rootInvocation: makeRootInvocation({ args }) })
     const cred = makeSponsoredCredential(buildSponsoredTxWithAuth([authEntry]))
-    const method = charge({
-      recipient: RECIPIENT,
-      currency: USDC_SAC_TESTNET,
-      feePayer: { envelopeSigner: signerKp },
-      store: Store.memory(),
-    })
 
-    await expect(
-      method.verify({ credential: cred as any, request: cred.challenge.request }),
-    ).rejects.toThrow('No authorization entry authorizes the requested transfer.')
+    await expect(verifySponsored(cred)).rejects.toThrow(
+      'No authorization entry authorizes the requested transfer.',
+    )
     expect(mockSendTransaction).not.toHaveBeenCalled()
   })
 })
