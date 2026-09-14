@@ -371,7 +371,7 @@ export function charge(parameters: charge.Parameters) {
       const transaction = builder.build()
 
       // Simulate to attach Soroban resource data
-      const prepared = await prepareForSigning(server, transaction, useUpgradedAuth)
+      const prepared = await server.prepareTransaction(transaction)
 
       // The envelope signature authorizes the entire Soroban auth tree, so
       // confirm it is exactly the intended transfer before signing.
