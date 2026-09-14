@@ -475,7 +475,7 @@ export declare namespace charge {
      * (address-bound) authorization entries instead of the legacy
      * `SOROBAN_CREDENTIALS_ADDRESS` arm. Only affects sponsored flows, where the
      * client signs auth entries rather than the envelope. Requires an RPC on a
-     * CAP-71 network (Protocol 28+).
+     * RPC on a network that has activated CAP-71 (introduced in Protocol 27).
      *
      * `false` matches stellar-sdk 16's `prepareTransaction` default; stellar-sdk
      * 17 flips its own default to `true`.
