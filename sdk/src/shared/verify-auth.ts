@@ -56,7 +56,7 @@ export function verifyAuthEntrySignature(
   // `sorobanCredentialsAddress` arm signs `ENVELOPE_TYPE_SOROBAN_AUTHORIZATION`,
   // while the CAP-71 `sorobanCredentialsAddressV2` arm signs the address-bound
   // `ENVELOPE_TYPE_SOROBAN_AUTHORIZATION_WITH_ADDRESS` preimage. Reusing the
-  // same builder `authorizeEntry` signs with keeps verifier and signer in
+  // same preimage builder as `authorizeEntry` keeps verifier and signer in
   // lockstep, so a signature over the wrong arm's preimage is rejected.
   const preimage = buildAuthorizationEntryPreimage(
     entry,
