@@ -3,8 +3,8 @@ import { xdr } from '@stellar/stellar-sdk'
 /**
  * Returns the address credentials carried by a Soroban credential union, for
  * both the legacy V1 `sorobanCredentialsAddress` arm and the CAP-71 V2
- * `sorobanCredentialsAddressV2` arm, which networks accept from Protocol 28
- * onward. Both arms wrap the same `SorobanAddressCredentials` structure and
+ * `sorobanCredentialsAddressV2` arm, which networks accept once CAP-71 is
+ * activated (introduced in Protocol 27). Both arms wrap the same `SorobanAddressCredentials` structure and
  * differ only in the preimage the signer commits to. Returns `undefined` for
  * every other arm (source-account, delegated).
  *
