@@ -11,6 +11,7 @@ const mockGetTransaction = vi.fn()
 const mockPrepareTransaction = vi.fn()
 const mockFromXDR = vi.fn()
 const mockWrapFeeBump = vi.fn()
+const mockGetStorageKey = vi.fn()
 
 vi.mock('@stellar/stellar-sdk', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@stellar/stellar-sdk')>()
@@ -47,6 +48,10 @@ vi.mock('../../shared/fee-bump.js', () => ({
   wrapFeeBump: (...args: unknown[]) => mockWrapFeeBump(...args),
 }))
 
+vi.mock('../../shared/getStorageKey.js', () => ({
+  getStorageKey: (...args: unknown[]) => mockGetStorageKey(...args),
+}))
+
 // Re-import after mock is set up
 const { channel } = await import('./Channel.js')
 
@@ -76,6 +81,12 @@ mockGetChannelState.mockResolvedValue(mockHealthyChannelState())
 
 const COMMITMENT_KEY = Keypair.random()
 const CHANNEL_ADDRESS = 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526'
+
+// Default on-chain CommitmentKey: matches the test signer. The server reads
+// this from contract instance storage and verifies vouchers against it; tests
+// asserting a mismatch override with `mockResolvedValueOnce`.
+const onChainCommitmentKey = (kp: Keypair) => xdr.ScVal.scvBytes(kp.rawPublicKey())
+mockGetStorageKey.mockResolvedValue(onChainCommitmentKey(COMMITMENT_KEY))
 
 /**
  * Build a fake credential for testing verify().
@@ -3167,5 +3178,233 @@ describe('channel verification runs RPC outside the cumulative lock', () => {
         'must be greater than previous cumulative',
       )
     }
+  })
+})
+
+describe('channel server commitment key pinning (on-chain CommitmentKey validation)', () => {
+  // The contract enforces vouchers against the CommitmentKey it stored at
+  // construction. The server must verify against that same key, read from
+  // instance storage, so a funder cannot deploy with key A while telling the
+  // operator to configure key B and pay with unenforceable B-signed vouchers.
+
+  beforeEach(() => {
+    mockSimulateTransaction.mockReset()
+    mockGetStorageKey.mockReset()
+    mockGetStorageKey.mockResolvedValue(onChainCommitmentKey(COMMITMENT_KEY))
+  })
+
+  it('rejects vouchers when the configured commitmentKey differs from the on-chain CommitmentKey', async () => {
+    // Attack shape: on-chain key is A (attacker-held), operator was told B
+    // (also attacker-held), voucher is signed with B. Pre-fix this was accepted.
+    const onChainKey = Keypair.random()
+    mockGetStorageKey.mockResolvedValue(onChainCommitmentKey(onChainKey))
+
+    const commitmentBytes = Buffer.from('unenforceable-voucher')
+    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
+
+    const credential = makeSignedCredential({
+      commitmentBytes,
+      cumulativeAmount: 1000000n,
+      challengeAmount: '1000000',
+    })
+
+    const method = channel({
+      channel: CHANNEL_ADDRESS,
+      checkOnChainState: false,
+      commitmentKey: COMMITMENT_KEY,
+      store: Store.memory(),
+    })
+
+    await expect(
+      method.verify({ credential: credential as any, request: credential.challenge.request }),
+    ).rejects.toThrow('Configured commitmentKey does not match')
+  })
+
+  it('verifies against the on-chain key, not the configured one, when only the signer differs', async () => {
+    // Operator config matches the chain (key A), but the voucher is signed by B.
+    // The contract would reject this at close, so the server must too.
+    const attacker = Keypair.random()
+    const commitmentBytes = Buffer.from('signed-by-wrong-key')
+    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
+
+    const sigHex = Buffer.from(attacker.sign(commitmentBytes)).toString('hex')
+    const credential = makeCredential({
+      amount: '1000000',
+      challengeAmount: '1000000',
+      signature: sigHex,
+    })
+
+    const method = channel({
+      channel: CHANNEL_ADDRESS,
+      checkOnChainState: false,
+      commitmentKey: COMMITMENT_KEY,
+      store: Store.memory(),
+    })
+
+    await expect(
+      method.verify({ credential: credential as any, request: credential.challenge.request }),
+    ).rejects.toThrow('Commitment signature verification failed')
+  })
+
+  it('accepts the configured key as a G-address string when it matches the chain', async () => {
+    const commitmentBytes = Buffer.from('string-key-ok')
+    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
+
+    const credential = makeSignedCredential({
+      commitmentBytes,
+      cumulativeAmount: 1000000n,
+      challengeAmount: '1000000',
+    })
+
+    const method = channel({
+      channel: CHANNEL_ADDRESS,
+      checkOnChainState: false,
+      commitmentKey: COMMITMENT_KEY.publicKey(),
+      store: Store.memory(),
+    })
+
+    const receipt = await method.verify({
+      credential: credential as any,
+      request: credential.challenge.request,
+    })
+    expect(receipt.status).toBe('success')
+  })
+
+  it('reads the on-chain CommitmentKey once and caches it across vouchers', async () => {
+    const store = Store.memory()
+    const method = channel({
+      channel: CHANNEL_ADDRESS,
+      checkOnChainState: false,
+      commitmentKey: COMMITMENT_KEY,
+      store,
+    })
+
+    const bytes1 = Buffer.from('voucher-1')
+    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(bytes1))
+    const cred1 = makeSignedCredential({
+      commitmentBytes: bytes1,
+      cumulativeAmount: 1000000n,
+      challengeAmount: '1000000',
+    })
+    await method.verify({ credential: cred1 as any, request: cred1.challenge.request })
+
+    const bytes2 = Buffer.from('voucher-2')
+    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(bytes2))
+    const cred2 = makeSignedCredential({
+      commitmentBytes: bytes2,
+      cumulativeAmount: 2000000n,
+      challengeAmount: '1000000',
+      previousCumulative: '1000000',
+    })
+    await method.verify({ credential: cred2 as any, request: cred2.challenge.request })
+
+    expect(mockGetStorageKey).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not cache a failed on-chain key read; the next voucher retries', async () => {
+    mockGetStorageKey.mockRejectedValueOnce(new Error('rpc down'))
+
+    const store = Store.memory()
+    const method = channel({
+      channel: CHANNEL_ADDRESS,
+      checkOnChainState: false,
+      commitmentKey: COMMITMENT_KEY,
+      store,
+    })
+
+    // No simulation result is queued for this voucher: the key read fails
+    // before prepare_commitment is ever simulated.
+    const bytes1 = Buffer.from('retry-1')
+    const cred1 = makeSignedCredential({
+      commitmentBytes: bytes1,
+      cumulativeAmount: 1000000n,
+      challengeAmount: '1000000',
+    })
+    await expect(
+      method.verify({ credential: cred1 as any, request: cred1.challenge.request }),
+    ).rejects.toThrow('rpc down')
+
+    const bytes2 = Buffer.from('retry-2')
+    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(bytes2))
+    const cred2 = makeSignedCredential({
+      commitmentBytes: bytes2,
+      cumulativeAmount: 1000000n,
+      challengeAmount: '1000000',
+    })
+    const receipt = await method.verify({
+      credential: cred2 as any,
+      request: cred2.challenge.request,
+    })
+    expect(receipt.status).toBe('success')
+    expect(mockGetStorageKey).toHaveBeenCalledTimes(2)
+  })
+
+  it('rejects when the contract has no CommitmentKey in instance storage', async () => {
+    mockGetStorageKey.mockResolvedValueOnce(null)
+
+    const commitmentBytes = Buffer.from('no-key')
+    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
+    const credential = makeSignedCredential({
+      commitmentBytes,
+      cumulativeAmount: 1000000n,
+      challengeAmount: '1000000',
+    })
+
+    const method = channel({
+      channel: CHANNEL_ADDRESS,
+      checkOnChainState: false,
+      commitmentKey: COMMITMENT_KEY,
+      store: Store.memory(),
+    })
+
+    await expect(
+      method.verify({ credential: credential as any, request: credential.challenge.request }),
+    ).rejects.toThrow('has no CommitmentKey in instance storage')
+  })
+
+  it('rejects an on-chain CommitmentKey that is not 32 bytes', async () => {
+    mockGetStorageKey.mockResolvedValueOnce(xdr.ScVal.scvBytes(Buffer.alloc(31, 1)))
+
+    const commitmentBytes = Buffer.from('short-key')
+    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
+    const credential = makeSignedCredential({
+      commitmentBytes,
+      cumulativeAmount: 1000000n,
+      challengeAmount: '1000000',
+    })
+
+    const method = channel({
+      channel: CHANNEL_ADDRESS,
+      checkOnChainState: false,
+      commitmentKey: COMMITMENT_KEY,
+      store: Store.memory(),
+    })
+
+    await expect(
+      method.verify({ credential: credential as any, request: credential.challenge.request }),
+    ).rejects.toThrow('expected 32')
+  })
+
+  it('rejects an on-chain CommitmentKey entry that is not a byte array', async () => {
+    mockGetStorageKey.mockResolvedValueOnce(xdr.ScVal.scvU32(7))
+
+    const commitmentBytes = Buffer.from('wrong-type')
+    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
+    const credential = makeSignedCredential({
+      commitmentBytes,
+      cumulativeAmount: 1000000n,
+      challengeAmount: '1000000',
+    })
+
+    const method = channel({
+      channel: CHANNEL_ADDRESS,
+      checkOnChainState: false,
+      commitmentKey: COMMITMENT_KEY,
+      store: Store.memory(),
+    })
+
+    await expect(
+      method.verify({ credential: credential as any, request: credential.challenge.request }),
+    ).rejects.toThrow('is not a byte array')
   })
 })
