@@ -33,6 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Build the channel commitment message locally instead of via a `prepare_commitment` simulation, so signatures are always verified against the credited amount [#64](https://github.com/stellar/stellar-mpp-sdk/pull/64). That involves:
   - Deprecating the client's `rpcUrl` and `simulationTimeoutMs` options (now ignored)
   - `verifyMaxConcurrent` now bounds only the on-chain state read
+- Verify channel vouchers against the `CommitmentKey` stored in the channel contract's instance storage rather than only against the configured `commitmentKey`. The on-chain key is read once per server and cached; a configured `commitmentKey` that differs from it rejects every voucher. Previously the server trusted the operator-supplied key alone, so a funder could deploy a channel with one key, hand the recipient another, and obtain service with vouchers the contract would never settle, then reclaim the full deposit after the refund waiting period
 - Pin transitive development dependencies (`ip-address`, `postcss`, `brace-expansion`) via `pnpm.overrides` to clear advisories in third-party packages. All three are build- and test-time only, so the published package is unaffected [#62](https://github.com/stellar/stellar-mpp-sdk/pull/62)
   - Drop the now-redundant `form-data` and `vite` overrides — their parents' ranges already resolve to a patched version unaided
 

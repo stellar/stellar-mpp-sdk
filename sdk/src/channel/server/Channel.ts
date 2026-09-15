@@ -5,6 +5,7 @@ import {
   Transaction,
   TransactionBuilder,
   nativeToScVal,
+  StrKey,
   rpc,
 } from '@stellar/stellar-sdk'
 import { Method, Receipt, Store } from 'mppx'
@@ -42,6 +43,7 @@ import { verifyInvokeContractOp } from '../../shared/verify-invoke.js'
 import { buildCommitmentMessage } from '../commitment.js'
 import { channel as ChannelMethod } from '../Methods.js'
 import { getChannelState, type ChannelState } from './State.js'
+import { getStorageKey } from '../../shared/getStorageKey.js'
 
 type ChannelCredential = Parameters<Method.VerifyFn<typeof ChannelMethod>>[0]['credential']
 type CumulativeRecord = {
@@ -168,14 +170,6 @@ export function channel(parameters: channel.Parameters) {
   // semaphore is the only limit on concurrent RPC calls.
   const verifySemaphore = new Semaphore(verifyMaxConcurrent)
 
-  // Parse the commitment public key (accepts G... Stellar public key string or Keypair)
-  const commitmentKP = (() => {
-    if (typeof commitmentKeyParam === 'string') {
-      return Keypair.fromPublicKey(commitmentKeyParam)
-    }
-    return commitmentKeyParam
-  })()
-
   const envelopeKP = feePayer ? resolveKeypair(feePayer.envelopeSigner) : undefined
   const feeBumpKP = feePayer?.feeBumpSigner ? resolveKeypair(feePayer.feeBumpSigner) : undefined
 
@@ -221,6 +215,49 @@ export function channel(parameters: channel.Parameters) {
   logger.info(
     `${LOG_PREFIX} Initialized. Multi-process deployments require an atomic store.update() compare-and-set implementation for replay protection.`,
   )
+
+  let commitmentKeyPromise: Promise<Buffer> | undefined
+
+  function resolveCommitmentKey(): Promise<Buffer> {
+    if (commitmentKeyPromise === undefined || commitmentKeyPromise === null) {
+      commitmentKeyPromise = (async () => {
+        const entry = await getStorageKey(
+          rpcServer,
+          channelAddress,
+          simulationTimeoutMs,
+          'CommitmentKey',
+        )
+        if (!entry) {
+          throw new ChannelVerificationError(
+            `${LOG_PREFIX} Channel contract has no CommitmentKey in instance storage.`,
+            {},
+          )
+        }
+        let raw: Buffer
+        try {
+          raw = Buffer.from(entry.bytes())
+        } catch {
+          throw new ChannelVerificationError(
+            `${LOG_PREFIX} On-chain CommitmentKey is not a byte array.`,
+            {},
+          )
+        }
+        if (raw.length !== 32) {
+          throw new ChannelVerificationError(
+            `${LOG_PREFIX} On-chain CommitmentKey is ${raw.length} bytes, expected 32.`,
+            {},
+          )
+        }
+        return raw
+      })().catch((error) => {
+        // Never cache a failure. A transient RPC error would otherwise brick the
+        // server permanently, since nothing would ever retry the read.
+        commitmentKeyPromise = undefined
+        throw error
+      })
+    }
+    return commitmentKeyPromise
+  }
 
   return Method.toServer(ChannelMethod, {
     defaults: {
@@ -424,10 +461,11 @@ export function channel(parameters: channel.Parameters) {
     }
 
     // Verify the commitment signature before the server writes channel state.
-    // This check is local and uses only the CPU, so it runs outside the
-    // semaphore below. The server rejects a forged voucher before that voucher
-    // can occupy one of the limited RPC slots.
-    verifyCommitmentSignature(commitmentAmount, signatureBytes)
+    // The message is built locally and the on-chain CommitmentKey is read once
+    // and shared by all callers, so this runs outside the semaphore below. The
+    // server rejects a forged voucher before that voucher can occupy one of the
+    // limited RPC slots.
+    await verifyCommitmentSignature(commitmentAmount, signatureBytes)
 
     // Read the on-chain state only after the signature check succeeds. The
     // state read costs several RPC calls. The cheap signature check runs first,
@@ -716,8 +754,26 @@ export function channel(parameters: channel.Parameters) {
    *
    * @throws {ChannelVerificationError} If the signature does not match.
    */
-  function verifyCommitmentSignature(commitmentAmount: bigint, signatureBytes: Buffer): void {
+  async function verifyCommitmentSignature(
+    commitmentAmount: bigint,
+    signatureBytes: Buffer,
+  ): Promise<void> {
     logger.debug(`${LOG_PREFIX} Verifying commitment signature...`)
+
+    const rawCommitmentKey = await resolveCommitmentKey()
+    const commitmentKP = Keypair.fromPublicKey(StrKey.encodeEd25519PublicKey(rawCommitmentKey))
+
+    const configured =
+      typeof commitmentKeyParam === 'string'
+        ? Keypair.fromPublicKey(commitmentKeyParam)
+        : commitmentKeyParam
+    if (!configured.rawPublicKey().equals(rawCommitmentKey)) {
+      throw new ChannelVerificationError(
+        `${LOG_PREFIX} Configured commitmentKey does not match the channel's on-chain CommitmentKey.`,
+        { expected: commitmentKP.publicKey(), actual: configured.publicKey() },
+      )
+    }
+
     const commitmentBytes = buildCommitmentMessage({
       channel: channelAddress,
       amount: commitmentAmount,
@@ -1142,8 +1198,13 @@ export declare namespace channel {
       feeBumpSigner?: Keypair | string
     }
     /**
-     * Ed25519 public key for verifying commitment signatures.
+     * Ed25519 public key the operator expects the channel to enforce.
      * Accepts a Stellar public key string (G...) or a Keypair instance.
+     *
+     * The server reads the authoritative `CommitmentKey` from the channel
+     * contract's instance storage and verifies vouchers against that key. If
+     * this value does not match it, every voucher is rejected, since the
+     * contract would refuse to settle them at close.
      */
     commitmentKey: string | Keypair
     /** Number of decimal places for amount conversion. @default 7 */

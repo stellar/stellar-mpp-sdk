@@ -1,4 +1,4 @@
-import { Account, Keypair } from '@stellar/stellar-sdk'
+import { Account, Address, Keypair, xdr } from '@stellar/stellar-sdk'
 import { Challenge, Credential, Store } from 'mppx'
 import { Mppx } from 'mppx/server'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -18,6 +18,7 @@ const mockGetAccount = vi.fn()
 const mockPrepareTransaction = vi.fn()
 const mockSendTransaction = vi.fn()
 const mockGetTransaction = vi.fn()
+const mockGetLedgerEntries = vi.fn()
 
 vi.mock('@stellar/stellar-sdk', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@stellar/stellar-sdk')>()
@@ -31,12 +32,36 @@ vi.mock('@stellar/stellar-sdk', async (importOriginal) => {
         this.prepareTransaction = mockPrepareTransaction
         this.sendTransaction = mockSendTransaction
         this.getTransaction = mockGetTransaction
+        this.getLedgerEntries = mockGetLedgerEntries
       }),
     },
   }
 })
 
 const { channel: serverChannel } = await import('../../../server/Channel.js')
+
+/** Channel contract instance whose storage holds `DataKey::CommitmentKey`. */
+function instanceWithCommitmentKey(key: Keypair) {
+  const instance = new xdr.ScContractInstance({
+    executable: xdr.ContractExecutable.contractExecutableStellarAsset(),
+    storage: [
+      new xdr.ScMapEntry({
+        key: xdr.ScVal.scvVec([xdr.ScVal.scvSymbol('CommitmentKey')]),
+        val: xdr.ScVal.scvBytes(key.rawPublicKey()),
+      }),
+    ],
+  })
+  const val = xdr.LedgerEntryData.contractData(
+    new xdr.ContractDataEntry({
+      ext: new xdr.ExtensionPoint(0),
+      contract: Address.fromString(CHANNEL_ADDRESS).toScAddress(),
+      key: xdr.ScVal.scvLedgerKeyContractInstance(),
+      durability: xdr.ContractDataDurability.persistent(),
+      val: xdr.ScVal.scvContractInstance(instance),
+    }),
+  )
+  return { entries: [{ val }], latestLedger: 100 }
+}
 
 describe('channel rejection HTTP status (real mppx handler)', () => {
   beforeEach(() => {
@@ -46,6 +71,7 @@ describe('channel rejection HTTP status (real mppx handler)', () => {
       mockPrepareTransaction,
       mockSendTransaction,
       mockGetTransaction,
+      mockGetLedgerEntries,
     ])
       mock.mockReset()
   })
@@ -98,6 +124,7 @@ describe('channel rejection HTTP status (real mppx handler)', () => {
       amount: 10_000_000n,
       network: STELLAR_TESTNET,
     })
+    mockGetLedgerEntries.mockResolvedValue(instanceWithCommitmentKey(commitmentKey))
     mockGetAccount.mockResolvedValue(new Account(envelopeSigner.publicKey(), '100'))
     mockPrepareTransaction.mockImplementation((tx: unknown) => tx)
     mockSendTransaction.mockResolvedValue({ hash: 'close-hash', status: 'PENDING' })
