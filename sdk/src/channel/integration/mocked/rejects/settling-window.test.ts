@@ -1,4 +1,4 @@
-import { Account, Keypair } from '@stellar/stellar-sdk'
+import { Account, Keypair, xdr } from '@stellar/stellar-sdk'
 import { Challenge, Credential, Store } from 'mppx'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -21,6 +21,7 @@ const mockSimulateTransaction = vi.fn()
 const mockGetAccount = vi.fn()
 const mockPrepareTransaction = vi.fn()
 const mockSendTransaction = vi.fn()
+const mockGetStorageKey = vi.fn()
 
 vi.mock('@stellar/stellar-sdk', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@stellar/stellar-sdk')>()
@@ -46,7 +47,14 @@ vi.mock('@stellar/stellar-sdk', async (importOriginal) => {
 })
 
 // Re-import after the mock is registered.
+vi.mock('../../../../shared/getStorageKey.js', () => ({
+  getStorageKey: (...args: unknown[]) => mockGetStorageKey(...args),
+}))
+
 const { channel: serverChannel } = await import('../../../server/Channel.js')
+
+// On-chain CommitmentKey matches the test signer.
+mockGetStorageKey.mockResolvedValue(xdr.ScVal.scvBytes(COMMITMENT_KEY.rawPublicKey()))
 
 /** Build a credential with a real ed25519 signature over `commitmentBytes`. */
 function makeSignedCredential(opts: {

@@ -177,7 +177,7 @@ const mppx = Mppx.create({
   methods: [
     stellar.channel({
       channel: 'CABC...', // deployed one-way-channel contract address
-      commitmentKey: 'GFUNDER...', // ed25519 public key for verifying commitments
+      commitmentKey: 'GFUNDER...', // must match the channel's on-chain commitment_key
       store: Store.memory(), // tracks cumulative amounts + replay protection
       network: 'testnet',
     }),
@@ -276,7 +276,7 @@ stellar.charge({
 ```ts
 stellar.channel({
   channel: string,                // on-chain channel contract address (C...)
-  commitmentKey: string | Keypair,// ed25519 public key for verifying commitments
+  commitmentKey: string | Keypair,// must match the channel's on-chain commitment_key
   network?: 'stellar:testnet' | 'stellar:pubnet', // default: 'stellar:testnet'
   decimals?: number,              // default: 7
   rpcUrl?: string,                // custom Soroban RPC URL
@@ -434,7 +434,7 @@ Payment channels allow many off-chain micro-payments with minimal on-chain trans
 - The client signs cumulative commitment amounts off-chain using the ed25519 commitment key
 - The client should pin the channel contract with `allowedChannels` so it only signs for trusted channel addresses
 - Before signing, the client verifies the simulated commitment matches the pinned channel, the intended cumulative amount, the expected network, and the channel domain separator
-- The server verifies signatures by simulating `prepare_commitment` on the channel contract and checking the ed25519 signature
+- The server verifies signatures by simulating `prepare_commitment` on the channel contract and checking the ed25519 signature against the `commitment_key` stored in the contract's instance storage. A configured `commitmentKey` that differs from the on-chain key fails closed: every voucher is rejected, since the contract would never settle them
 - An atomic `Store` is required on the server to track cumulative amounts and channel lifecycle state across requests
 - The server can call `close()` on-chain at any time to settle accumulated payments
 
