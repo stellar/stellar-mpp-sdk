@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { pollTransaction, PollTimeoutError, PollMaxAttemptsError } from './poll.js'
 
-function createMockRpc(responses: Array<{ status: string; [k: string]: unknown }>) {
+type PollRpc = Parameters<typeof pollTransaction>[0]
+
+function createMockRpc(responses: Array<{ status: string; [k: string]: unknown }>): PollRpc {
   let callIndex = 0
   return {
     getTransaction: vi.fn(async () => {
@@ -10,7 +12,7 @@ function createMockRpc(responses: Array<{ status: string; [k: string]: unknown }
       }
       return responses[callIndex++]
     }),
-  }
+  } as unknown as PollRpc
 }
 
 describe('pollTransaction', () => {

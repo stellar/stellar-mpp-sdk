@@ -13,7 +13,7 @@ build: ## Compile TypeScript → dist/
 clean: ## Remove dist/ and node_modules/
 	rm -rf dist node_modules
 
-typecheck: ## Type-check without emitting (tsc --noEmit)
+typecheck: ## Type-check sources, tests, and examples without emitting
 	pnpm run check:types
 
 lint: ## Run ESLint

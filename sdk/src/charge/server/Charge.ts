@@ -132,23 +132,26 @@ export function charge(parameters: charge.Parameters) {
     )
   }
 
-  return Method.toServer(Methods.charge, {
-    defaults: { currency, recipient },
-    request({ request }) {
-      return {
-        ...request,
-        amount: toBaseUnits(request.amount, decimals),
-        methodDetails: {
-          network,
-          ...(envelopeKP ? { feePayer: true } : {}),
-          credentialTypes,
-        },
-      }
+  return Method.toServer<typeof Methods.charge, { currency: string; recipient: string }>(
+    Methods.charge,
+    {
+      defaults: { currency, recipient },
+      request({ request }) {
+        return {
+          ...request,
+          amount: toBaseUnits(request.amount, decimals),
+          methodDetails: {
+            network,
+            ...(envelopeKP ? { feePayer: true } : {}),
+            credentialTypes,
+          },
+        }
+      },
+      async verify({ credential }) {
+        return doVerify(credential)
+      },
     },
-    async verify({ credential }) {
-      return doVerify(credential)
-    },
-  })
+  )
 
   /**
    * Verifies a charge credential (hash or transaction) and settles it on-chain.

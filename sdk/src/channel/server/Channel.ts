@@ -216,7 +216,7 @@ export function channel(parameters: channel.Parameters) {
     `${LOG_PREFIX} Initialized. Multi-process deployments require an atomic store.update() compare-and-set implementation for replay protection.`,
   )
 
-  return Method.toServer(ChannelMethod, {
+  return Method.toServer<typeof ChannelMethod, { channel: string }>(ChannelMethod, {
     defaults: {
       channel: channelAddress,
     },

@@ -20,7 +20,7 @@ This project works with **SEP-41 token transfers** — the Stellar standard inte
 ```bash
 pnpm install            # Install deps (also runs `tsc` via prepare script)
 pnpm run build          # Compile TypeScript → dist/
-pnpm run check:types    # Type-check only (tsc --noEmit)
+pnpm run check:types    # Type-check sources (tsconfig.json) plus tests and examples (tsconfig.test.json)
 pnpm test               # Run vitest (watch mode)
 pnpm test -- --run      # Run tests once without watch
 pnpm test -- sdk/src/charge/client/Charge.test.ts   # Run a single test file
@@ -75,6 +75,7 @@ Charge has 6 combinations from 3 axes: **push vs pull**, **sponsored vs unsponso
 ### Test Setup
 
 - **Vitest** with colocated test files (`*.test.ts` next to `*.ts`)
+- Vitest transpiles without type-checking, and `tsconfig.json` excludes `**/*.test.ts` so the build never emits tests into `dist/`. Type errors in tests and `examples/` are only caught by `tsconfig.test.json`, which `pnpm run check:types` runs as its second step. A passing test run is not evidence a test file type-checks
 - Tests mock `@stellar/stellar-sdk` and `mppx` internals
 - **ESLint 9** flat config, **Prettier** for formatting
 - **GitHub Actions** CI: format-check → lint → typecheck → test → build

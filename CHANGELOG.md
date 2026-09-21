@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Type `mppx.charge({ amount })` and `mppx.channel({ amount })` correctly. The server methods pass `recipient`/`currency` (charge) and `channel` (channel) as request defaults, but `Method.toServer` never infers them, so the handler types demanded those fields on every call even though the runtime filled them in. The examples and integration tests had this error all along, hidden because `tsconfig.json` excludes tests and examples from type-checking; `pnpm run check:types` now also runs `tsconfig.test.json` over both
 - Accept CAP-71 `SOROBAN_CREDENTIALS_ADDRESS_V2` auth entries alongside the legacy address arm across the charge client signing loop, the sponsored-flow server checks, and off-chain signature verification. The verifier now derives the signature payload with the SDK's `buildAuthorizationEntryPreimage`, so V2 entries are checked against the address-bound preimage the network validates; delegated credentials remain rejected. The charge client gains a `useUpgradedAuth` option that asks simulation for V2 entries in sponsored flows. The `@stellar/stellar-sdk` peer minimum rises to 16.3.0, whose `simulateTransaction` accepts the `useUpgradedAuth` flag [#74](https://github.com/stellar/stellar-mpp-sdk/pull/74)
 
 ### Security

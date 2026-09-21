@@ -1752,8 +1752,11 @@ describe('channel vouchers during close settlement window', () => {
         return backingStore.put(key, value)
       },
       delete: (key) => backingStore.delete(key),
-      async update(key, fn) {
-        const result = await backingStore.update(key, fn as never)
+      async update<key extends string, result>(
+        key: key,
+        fn: (current: unknown) => Store.Change<unknown, result>,
+      ): Promise<result> {
+        const result = await backingStore.update(key, fn)
         if (key === cumulativeKey) {
           const current = await backingStore.get(key)
           if (

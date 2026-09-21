@@ -1,0 +1,16 @@
+{
+  // Type-checks test files and examples. tsconfig.json excludes tests so that
+  // `tsc` (build) does not emit them into dist/, and only includes sdk/src.
+  // Vitest transpiles without type-checking, so this config is the only place
+  // type errors in those files are caught. Run: pnpm check:types:tests
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false
+  },
+  "include": ["sdk/src/**/*.test.ts", "examples/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}

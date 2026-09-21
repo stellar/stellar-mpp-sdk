@@ -265,7 +265,7 @@ describe('channel createCredential voucher', () => {
 
     const events: unknown[] = []
     const method = makeMethod({
-      onProgress: (e) => events.push(e),
+      onProgress: (e: unknown) => events.push(e),
     })
     const challenge = mockChallenge()
 

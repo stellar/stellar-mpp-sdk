@@ -20,9 +20,9 @@ const CONTRACT_ID = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC'
 const VALID_UNTIL_LEDGER = 1000
 
 /** The ScVal shape of a Soroban account signature: `{ public_key, signature }`. */
-const ACCOUNT_SIGNATURE_TYPE = {
+const ACCOUNT_SIGNATURE_TYPE: Parameters<typeof nativeToScVal>[1] = {
   type: { public_key: ['symbol', null], signature: ['symbol', null] },
-} as const
+}
 
 type AccountSignature = { public_key: Uint8Array; signature: Uint8Array }
 
@@ -101,7 +101,7 @@ function entrySignedByOther(
   opts: { authV2?: boolean } = {},
 ): Promise<xdr.SorobanAuthorizationEntry> {
   return authorizeInvocation({
-    signer: (preimage: xdr.HashIdPreimage) => ({
+    signer: async (preimage: xdr.HashIdPreimage) => ({
       signature: attacker.sign(hash(preimage.toXDR())),
       publicKey: attacker.publicKey(),
     }),
