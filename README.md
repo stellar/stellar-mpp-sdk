@@ -99,7 +99,7 @@ corepack enable
 ## Install
 
 ```bash
-npm install @stellar/mpp @stellar/stellar-sdk mppx viem
+npm install @stellar/mpp @stellar/stellar-sdk "mppx@^0.9.3" "viem@^2.54.0"
 ```
 
 `@stellar/stellar-sdk` and `mppx` are peer dependencies of `@stellar/mpp` — you must install compatible versions alongside it. `mppx` 0.9.x in turn requires `viem` (`>=2.54.0`) as a peer dependency, so install it too.
