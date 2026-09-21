@@ -67,7 +67,7 @@
   },
   "peerDependencies": {
     "@stellar/stellar-sdk": "^16.3.0",
-    "mppx": "^0.8.1"
+    "mppx": "^0.10.1"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -79,7 +79,7 @@
     "express": "^5.2.1",
     "express-rate-limit": "^8.5.2",
     "helmet": "^8.2.0",
-    "mppx": "^0.8.1",
+    "mppx": "^0.10.1",
     "pino": "^10.3.1",
     "pino-http": "^11.0.0",
     "prettier": "^3.9.3",
