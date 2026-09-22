@@ -5370,6 +5370,12 @@ describe('charge push-mode challenge claim release', () => {
     }
   }
 
+  function legacyCredential(challenge: ReturnType<typeof pushChallenge>, hash: string) {
+    return Object.assign(Credential.from({ challenge, payload: { type: 'hash', hash } }), {
+      source: `did:pkh:stellar:testnet:${PAYER.publicKey()}`,
+    })
+  }
+
   it('releases the challenge slot when the RPC lookup fails and accepts the retry', async () => {
     const store = Store.memory()
     const method = charge({ recipient: RECIPIENT, currency: USDC_SAC_TESTNET, store })
@@ -5405,6 +5411,37 @@ describe('charge push-mode challenge claim release', () => {
       method.verify({ credential: cred as any, request: cred.challenge.request }),
     ).rejects.toThrow('Transaction not found on-chain')
     expect(await store.get(`stellar:charge:challenge:${challenge.id}`)).toBeNull()
+  })
+
+  // The claim release must cover legacy unsigned push as well as `signedHash`.
+  // Both credential types settle on-chain before the payer sends the
+  // credential, so a failed check must not keep the challenge slot.
+  it('releases the challenge slot for legacy unsigned push and accepts the retry', async () => {
+    const store = Store.memory()
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store,
+      allowUnsignedPush: true,
+    })
+    const challenge = pushChallenge()
+    const cred = legacyCredential(challenge, testHash('legacy-not-yet-confirmed'))
+
+    mockGetTransaction.mockResolvedValueOnce({ status: 'NOT_FOUND' })
+    await expect(
+      method.verify({ credential: cred as any, request: cred.challenge.request }),
+    ).rejects.toThrow('Transaction not found on-chain')
+    expect(await store.get(`stellar:charge:challenge:${challenge.id}`)).toBeNull()
+
+    mockGetTransaction.mockResolvedValueOnce(confirmedTransfer())
+    const receipt = await method.verify({
+      credential: cred as any,
+      request: cred.challenge.request,
+    })
+    expect(receipt.status).toBe('success')
+    expect(await store.get(`stellar:charge:challenge:${challenge.id}`)).toEqual(
+      expect.objectContaining({ state: 'used' }),
+    )
   })
 
   it('does not let a stranger burn a challenge slot with a bogus hash', async () => {

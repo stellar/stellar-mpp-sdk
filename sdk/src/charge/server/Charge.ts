@@ -224,6 +224,7 @@ export function charge(parameters: charge.Parameters) {
       }
       return issuedAt
     }
+    // Legacy fallback
     if (challenge.expires) {
       const expiresAt = Math.floor(new Date(challenge.expires).getTime() / 1000)
       if (!Number.isFinite(expiresAt)) {
@@ -1456,11 +1457,21 @@ export declare namespace charge {
      */
     maxPushPaymentAgeSeconds?: number
     /**
-     * Lifetime, in seconds, of the challenges this server issues. Push-mode
-     * settlement uses it to derive each challenge's issuance time from its
-     * `expires` field and reject any on-chain payment confirmed before then, so a
-     * transfer made before the challenge cannot be presented as its settlement.
-     * Set this to match the expiry configured on the server's challenge issuer.
+     * Lifetime, in seconds, of the challenges this server issues.
+     *
+     * Push-mode settlement needs the time when the server issued the challenge.
+     * It rejects an on-chain payment that the network confirmed before that
+     * time.
+     *
+     * The server reads that time from the `issuedAt` field, which the request
+     * hook writes on every challenge it issues. This option has no effect on
+     * those challenges.
+     *
+     * Older challenges do not have an `issuedAt` field. For those challenges
+     * the server calculates the time of issue as the `expires` value minus this
+     * lifetime. Set this option to match the expiry that the server's challenge
+     * issuer uses. If a challenge has neither field, the server does not apply
+     * the check.
      *
      * @defaultValue `300`
      */
