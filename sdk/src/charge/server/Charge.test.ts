@@ -5149,3 +5149,435 @@ describe('charge sponsored dedup key (canonical on-chain inner hash)', () => {
     expect(await store.get(`stellar:charge:hash:${clientTxHash}`)).toBeNull()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Challenge identifiers must be different. The identifier is an HMAC over
+// the challenge contents. The request hook must add a value that changes at
+// each issue. If it did not, two customers who buy the same resource at the
+// same price would receive the same identifier. They would then collide on
+// the single-use replay slot.
+// ---------------------------------------------------------------------------
+
+describe('charge challenge id uniqueness', () => {
+  const secretKey = 'test-secret-key'
+
+  function issue(method: ReturnType<typeof charge>, expires: string) {
+    const request = (method as any).request({
+      request: { amount: '1', currency: USDC_SAC_TESTNET, recipient: RECIPIENT },
+    })
+    return Challenge.from({
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      request,
+      expires,
+      secretKey,
+    })
+  }
+
+  it('stamps a fresh nonce and issuance time on every request', () => {
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store: Store.memory(),
+    })
+    const a = (method as any).request({
+      request: { amount: '1', currency: USDC_SAC_TESTNET, recipient: RECIPIENT },
+    })
+    const b = (method as any).request({
+      request: { amount: '1', currency: USDC_SAC_TESTNET, recipient: RECIPIENT },
+    })
+    expect(a.methodDetails.reference).toMatch(/^[0-9a-f-]{36}$/)
+    expect(b.methodDetails.reference).toMatch(/^[0-9a-f-]{36}$/)
+    expect(a.methodDetails.reference).not.toBe(b.methodDetails.reference)
+    expect(Number.isFinite(new Date(a.methodDetails.issuedAt).getTime())).toBe(true)
+  })
+
+  it('gives two challenges with identical terms and a fixed expiry distinct HMAC ids', () => {
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store: Store.memory(),
+    })
+    const expires = new Date(Date.now() + 60_000).toISOString()
+    const first = issue(method, expires)
+    const second = issue(method, expires)
+    expect(first.id).not.toBe(second.id)
+    // The nonce is inside the request, and the HMAC covers the request. The
+    // binding stays correct.
+    expect(Challenge.verify(first, { secretKey })).toBe(true)
+    expect(Challenge.verify(second, { secretKey })).toBe(true)
+  })
+
+  it('round-trips the nonce through the method schema', () => {
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store: Store.memory(),
+    })
+    const challenge = issue(method, new Date(Date.now() + 60_000).toISOString())
+    const parsed = Challenge.deserialize(Challenge.serialize(challenge), { methods: [method] })
+    expect(parsed.request.methodDetails?.reference).toBe(challenge.request.methodDetails?.reference)
+    expect(parsed.id).toBe(challenge.id)
+  })
+
+  // The nonce is only of use if a change to it is easy to detect. A client
+  // that could exchange another challenge's nonce, or remove it, could again
+  // select its replay slot. These tests show that the HMAC covers the nonce.
+  // A successful `Challenge.verify` on an unchanged challenge does not show this.
+  function tamperedRequest(
+    challenge: ReturnType<typeof issue>,
+    methodDetails: Record<string, unknown>,
+  ) {
+    return {
+      ...challenge,
+      request: {
+        ...challenge.request,
+        methodDetails: { ...challenge.request.methodDetails, ...methodDetails },
+      },
+    }
+  }
+
+  it('verifies an unchanged challenge rebuilt the same way the tamper cases are', () => {
+    // This test protects the tamper tests below. If the rebuild of the request
+    // object were sufficient to fail verification, all of those tests would pass
+    // but show nothing about the nonce.
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store: Store.memory(),
+    })
+    const challenge = issue(method, new Date(Date.now() + 60_000).toISOString())
+    const rebuilt = tamperedRequest(challenge, {})
+    expect(Challenge.verify(rebuilt as any, { secretKey })).toBe(true)
+  })
+
+  it('rejects a challenge whose nonce was swapped for another issuance', () => {
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store: Store.memory(),
+    })
+    const expires = new Date(Date.now() + 60_000).toISOString()
+    const first = issue(method, expires)
+    const second = issue(method, expires)
+
+    // Keep the identifier of the first challenge, but use the nonce of the second.
+    const tampered = tamperedRequest(first, {
+      reference: second.request.methodDetails?.reference,
+    })
+    expect(Challenge.verify(tampered as any, { secretKey })).toBe(false)
+  })
+
+  it('rejects a challenge whose nonce was stripped', () => {
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store: Store.memory(),
+    })
+    const challenge = issue(method, new Date(Date.now() + 60_000).toISOString())
+    const { reference: _dropped, ...withoutNonce } = challenge.request.methodDetails as Record<
+      string,
+      unknown
+    >
+    const tampered = {
+      ...challenge,
+      request: { ...challenge.request, methodDetails: withoutNonce },
+    }
+    expect(Challenge.verify(tampered as any, { secretKey })).toBe(false)
+  })
+
+  it('rejects a challenge whose issuance stamp was backdated', () => {
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store: Store.memory(),
+    })
+    const challenge = issue(method, new Date(Date.now() + 60_000).toISOString())
+    // An earlier time of issue would increase the push-mode freshness window.
+    const tampered = tamperedRequest(challenge, {
+      issuedAt: new Date(Date.now() - 3_600_000).toISOString(),
+    })
+    expect(Challenge.verify(tampered as any, { secretKey })).toBe(false)
+  })
+
+  it('still rejects altered payment terms', () => {
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store: Store.memory(),
+    })
+    const challenge = issue(method, new Date(Date.now() + 60_000).toISOString())
+    const tampered = { ...challenge, request: { ...challenge.request, amount: '1' } }
+    expect(Challenge.verify(tampered as any, { secretKey })).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Push-mode claim release: the payer settles on-chain before the payer
+// sends the credential. A failed check must not keep the challenge slot.
+// ---------------------------------------------------------------------------
+
+describe('charge push-mode challenge claim release', () => {
+  beforeEach(() => {
+    mockGetTransaction.mockReset()
+  })
+
+  function pushChallenge() {
+    return Challenge.from({
+      id: `test-${crypto.randomUUID()}`,
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      request: {
+        amount: '10000000',
+        currency: USDC_SAC_TESTNET,
+        recipient: RECIPIENT,
+        methodDetails: { network: 'stellar:testnet' },
+      },
+    })
+  }
+
+  function pushCredential(challenge: ReturnType<typeof pushChallenge>, hash: string) {
+    return Object.assign(
+      Credential.from({
+        challenge,
+        payload: {
+          type: 'signedHash',
+          hash,
+          sourceSignature: Buffer.from(
+            PAYER.sign(Buffer.from(`${challenge.id}:${hash.toLowerCase()}`)),
+          ).toString('hex'),
+        },
+      }),
+      { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
+    )
+  }
+
+  function confirmedTransfer() {
+    const tx = buildTransferTx({
+      source: PAYER.publicKey(),
+      from: PAYER.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    tx.sign(PAYER)
+    return {
+      status: 'SUCCESS',
+      envelopeXdr: tx.toXDR(),
+      createdAt: Math.floor(Date.now() / 1000),
+    }
+  }
+
+  it('releases the challenge slot when the RPC lookup fails and accepts the retry', async () => {
+    const store = Store.memory()
+    const method = charge({ recipient: RECIPIENT, currency: USDC_SAC_TESTNET, store })
+    const challenge = pushChallenge()
+    const hash = testHash('transient-rpc-failure')
+    const cred = pushCredential(challenge, hash)
+
+    mockGetTransaction.mockRejectedValueOnce(new Error('ECONNRESET'))
+    await expect(
+      method.verify({ credential: cred as any, request: cred.challenge.request }),
+    ).rejects.toThrow('ECONNRESET')
+    expect(await store.get(`stellar:charge:challenge:${challenge.id}`)).toBeNull()
+
+    mockGetTransaction.mockResolvedValueOnce(confirmedTransfer())
+    const receipt = await method.verify({
+      credential: cred as any,
+      request: cred.challenge.request,
+    })
+    expect(receipt.status).toBe('success')
+    expect(await store.get(`stellar:charge:challenge:${challenge.id}`)).toEqual(
+      expect.objectContaining({ state: 'used' }),
+    )
+  })
+
+  it('releases the challenge slot when the transaction is not yet on-chain', async () => {
+    const store = Store.memory()
+    const method = charge({ recipient: RECIPIENT, currency: USDC_SAC_TESTNET, store })
+    const challenge = pushChallenge()
+    const cred = pushCredential(challenge, testHash('not-yet-confirmed'))
+
+    mockGetTransaction.mockResolvedValueOnce({ status: 'NOT_FOUND' })
+    await expect(
+      method.verify({ credential: cred as any, request: cred.challenge.request }),
+    ).rejects.toThrow('Transaction not found on-chain')
+    expect(await store.get(`stellar:charge:challenge:${challenge.id}`)).toBeNull()
+  })
+
+  it('does not let a stranger burn a challenge slot with a bogus hash', async () => {
+    const store = Store.memory()
+    const method = charge({ recipient: RECIPIENT, currency: USDC_SAC_TESTNET, store })
+    const challenge = pushChallenge()
+
+    // A different user with no funds sends a credential for a transaction that
+    // does not exist. Before the correction, this claimed the slot permanently.
+    const stranger = Keypair.random()
+    const bogusHash = testHash('never-broadcast')
+    const bogus = Object.assign(
+      Credential.from({
+        challenge,
+        payload: {
+          type: 'signedHash',
+          hash: bogusHash,
+          sourceSignature: Buffer.from(
+            stranger.sign(Buffer.from(`${challenge.id}:${bogusHash}`)),
+          ).toString('hex'),
+        },
+      }),
+      { source: `did:pkh:stellar:testnet:${stranger.publicKey()}` },
+    )
+    mockGetTransaction.mockResolvedValueOnce({ status: 'NOT_FOUND' })
+    await expect(
+      method.verify({ credential: bogus as any, request: bogus.challenge.request }),
+    ).rejects.toThrow('Transaction not found on-chain')
+
+    // The correct payer, who holds the same challenge, can still settle.
+    const cred = pushCredential(challenge, testHash('real-payment'))
+    mockGetTransaction.mockResolvedValueOnce(confirmedTransfer())
+    const receipt = await method.verify({
+      credential: cred as any,
+      request: cred.challenge.request,
+    })
+    expect(receipt.status).toBe('success')
+  })
+
+  it('keeps the challenge slot once the payment has settled', async () => {
+    const store = Store.memory()
+    const method = charge({ recipient: RECIPIENT, currency: USDC_SAC_TESTNET, store })
+    const challenge = pushChallenge()
+    const cred = pushCredential(challenge, testHash('settled-once'))
+
+    mockGetTransaction.mockResolvedValueOnce(confirmedTransfer())
+    await method.verify({ credential: cred as any, request: cred.challenge.request })
+
+    // A second use of the same credential is a replay. The rejection must not
+    // release the slot that the first use consumed.
+    await expect(
+      method.verify({ credential: cred as any, request: cred.challenge.request }),
+    ).rejects.toThrow('Challenge already used')
+    expect(await store.get(`stellar:charge:challenge:${challenge.id}`)).toEqual(
+      expect.objectContaining({ state: 'used' }),
+    )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Freshness must use the recorded `issuedAt` value. It must not use the
+// expiry minus an assumed lifetime. If it did, an operator who sets a long
+// expiry would cause the server to reject every push payment after it
+// settles.
+// ---------------------------------------------------------------------------
+
+describe('charge push-mode freshness with operator-set expiry', () => {
+  beforeEach(() => {
+    mockGetTransaction.mockReset()
+  })
+
+  function challengeWith(methodDetails: Record<string, unknown>, expires: string) {
+    return Challenge.from({
+      id: `test-${crypto.randomUUID()}`,
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      request: {
+        amount: '10000000',
+        currency: USDC_SAC_TESTNET,
+        recipient: RECIPIENT,
+        methodDetails: { network: 'stellar:testnet', ...methodDetails },
+      },
+      expires,
+    })
+  }
+
+  function credentialFor(challenge: ReturnType<typeof challengeWith>, hash: string) {
+    return Object.assign(
+      Credential.from({
+        challenge,
+        payload: {
+          type: 'signedHash',
+          hash,
+          sourceSignature: Buffer.from(
+            PAYER.sign(Buffer.from(`${challenge.id}:${hash.toLowerCase()}`)),
+          ).toString('hex'),
+        },
+      }),
+      { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
+    )
+  }
+
+  function confirmedAt(createdAt: number) {
+    const tx = buildTransferTx({
+      source: PAYER.publicKey(),
+      from: PAYER.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    tx.sign(PAYER)
+    return { status: 'SUCCESS', envelopeXdr: tx.toXDR(), createdAt }
+  }
+
+  it('accepts a fresh payment against a challenge with a one-day expiry', async () => {
+    const now = Math.floor(Date.now() / 1000)
+    const challenge = challengeWith(
+      { issuedAt: new Date(now * 1000).toISOString() },
+      new Date((now + 86_400) * 1000).toISOString(),
+    )
+    const cred = credentialFor(challenge, testHash('long-expiry-fresh'))
+    mockGetTransaction.mockResolvedValueOnce(confirmedAt(now))
+
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store: Store.memory(),
+    })
+    const receipt = await method.verify({
+      credential: cred as any,
+      request: cred.challenge.request,
+    })
+    expect(receipt.status).toBe('success')
+  })
+
+  it('still rejects a payment that predates the stamped issuance', async () => {
+    const now = Math.floor(Date.now() / 1000)
+    const challenge = challengeWith(
+      { issuedAt: new Date(now * 1000).toISOString() },
+      new Date((now + 86_400) * 1000).toISOString(),
+    )
+    const cred = credentialFor(challenge, testHash('long-expiry-stale'))
+    // 120 seconds before the time of issue. This is more than the 30-second
+    // skew budget and less than the 900-second window.
+    mockGetTransaction.mockResolvedValueOnce(confirmedAt(now - 120))
+
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store: Store.memory(),
+    })
+    await expect(
+      method.verify({ credential: cred as any, request: cred.challenge.request }),
+    ).rejects.toThrow('On-chain payment predates challenge issuance')
+  })
+
+  it('refuses an unreadable issuance stamp', async () => {
+    const now = Math.floor(Date.now() / 1000)
+    const challenge = challengeWith(
+      { issuedAt: 'not-a-date' },
+      new Date((now + 300) * 1000).toISOString(),
+    )
+    const cred = credentialFor(challenge, testHash('bad-issued-at'))
+    mockGetTransaction.mockResolvedValueOnce(confirmedAt(now))
+
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store: Store.memory(),
+    })
+    await expect(
+      method.verify({ credential: cred as any, request: cred.challenge.request }),
+    ).rejects.toThrow('Challenge issuance time is unreadable')
+  })
+})
