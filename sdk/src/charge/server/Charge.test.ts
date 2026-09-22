@@ -5308,7 +5308,7 @@ describe('charge challenge id uniqueness', () => {
       store: Store.memory(),
     })
     const challenge = issue(method, new Date(Date.now() + 60_000).toISOString())
-    const tampered = { ...challenge, request: { ...challenge.request, amount: '1' } }
+    const tampered = { ...challenge, request: { ...challenge.request, amount: '2' } }
     expect(Challenge.verify(tampered as any, { secretKey })).toBe(false)
   })
 })
