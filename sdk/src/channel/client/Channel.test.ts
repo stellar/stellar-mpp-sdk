@@ -3,6 +3,7 @@ import { Challenge, Store } from 'mppx'
 import { describe, expect, it, vi } from 'vitest'
 import { STELLAR_PUBNET, STELLAR_TESTNET } from '../../constants.js'
 import { StellarMppError } from '../../shared/errors.js'
+import { I128_MAX } from '../../shared/validation.js'
 import { buildCommitmentMessage } from '../commitment.js'
 
 const mockGetAccount = vi.fn()
@@ -674,5 +675,96 @@ describe('commitment byte-binding', () => {
     mockSimulateTransaction.mockClear()
     await signatureFor({ amount: '1000000' })
     expect(mockSimulateTransaction).not.toHaveBeenCalled()
+  })
+})
+
+describe('channel client amount validation', () => {
+  // The client validates the counterparty amount and the integrator override
+  // before it converts them to BigInt. It then checks the cumulative sum
+  // against the signed i128 maximum. Each failure must be a typed
+  // StellarMppError. A rejected amount must not advance the stored baseline.
+  // None of these paths makes an RPC call.
+
+  const CUMULATIVE_KEY = `stellar:channel:client:stellar:testnet:${CHANNEL_ADDRESS}:cumulative`
+
+  /** Returns the rejection of `createCredential` so a test can inspect it. */
+  async function rejectionOf(
+    method: ReturnType<typeof makeMethod>,
+    challenge: ReturnType<typeof mockChallenge>,
+    context: Record<string, unknown> = {},
+  ): Promise<unknown> {
+    return method
+      .createCredential({ challenge: challenge as any, context: context as any })
+      .then(() => {
+        throw new Error('expected createCredential to reject')
+      })
+      .catch((error: unknown) => error)
+  }
+
+  it('rejects a malformed counterparty amount with a typed error', async () => {
+    const store = Store.memory()
+    const method = makeMethod({ store, allowedChannels: [CHANNEL_ADDRESS] })
+
+    const error = await rejectionOf(method, mockChallenge({ amount: '100abc' }))
+
+    expect(error).toBeInstanceOf(StellarMppError)
+    expect((error as Error).message).toContain('must be a positive integer string')
+    expect((await store.get(CUMULATIVE_KEY)) ?? null).toBeNull()
+  })
+
+  it('rejects a counterparty amount above the signed i128 maximum with a typed error', async () => {
+    const store = Store.memory()
+    const method = makeMethod({ store, allowedChannels: [CHANNEL_ADDRESS] })
+
+    const error = await rejectionOf(method, mockChallenge({ amount: (I128_MAX + 1n).toString() }))
+
+    expect(error).toBeInstanceOf(StellarMppError)
+    expect((error as Error).message).toContain('exceeds the signed i128 maximum')
+    expect((await store.get(CUMULATIVE_KEY)) ?? null).toBeNull()
+  })
+
+  it('rejects a cumulativeAmount override above the signed i128 maximum with a typed error', async () => {
+    const store = Store.memory()
+    const method = makeMethod({ store, allowedChannels: [CHANNEL_ADDRESS] })
+
+    const error = await rejectionOf(method, mockChallenge(), {
+      cumulativeAmount: (I128_MAX + 1n).toString(),
+    })
+
+    expect(error).toBeInstanceOf(StellarMppError)
+    expect((error as Error).message).toContain('exceeds the signed i128 maximum')
+    expect((await store.get(CUMULATIVE_KEY)) ?? null).toBeNull()
+  })
+
+  it('rejects a cumulative sum above the signed i128 maximum and keeps the stored baseline', async () => {
+    // The stored baseline is already at the maximum. Any payment overflows.
+    const store = Store.memory()
+    await store.put(CUMULATIVE_KEY, { amount: I128_MAX.toString() })
+    const method = makeMethod({ store, allowedChannels: [CHANNEL_ADDRESS] })
+
+    const error = await rejectionOf(method, mockChallenge({ amount: '1' }))
+
+    expect(error).toBeInstanceOf(StellarMppError)
+    expect((error as Error).message).toMatch(
+      /^Cumulative amount .* exceeds the signed i128 maximum/,
+    )
+    expect(await store.get(CUMULATIVE_KEY)).toEqual({ amount: I128_MAX.toString() })
+  })
+
+  it('signs a cumulative sum that equals the signed i128 maximum', async () => {
+    // The check is strict: a sum equal to the maximum is valid.
+    const store = Store.memory()
+    await store.put(CUMULATIVE_KEY, { amount: (I128_MAX - 1n).toString() })
+    const method = makeMethod({ store, allowedChannels: [CHANNEL_ADDRESS] })
+
+    const credential = await method.createCredential({
+      challenge: mockChallenge({ amount: '1' }) as any,
+      context: {} as any,
+    })
+
+    const token = credential.replace(/^Payment\s+/, '')
+    const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
+    expect(decoded.payload.amount).toBe(I128_MAX.toString())
+    expect(await store.get(CUMULATIVE_KEY)).toEqual({ amount: I128_MAX.toString() })
   })
 })
