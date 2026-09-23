@@ -121,8 +121,9 @@ function makeSignedCredential(opts: {
   challengeAmount: string
   previousCumulative?: string
 }) {
-  // The server builds this message locally, so a credential is only valid when
-  // signed over the real encoding for its amount — not over arbitrary bytes.
+  // The server builds this message locally. A credential is therefore valid
+  // only if the client signs the real encoding for its amount. Arbitrary bytes
+  // are not sufficient.
   const sig = COMMITMENT_KEY.sign(
     buildCommitmentMessage({
       channel: CHANNEL_ADDRESS,
@@ -2959,8 +2960,9 @@ describe('channel server close transaction inspection (auth-tree injection)', ()
 // ---------------------------------------------------------------------------
 
 describe('channel verification runs RPC outside the cumulative lock', () => {
-  // Commitment signatures are now verified against a locally-built message, so
-  // the only RPC left in the verification path is the on-chain state read.
+  // The server verifies commitment signatures against a message that it builds
+  // locally. The on-chain state read is therefore the only RPC call that stays
+  // in the verification path.
   const COMMITMENT_BYTES = Buffer.from('unlocked-rpc-commitment-bytes')
 
   // These tests swap in delayed mock implementations. Mocks are not auto-cleared

@@ -19,27 +19,30 @@ export interface ExpectedCommitment {
 }
 
 /**
- * Builds the commitment message locally, byte-for-byte identical to what the
- * one-way-channel contract's `prepare_commitment` returns.
+ * Builds the commitment message locally. The bytes are identical to the bytes
+ * that the one-way-channel contract returns from `prepare_commitment`.
  *
- * The message is the XDR of an `ScVal::Map` with four entries — `amount`,
- * `channel`, `domain`, `network` — which Soroban requires in ascending key
- * order (already alphabetical here). Every field is known before a request
- * arrives: the amount comes from the voucher, the channel and network from
- * configuration, and the domain is a constant. Nothing about the message
- * depends on chain state, so constructing it needs no RPC.
+ * The message is the XDR of an `ScVal::Map`. The map holds four entries:
+ * `amount`, `channel`, `domain` and `network`. Soroban requires ascending key
+ * order, and these four keys are already in that order.
  *
- * Building rather than fetching also removes a trust dependency: bytes fetched
- * from an unauthenticated simulation must be checked field by field (see
- * {@link assertCommitmentBinds}) before they can be signed or verified against.
- * Bytes built here are correct by construction.
+ * This function knows every field before a request arrives. The amount comes
+ * from the voucher. The channel and the network come from the configuration.
+ * The domain is a constant. No field depends on chain state, so this function
+ * makes no RPC call.
  *
- * The one risk is drifting from the contract's encoding. The live parity test
- * in `integration/live` guards that by comparing this output against a real
- * `prepare_commitment` call.
+ * A local build also removes a trust dependency. Nothing authenticates a
+ * simulation result, so the caller must check each field of the fetched bytes
+ * before it signs them. Refer to {@link assertCommitmentBinds}. Bytes from this
+ * function always bind to the supplied channel, amount and network.
  *
- * @param expected - The channel, amount and network to bind the commitment to.
- * @returns XDR-encoded commitment bytes — the exact message the client signs.
+ * One risk remains: this encoding can become different from the contract
+ * encoding. The live parity test in `integration/live` finds that difference.
+ * The test compares this output with the output of a real `prepare_commitment`
+ * call.
+ *
+ * @param expected - The channel, amount and network for the commitment.
+ * @returns The XDR-encoded commitment bytes. The client signs these bytes.
  */
 export function buildCommitmentMessage(expected: ExpectedCommitment): Buffer {
   const networkId = hash(Buffer.from(NETWORK_PASSPHRASE[expected.network]))

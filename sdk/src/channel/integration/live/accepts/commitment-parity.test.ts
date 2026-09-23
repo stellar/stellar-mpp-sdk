@@ -18,19 +18,19 @@ import {
 import { buildCommitmentMessage } from '../../../commitment.js'
 
 /**
- * Contract-drift guard for {@link buildCommitmentMessage}.
+ * Guards {@link buildCommitmentMessage} against contract drift.
  *
- * The server no longer calls `prepare_commitment` to obtain the message it
- * verifies signatures against — it builds those bytes locally. That is only
- * safe while the local encoding agrees with the contract's, so this test
- * compares them against a real deployed channel.
+ * The server builds the commitment bytes locally. It no longer calls
+ * `prepare_commitment` to get the message that it verifies signatures against.
+ * This is safe only while the local encoding matches the contract encoding.
+ * This test compares the two encodings against a real deployed channel.
  *
- * Asking the contract was the original justification for the RPC call. This
- * test is what replaces that guarantee: it moves the check from every voucher
- * at runtime to once per CI run.
+ * The RPC call previously gave that guarantee for each voucher at runtime. This
+ * test gives the same guarantee one time for each CI run.
  *
- * Requires `CHANNEL_CONTRACT` to point at a deployed one-way-channel contract
- * on testnet. Skips when unset so the suite stays runnable without one.
+ * `CHANNEL_CONTRACT` must hold the address of a one-way-channel contract on
+ * testnet. The test skips when that variable is empty, so the suite still runs
+ * without a deployed contract.
  */
 const CHANNEL_CONTRACT = process.env.CHANNEL_CONTRACT
 
@@ -61,8 +61,8 @@ describe.skipIf(!CHANNEL_CONTRACT)('commitment encoding parity with the contract
     return Buffer.from(retval.bytes())
   }
 
-  // Spread across the i128 range: a boundary value, a typical voucher, and a
-  // large one, since encoding bugs tend to hide at width transitions.
+  // These amounts cover the i128 range: a boundary value, a typical voucher and
+  // a large value. Encoding faults usually occur at a change of width.
   const AMOUNTS = [1n, 1_000_000n, 9_999_999_999n, 2n ** 64n]
 
   it.each(AMOUNTS)('matches prepare_commitment(%s) byte-for-byte', async (amount) => {
@@ -79,9 +79,9 @@ describe.skipIf(!CHANNEL_CONTRACT)('commitment encoding parity with the contract
   })
 
   it('produces bytes a real keypair signature verifies against', async () => {
-    // End-to-end shape of the server's check: sign the locally-built message,
-    // verify with only the public key — exactly what verifyCommitmentSignature
-    // does, with no RPC involved in the verification itself.
+    // This is the full shape of the server check. Sign the message that the
+    // code built locally. Then verify it with only the public key. This is what
+    // verifyCommitmentSignature does, and it uses no RPC call.
     const kp = Keypair.random()
     const amount = 4_242_424n
 
@@ -97,8 +97,8 @@ describe.skipIf(!CHANNEL_CONTRACT)('commitment encoding parity with the contract
   })
 
   it('binds to the channel address', async () => {
-    // A different channel must produce different bytes, so a signature cannot
-    // be replayed across channels.
+    // A different channel must give different bytes. An attacker therefore
+    // cannot replay a signature on a different channel.
     const other = Address.contract(Buffer.alloc(32, 7)).toString()
     const amount = 1_000_000n
 

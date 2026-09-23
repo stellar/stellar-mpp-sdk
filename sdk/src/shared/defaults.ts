@@ -9,9 +9,10 @@ export const DEFAULT_POLL_TIMEOUT_MS = 20_000
 export const DEFAULT_POLL_MAX_CONCURRENT = 10
 export const DEFAULT_SIMULATION_TIMEOUT_MS = 10_000
 /**
- * Maximum credential verifications allowed to hold an on-chain channel state
- * read at once. Those reads run outside the cumulative lock, so this is the
- * only bound on RPC fan-out under a burst of credentials.
+ * The maximum number of credential verifications that can hold an on-chain
+ * channel state read at the same time. These reads run outside the cumulative
+ * lock. This value is therefore the only limit on the number of RPC calls that
+ * a burst of credentials can start.
  */
 export const DEFAULT_VERIFY_MAX_CONCURRENT = 10
 

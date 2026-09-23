@@ -156,8 +156,9 @@ export function channel(parameters: channel.Parameters) {
   const networkPassphrase = NETWORK_PASSPHRASE[network]
   const rpcServer = new rpc.Server(resolvedRpcUrl)
   const pollSemaphore = new Semaphore(pollMaxConcurrent)
-  // Bounds credential verifications holding an on-chain state read concurrently.
-  // The reads run outside cumulativeLock, so this is the only cap on fan-out.
+  // Limits the number of credential verifications that hold an on-chain state
+  // read at the same time. The reads run outside cumulativeLock, so this
+  // semaphore is the only limit on concurrent RPC calls.
   const verifySemaphore = new Semaphore(verifyMaxConcurrent)
 
   // Parse the commitment public key (accepts G... Stellar public key string or Keypair)
@@ -306,18 +307,21 @@ export function channel(parameters: channel.Parameters) {
   }
 
   /**
-   * Phase 1a — checks and RPC (runs OUTSIDE {@link cumulativeLock}).
+   * Phase 1a: checks and RPC. This function runs OUTSIDE {@link cumulativeLock}.
    *
-   * Claims the challenge, validates formats, and proves the commitment
-   * signature authentic. Nothing here writes channel state beyond the
-   * self-synchronising challenge claim, so the lifecycle reads are advisory:
-   * they shed obvious rejects before any RPC is spent, and the authoritative
-   * checks run in {@link doCommit} under the lock.
+   * The function claims the challenge, validates the formats and proves that
+   * the commitment signature is authentic. The signature check is local and
+   * makes no RPC call. The function writes no channel state, except for the
+   * self-synchronising challenge claim.
    *
-   * Keeping RPC out of the lock is deliberate. A simulation is bounded by
-   * `simulationTimeoutMs` (default 10s) and the on-chain state query costs
-   * several more calls; holding the lock across them lets a single credential
-   * stall every concurrent payer on this channel.
+   * The lifecycle reads here are therefore advisory. They reject an invalid
+   * credential early, before the server makes an RPC call. {@link doCommit}
+   * makes the authoritative checks under the lock.
+   *
+   * The remaining RPC call stays outside the lock for a reason. The on-chain
+   * state query costs several calls, and `simulationTimeoutMs` (default 10s)
+   * bounds its simulation. If the server held the lock during that query, one
+   * credential could stop every other payer on this channel.
    */
   async function doPrepare(credential: ChannelCredential): Promise<PreparedCredential> {
     const { challenge, payload } = credential
@@ -412,19 +416,20 @@ export function channel(parameters: channel.Parameters) {
       throw preCheckError
     }
 
-    // Verify the commitment signature before anything writes channel state.
-    // Local and CPU-only, so it runs outside the semaphore below: a forged
-    // voucher is rejected without ever occupying one of the bounded RPC slots.
+    // Verify the commitment signature before the server writes channel state.
+    // This check is local and uses only the CPU, so it runs outside the
+    // semaphore below. The server rejects a forged voucher before that voucher
+    // can occupy one of the limited RPC slots.
     verifyCommitmentSignature(commitmentAmount, signatureBytes)
 
-    // Query on-chain state only after the signature is proven authentic. The
-    // state read costs several RPC calls; gating it behind the cheap signature
-    // check stops a forged voucher from amplifying into the full state query.
+    // Read the on-chain state only after the signature check succeeds. The
+    // state read costs several RPC calls. The cheap signature check runs first,
+    // so a forged voucher cannot cause the full state query.
     //
-    // Bound the concurrency explicitly. The cumulative lock used to cap these
-    // reads at one in flight as a side effect of serialising validation; now
-    // that they run unlocked, a burst of credentials would otherwise fan
-    // straight out onto the RPC provider.
+    // Limit the concurrency here. The cumulative lock previously serialised
+    // validation, so it allowed only one read at a time. These reads now run
+    // outside that lock. Without this limit, a burst of credentials could send
+    // many requests to the RPC provider at the same time.
     if (checkOnChainState) {
       await verifySemaphore.acquire()
       try {
@@ -680,20 +685,21 @@ export function channel(parameters: channel.Parameters) {
   }
 
   /**
-   * Builds the commitment message locally and verifies the ed25519 signature
-   * against it.
+   * Builds the commitment message locally. Then verifies the ed25519 signature
+   * against that message.
    *
-   * This used to simulate `prepare_commitment` over RPC to obtain the signed
-   * message. It no longer does. The message is fully determined by the amount,
-   * the configured channel and network, and a constant domain separator — all
-   * known before the request arrives — so the round trip bought nothing and
-   * cost up to `simulationTimeoutMs` per voucher.
+   * An earlier version called `prepare_commitment` over RPC to get the signed
+   * message. Four values fully determine the message: the amount, the
+   * configured channel, the configured network and a constant domain
+   * separator. The server knows all four values before the request arrives. The
+   * call therefore added no information, and it cost up to
+   * `simulationTimeoutMs` for each voucher.
    *
-   * Dropping it also closes a trust gap. The simulation was unauthenticated, so
-   * an RPC that returned bytes for a *different* amount would have had a
-   * client's signature checked against those bytes while the server credited
-   * the amount from the payload. Bytes built here cannot disagree with the
-   * amount being credited.
+   * The local build also closes a security hole. Nothing authenticated the
+   * simulation, so a hostile RPC could return the bytes for a smaller amount.
+   * The server then checked the signature against those bytes, but it credited
+   * the larger amount from the payload. Bytes from a local build always agree
+   * with the amount that the server credits.
    *
    * @throws {ChannelVerificationError} If the signature does not match.
    */

@@ -5,7 +5,7 @@ export default defineConfig({
     // Unit tests plus the deterministic (mocked-RPC) integration tier. The live
     // testnet tier under integration/live/** is excluded — run it via
     // `pnpm test:integration` (vitest.integration.config.ts).
-    include: ['sdk/src/**/*.test.ts', 'examples/**/*.test.ts'],
+    include: ['sdk/src/**/*.test.ts', 'examples/**/*.test.ts', 'integration/live/**'],
     exclude: ['**/node_modules/**', '**/dist/**', '**/integration/live/**'],
   },
 })
