@@ -554,7 +554,7 @@ describe('channel pinning (allowedChannels)', () => {
     const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
     expect(decoded.payload.signature).toMatch(/^[0-9a-f]{128}$/)
 
-    // Signing is fully local now — a pinned channel is accepted without RPC.
+    // The client now signs locally. It accepts a pinned channel without RPC.
     expect(mockSimulateTransaction).not.toHaveBeenCalled()
   })
 
@@ -605,13 +605,13 @@ describe('channel pinning (allowedChannels)', () => {
 })
 
 describe('commitment byte-binding', () => {
-  // The client used to fetch the commitment over RPC and check that the
-  // returned bytes bound to the intended channel/amount/network before signing.
-  // It now builds those bytes itself, so a mismatch is not something to detect
-  // — it is unrepresentable. These tests assert the resulting binding directly:
-  // the signature must verify against the intended message and nothing else.
+  // An earlier version of the client fetched the commitment over RPC. It then
+  // checked that the returned bytes bound to the intended channel, amount and
+  // network. The client now builds those bytes itself, so it cannot produce a
+  // mismatch. These tests check the binding directly: the signature must verify
+  // against the intended message and against no other message.
 
-  /** Extracts the signature the client produced for a challenge. */
+  /** Extracts the signature that the client produced for a challenge. */
   async function signatureFor(overrides: Record<string, unknown> = {}) {
     const method = makeMethod({ allowedChannels: [CHANNEL_ADDRESS] })
     const credential = await method.createCredential({

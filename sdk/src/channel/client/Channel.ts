@@ -144,16 +144,16 @@ export function channel(parameters: channel.Parameters) {
         cumulativeAmount: cumulativeAmount.toString(),
       })
 
-      // Build the commitment locally. This used to simulate `prepare_commitment`
-      // on the channel contract, but the message is fully determined by the
-      // amount, channel and network the client already chose, so the round trip
-      // bought nothing — a payer no longer needs RPC reachability to sign.
+      // Build the commitment locally. An earlier version simulated
+      // `prepare_commitment` on the channel contract. The client already chose
+      // the amount, the channel and the network, and those three values fully
+      // determine the message. The call therefore added no information, and the
+      // payer needed an RPC connection to sign.
       //
-      // It also removes a trust step rather than adding one. Simulation results
-      // are unauthenticated, so the fetched bytes had to be checked field by
-      // field (see `assertCommitmentBinds`) before they were safe to sign.
-      // Bytes built here bind to the intended channel, amount and network by
-      // construction.
+      // A local build also removes a trust step. Nothing authenticates a
+      // simulation result, so the client had to check each field of the fetched
+      // bytes before it signed them. Refer to `assertCommitmentBinds`. These
+      // bytes always bind to the intended channel, amount and network.
       const commitmentBytes = buildCommitmentMessage({
         channel: channelAddress,
         amount: cumulativeAmount,
@@ -208,15 +208,15 @@ export declare namespace channel {
     /** Stellar Keypair for signing commitments. Provide either this or `commitmentSecret`. */
     commitmentKey?: Keypair
     /**
-     * @deprecated No longer used. Creating a credential makes no RPC calls —
-     * the commitment is built locally — so this value is ignored. Still
-     * accepted for backwards compatibility; slated for removal in a future minor.
+     * @deprecated The client ignores this value. It builds the commitment
+     * locally and makes no RPC call. The option stays for backwards
+     * compatibility. A future minor release will remove it.
      */
     rpcUrl?: string
     /**
-     * @deprecated No longer used. Creating a credential performs no simulation,
-     * so this value is ignored. Still accepted for backwards compatibility;
-     * slated for removal in a future minor.
+     * @deprecated The client ignores this value. It runs no simulation when it
+     * creates a credential. The option stays for backwards compatibility. A
+     * future minor release will remove it.
      */
     simulationTimeoutMs?: number
     /**
@@ -238,9 +238,10 @@ export declare namespace channel {
      * The client enforces that any channel advertised by the server in the
      * commitment challenge matches one of the addresses in this list.
      *
-     * As a second layer, the commitment the client signs is built locally from
-     * the pinned channel, the intended cumulative amount, the expected network,
-     * and the channel domain separator, so it cannot bind to anything else.
+     * The client also builds the commitment that it signs. It uses the pinned
+     * channel, the intended cumulative amount, the expected network and the
+     * channel domain separator. The commitment therefore cannot bind to a
+     * different channel.
      *
      * Channel pinning is required by default. To disable it, explicitly set
      * `allowUnpinnedChannel: true`.

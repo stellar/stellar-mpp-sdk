@@ -140,12 +140,12 @@ describe('assertCommitmentBinds', () => {
 })
 
 describe('buildCommitmentMessage', () => {
-  // Captured from a real one-way-channel contract deployed on testnet:
+  // These bytes come from a real one-way-channel contract on testnet:
   //   stellar contract invoke --id CAGQ...TSST --network testnet \
   //     -- prepare_commitment --amount 1000000
-  // Pins the encoding against the contract as of channel.wasm 908a23fd…2326.
-  // The live parity test re-derives this against a fresh deploy; this one keeps
-  // the guarantee under `make check`, where there is no network.
+  // They pin the encoding to channel.wasm 908a23fd…2326. The live parity test
+  // gets the same bytes from a new deployment. This test keeps the guarantee
+  // under `make check`, which has no network access.
   const ON_CHAIN_CHANNEL = 'CAGQNIIZVSURKZL57HYJV2FQG77HJR2FZMJIX6ZLTAUINKHH26GYTSST'
   // prettier-ignore
   const ON_CHAIN_BYTES_HEX =
@@ -162,8 +162,8 @@ describe('buildCommitmentMessage', () => {
   })
 
   it('round-trips through assertCommitmentBinds', () => {
-    // The encoder and the decoder are independent implementations, so agreeing
-    // on every field is a meaningful cross-check.
+    // The encoder and the decoder are independent implementations. A test that
+    // compares every field is therefore a useful cross-check.
     for (const network of [STELLAR_TESTNET, STELLAR_PUBNET] as const) {
       for (const amount of [1n, 1_000_000n, 2n ** 100n]) {
         const bytes = buildCommitmentMessage({ channel: CHANNEL, amount, network })
@@ -181,8 +181,8 @@ describe('buildCommitmentMessage', () => {
       network: STELLAR_TESTNET,
     })
 
-    // A signature over these bytes must not be reusable on another channel,
-    // for another amount, or on another network.
+    // A signature over these bytes must not work on a different channel, for a
+    // different amount or on a different network.
     expect(() =>
       assertCommitmentBinds(bytes, {
         channel: OTHER_CHANNEL,
