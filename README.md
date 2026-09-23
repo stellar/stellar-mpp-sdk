@@ -280,8 +280,10 @@ stellar.channel({
   network?: 'stellar:testnet' | 'stellar:pubnet', // default: 'stellar:testnet'
   decimals?: number,              // default: 7
   rpcUrl?: string,                // custom Soroban RPC URL
-  sourceAccount?: string,         // funded G... address for simulations
-  store?: Store.Store,            // replay protection + cumulative amount tracking
+  recipient?: string,             // expected channel payout address (strongly recommended)
+  currency?: string,              // expected channel token (strongly recommended)
+  store: Store.AtomicStore,       // required; atomic CAS store for replay protection
+                                  // and cumulative amount tracking
   feePayer?: {                     // fee payer for close/open transactions
     envelopeSigner: Keypair | string,   // source account + envelope signer
     feeBumpSigner?: Keypair | string,   // wraps tx in FeeBumpTransaction
@@ -294,10 +296,11 @@ stellar.channel({
   onDisputeDetected?: (state) => void, // callback when close_start detected
   maxFeeBumpStroops?: number,     // max fee bump in stroops (default: 10,000,000)
   pollMaxAttempts?: number,       // max polling attempts (default: 20)
+  pollMaxConcurrent?: number,     // max concurrent polling operations (default: 10)
   pollDelayMs?: number,           // delay between poll attempts in ms (default: 1,000)
   pollTimeoutMs?: number,         // overall poll timeout in ms (default: 20,000)
   simulationTimeoutMs?: number,   // simulation timeout in ms (default: 10,000)
-  verifyMaxConcurrent?: number, // max verifications making RPC calls at once (default: 10)
+  verifyMaxConcurrent?: number,   // max verifications making RPC calls at once (default: 10)
   logger?: Logger,                // structured logger (default: no-op)
 })
 ```
