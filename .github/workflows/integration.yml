@@ -1,0 +1,54 @@
+name: Integration
+
+# Live testnet tests (`pnpm test:integration`). Kept out of ci.yml because they
+# depend on testnet, friendbot, and the public Soroban RPC, which fail
+# intermittently for reasons unrelated to the code. Runs on dependency changes
+# (where upstream behavior shifts land), on main, and nightly.
+
+on:
+  pull_request:
+    paths:
+      - package.json
+      - pnpm-lock.yaml
+      - .github/workflows/integration.yml
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: integration-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+
+      - name: Setup pnpm via corepack
+        run: |
+          corepack enable
+          corepack install
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # One retry per test absorbs testnet lag (e.g. the RPC not yet seeing a
+      # friendbot-funded account) without masking a consistent failure.
+      - name: Live integration tests
+        run: pnpm test:integration --retry=1

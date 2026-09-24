@@ -2533,15 +2533,22 @@ describe('charge transaction verification', () => {
     mockSendTransaction.mockRejectedValueOnce(new Error('RPC down'))
 
     const cred = makeTransactionCredential(tx.toXDR())
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      logger,
     })
 
     await expect(
       method.verify({ credential: cred as any, request: cred.challenge.request }),
     ).rejects.toThrow('Settlement failed')
+    // mppx does not log payment errors, so the SDK must surface the failure.
+    expect(logger.error).toHaveBeenCalledWith(
+      '[stellar:charge] Settlement failed: could not broadcast transaction.',
+      { details: 'RPC down' },
+    )
   })
 
   it('throws SettlementError when transaction not confirmed', async () => {
@@ -3462,11 +3469,13 @@ describe('charge sponsored path authorization enforcement', () => {
     )
 
     const store = Store.memory()
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       feePayer: { envelopeSigner: signerKp },
       store,
+      logger,
     })
 
     // Isolate the broadcast assertion from calls made by earlier tests; mocks
@@ -3475,7 +3484,14 @@ describe('charge sponsored path authorization enforcement', () => {
 
     await expect(
       method.verify({ credential: cred as any, request: cred.challenge.request }),
-    ).rejects.toThrow('Pre-submission simulation failed')
+    ).rejects.toMatchObject({
+      message: '[stellar:charge] Pre-submission simulation failed.',
+      details: { simulationError: 'transaction simulation failed' },
+    })
+    expect(logger.warn).toHaveBeenCalledWith('[stellar:charge] Verification failed', {
+      error: 'Pre-submission simulation failed',
+      simulationError: 'transaction simulation failed',
+    })
 
     // The server must not have broadcast (and therefore not paid a fee) for a
     // transfer the enforcement-mode simulation rejected.

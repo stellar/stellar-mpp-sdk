@@ -744,6 +744,11 @@ export function charge(parameters: charge.Parameters) {
             ...(externalId ? { externalId } : {}),
           })
         } catch (error) {
+          // mppx does not log payment errors, so surface settlement failures
+          // (which may need reconciliation) through the configured logger.
+          if (error instanceof SettlementError) {
+            logger.error(error.message, error.details)
+          }
           if (!mayBeOnChain) {
             // The transaction never reached the ledger, so release the claims
             // this call made. The payer can then retry the same challenge
@@ -784,10 +789,14 @@ export function charge(parameters: charge.Parameters) {
       })
     } catch (error) {
       if (error instanceof SimulationContractError) {
-        throw new PaymentVerificationError(
-          `${LOG_PREFIX} Pre-submission simulation failed: ${error.simulationError}`,
-          { simulationError: error.simulationError },
-        )
+        // The raw RPC error is logged and kept in details, not the client-visible message.
+        logger.warn(`${LOG_PREFIX} Verification failed`, {
+          error: 'Pre-submission simulation failed',
+          simulationError: error.simulationError,
+        })
+        throw new PaymentVerificationError(`${LOG_PREFIX} Pre-submission simulation failed.`, {
+          simulationError: error.simulationError,
+        })
       }
       // Timeout and network errors bubble up as-is
       throw error
