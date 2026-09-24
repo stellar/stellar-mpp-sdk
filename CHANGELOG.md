@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Verify channel vouchers against the `CommitmentKey` stored in the channel contract's instance storage, not only the configured `commitmentKey`. The on-chain key is read once per server and cached; a configured `commitmentKey` that differs from it rejects every voucher, so the server only accepts vouchers the contract will settle [#76](https://github.com/stellar/stellar-mpp-sdk/pull/76)
 - Pin transitive development dependencies (`ip-address`, `postcss`, `brace-expansion`) via `pnpm.overrides` to clear advisories in third-party packages. All three are build- and test-time only, so the published package is unaffected [#62](https://github.com/stellar/stellar-mpp-sdk/pull/62)
   - Drop the now-redundant `form-data` and `vite` overrides — their parents' ranges already resolve to a patched version unaided
 
