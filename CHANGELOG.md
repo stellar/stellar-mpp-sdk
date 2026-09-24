@@ -21,7 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- Build the channel commitment message locally instead of fetching it from an unauthenticated `prepare_commitment` simulation. The server previously verified a client's signature against bytes returned by RPC while crediting the amount from the credential payload, so a compromised or intercepted RPC endpoint could have returned a commitment for a smaller amount than the one being credited. The bytes are now derived from the amount, channel and network the server already holds, so they cannot disagree with what is credited [#64](https://github.com/stellar/stellar-mpp-sdk/pull/64)
+- Build the channel commitment message locally instead of via a `prepare_commitment` simulation, so signatures are always verified against the credited amount [#64](https://github.com/stellar/stellar-mpp-sdk/pull/64). That involves:
+  - Deprecating the client's `rpcUrl` and `simulationTimeoutMs` options (now ignored)
+  - `verifyMaxConcurrent` now bounds only the on-chain state read
 - Pin transitive development dependencies (`ip-address`, `postcss`, `brace-expansion`) via `pnpm.overrides` to clear advisories in third-party packages. All three are build- and test-time only, so the published package is unaffected [#62](https://github.com/stellar/stellar-mpp-sdk/pull/62)
   - Drop the now-redundant `form-data` and `vite` overrides — their parents' ranges already resolve to a patched version unaided
 
