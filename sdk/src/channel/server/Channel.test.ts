@@ -3192,8 +3192,7 @@ describe('channel server commitment key pinning (on-chain CommitmentKey validati
   })
 
   it('rejects vouchers when the configured commitmentKey differs from the on-chain CommitmentKey', async () => {
-    // Attack shape: on-chain key is A (attacker-held), operator was told B
-    // (also attacker-held), voucher is signed with B. Pre-fix this was accepted.
+    // Configured key differs from the on-chain key: every voucher is rejected.
     const onChainKey = Keypair.random()
     mockGetStorageKey.mockResolvedValue(onChainCommitmentKey(onChainKey))
 
