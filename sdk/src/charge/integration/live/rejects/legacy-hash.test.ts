@@ -19,7 +19,6 @@ import {
   SOROBAN_RPC_URLS,
 } from '../../../../constants.js'
 import { pollTransaction } from '../../../../shared/poll.js'
-import { resolveNetworkId } from '../../../../shared/validation.js'
 import { charge as chargeMethod } from '../../../Methods.js'
 import { charge as serverCharge } from '../../../server/Charge.js'
 
