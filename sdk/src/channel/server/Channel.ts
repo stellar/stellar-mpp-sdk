@@ -29,7 +29,7 @@ import {
   DEFAULT_SIMULATION_TIMEOUT_MS,
 } from '../../shared/defaults.js'
 import { Semaphore } from '../../shared/semaphore.js'
-import { ChannelVerificationError } from '../../shared/errors.js'
+import { ChannelVerificationError, SettlementError } from '../../shared/errors.js'
 import { wrapFeeBump } from '../../shared/fee-bump.js'
 import { resolveKeypair } from '../../shared/keypairs.js'
 import { noopLogger, type Logger } from '../../shared/logger.js'
@@ -589,8 +589,9 @@ export function channel(parameters: channel.Parameters) {
    * 5. Broadcasts and polls for on-chain confirmation.
    * 6. Marks the channel as closed and the challenge as used in the store.
    *
-   * @throws {ChannelVerificationError} If no envelopeSigner is configured,
-   *   broadcast returns a non-PENDING status, or the on-chain tx fails.
+   * @throws {ChannelVerificationError} If no envelopeSigner is configured.
+   * @throws {SettlementError} If the broadcast fails or the on-chain tx does
+   *   not confirm.
    */
   async function doVerifyClose(params: {
     commitmentAmount: bigint
@@ -667,6 +668,11 @@ export function channel(parameters: channel.Parameters) {
         ...(externalId ? { externalId } : {}),
       })
     } catch (error) {
+      // mppx does not log payment errors, so surface settlement failures
+      // (which may need reconciliation) through the configured logger.
+      if (error instanceof SettlementError) {
+        logger.error(error.message, error.details)
+      }
       // A failure before broadcast means the close never reached the chain, so
       // roll back the settling markers and let the channel keep serving instead
       // of bricking it. After broadcast the outcome is ambiguous, so the markers
@@ -807,36 +813,46 @@ export function channel(parameters: channel.Parameters) {
    *
    * @param tx - The signed transaction (or FeeBumpTransaction) to submit.
    * @param label - Action label for error messages (e.g. "Close").
-   * @throws {ChannelVerificationError} If sendTransaction returns a non-PENDING
-   *   status or the polled result is not SUCCESS.
+   * @throws {SettlementError} If the broadcast throws or returns a non-PENDING
+   *   status, or if polling does not confirm the transaction.
    */
   async function broadcastAndPoll(
     tx: Transaction | FeeBumpTransaction,
     label: string,
   ): Promise<string> {
     logger.debug(`${LOG_PREFIX} Broadcasting ${label.toLowerCase()} tx...`)
-    const sendResult = await rpcServer.sendTransaction(tx)
+    let sendResult: rpc.Api.SendTransactionResponse
+    try {
+      sendResult = await rpcServer.sendTransaction(tx)
+    } catch (error) {
+      throw new SettlementError(
+        `${LOG_PREFIX} ${label} broadcast failed: could not broadcast transaction.`,
+        { details: error instanceof Error ? error.message : String(error) },
+      )
+    }
 
     if (sendResult.status !== 'PENDING') {
-      throw new ChannelVerificationError(
+      throw new SettlementError(
         `${LOG_PREFIX} ${label} broadcast failed: sendTransaction returned ${sendResult.status}.`,
         { hash: sendResult.hash, status: sendResult.status },
       )
     }
 
-    const txResult = await pollTransaction(rpcServer, sendResult.hash, {
-      maxAttempts: pollMaxAttempts,
-      delayMs: pollDelayMs,
-      timeoutMs: pollTimeoutMs,
-      semaphore: pollSemaphore,
-    })
-
-    if (txResult.status !== 'SUCCESS') {
-      throw new ChannelVerificationError(
-        `${LOG_PREFIX} ${label} transaction failed: ${txResult.status}`,
+    // pollTransaction only returns on SUCCESS; FAILED, timeouts, and semaphore
+    // exhaustion all throw, and the transaction may still land in the latter cases.
+    try {
+      await pollTransaction(rpcServer, sendResult.hash, {
+        maxAttempts: pollMaxAttempts,
+        delayMs: pollDelayMs,
+        timeoutMs: pollTimeoutMs,
+        semaphore: pollSemaphore,
+      })
+    } catch (error) {
+      throw new SettlementError(
+        `${LOG_PREFIX} ${label} settlement did not confirm — channel left settling pending reconciliation.`,
         {
           hash: sendResult.hash,
-          status: txResult.status,
+          details: error instanceof Error ? error.message : String(error),
         },
       )
     }

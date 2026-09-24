@@ -1,6 +1,7 @@
 import { Account, Address, Keypair, Networks, Transaction, xdr } from '@stellar/stellar-sdk'
 import { Challenge, Credential, Store } from 'mppx'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { SettlementError } from '../../shared/errors.js'
 
 // Hoisted mock stubs — accessible inside the vi.mock factory
 const mockGetAccount = vi.fn()
@@ -910,9 +911,10 @@ describe('stellar server channel verification', () => {
     expect((cumulative as any).amount).toBe('5000000')
   })
 
-  it('rejects close when sendTransaction returns non-PENDING status', async () => {
+  it('rejects close with a logged SettlementError when sendTransaction returns non-PENDING status', async () => {
     const signerKp = Keypair.random()
     const commitmentBytes = Buffer.from('close-reject-bytes')
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
     mockGetAccount.mockResolvedValueOnce(new Account(signerKp.publicKey(), '51'))
     mockPrepareTransaction.mockImplementationOnce((tx: any) => tx)
@@ -931,14 +933,61 @@ describe('stellar server channel verification', () => {
       commitmentKey: COMMITMENT_KEY,
       feePayer: { envelopeSigner: signerKp },
       store: Store.memory(),
+      logger,
     })
 
-    await expect(
-      method.verify({
+    const error = await method
+      .verify({
         credential: credential as any,
         request: credential.challenge.request,
-      }),
-    ).rejects.toThrow('sendTransaction returned ERROR')
+      })
+      .catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(SettlementError)
+    expect((error as SettlementError).message).toBe(
+      '[stellar:channel] Close broadcast failed: sendTransaction returned ERROR.',
+    )
+    expect(logger.error).toHaveBeenCalledWith(
+      '[stellar:channel] Close broadcast failed: sendTransaction returned ERROR.',
+      { hash: 'err-hash', status: 'ERROR' },
+    )
+  })
+
+  it('rejects close with a SettlementError when sendTransaction throws', async () => {
+    const signerKp = Keypair.random()
+    const commitmentBytes = Buffer.from('close-send-throws')
+    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
+    mockGetAccount.mockResolvedValueOnce(new Account(signerKp.publicKey(), '51'))
+    mockPrepareTransaction.mockImplementationOnce((tx: any) => tx)
+    mockSendTransaction.mockRejectedValueOnce(new Error('RPC down'))
+
+    const credential = makeSignedCredential({
+      action: 'close',
+      commitmentBytes,
+      cumulativeAmount: 5000000n,
+      challengeAmount: '5000000',
+    })
+
+    const method = channel({
+      channel: CHANNEL_ADDRESS,
+      checkOnChainState: false,
+      commitmentKey: COMMITMENT_KEY,
+      feePayer: { envelopeSigner: signerKp },
+      store: Store.memory(),
+    })
+
+    const error = await method
+      .verify({
+        credential: credential as any,
+        request: credential.challenge.request,
+      })
+      .catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(SettlementError)
+    expect((error as SettlementError).message).toBe(
+      '[stellar:channel] Close broadcast failed: could not broadcast transaction.',
+    )
+    expect((error as SettlementError).details).toEqual({ details: 'RPC down' })
   })
 
   it('rejects close when sendTransaction returns TRY_AGAIN_LATER', async () => {
@@ -967,15 +1016,20 @@ describe('stellar server channel verification', () => {
       store: Store.memory(),
     })
 
-    await expect(
-      method.verify({
+    const error = await method
+      .verify({
         credential: credential as any,
         request: credential.challenge.request,
-      }),
-    ).rejects.toThrow('sendTransaction returned TRY_AGAIN_LATER')
+      })
+      .catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(SettlementError)
+    expect((error as SettlementError).message).toBe(
+      '[stellar:channel] Close broadcast failed: sendTransaction returned TRY_AGAIN_LATER.',
+    )
   })
 
-  it('rejects close when poll returns non-SUCCESS status', async () => {
+  it('rejects close with a SettlementError that keeps the poll failure out of the message', async () => {
     const signerKp = Keypair.random()
     const commitmentBytes = Buffer.from('close-poll-fail')
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
@@ -999,12 +1053,21 @@ describe('stellar server channel verification', () => {
       store: Store.memory(),
     })
 
-    await expect(
-      method.verify({
+    const error = await method
+      .verify({
         credential: credential as any,
         request: credential.challenge.request,
-      }),
-    ).rejects.toThrow('poll-fail-hash failed')
+      })
+      .catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(SettlementError)
+    expect((error as SettlementError).message).toBe(
+      '[stellar:channel] Close settlement did not confirm — channel left settling pending reconciliation.',
+    )
+    expect((error as SettlementError).details).toEqual({
+      hash: 'poll-fail-hash',
+      details: 'Transaction poll-fail-hash failed: some-error',
+    })
   })
 
   it('wraps close tx in FeeBump when feeBumpSigner is set', async () => {
@@ -2009,7 +2072,7 @@ describe('channel vouchers during close settlement window', () => {
         credential: credential as any,
         request: credential.challenge.request,
       }),
-    ).rejects.toThrow('fail-settlement-hash failed')
+    ).rejects.toThrow(SettlementError)
 
     // After failure, settling marker must be present with the committed amount
     settlingMarker = await store.get(settlingKey)
