@@ -770,15 +770,22 @@ export function channel(parameters: channel.Parameters) {
       const spentStroops = inWindow ? current.spentStroops : 0
 
       if (spentStroops + charge > feeBudget.maxStroops) {
+        const details = {
+          funderKey,
+          spentStroops,
+          charge,
+          budgetStroops: feeBudget.maxStroops,
+          windowMs: feeBudget.windowMs,
+        }
+        // The error message reaches the client, so the funder key and budget
+        // configuration go only to the server log.
+        logger.warn(
+          `${LOG_PREFIX} Fee budget exceeded for funder ${funderKey}: spent ${spentStroops} stroops + charge ${charge} stroops exceeds budget ${feeBudget.maxStroops} stroops within ${feeBudget.windowMs} ms window.`,
+          details,
+        )
         throw new ChannelVerificationError(
-          `${LOG_PREFIX} Fee budget exceeded for the settlement funder.`,
-          {
-            funderKey,
-            spentStroops,
-            charge,
-            budgetStroops: feeBudget.maxStroops,
-            windowMs: feeBudget.windowMs,
-          },
+          `${LOG_PREFIX} Fee budget exceeded: this settlement would exceed the server's fee budget for the current window. Retry later.`,
+          details,
         )
       }
 

@@ -2063,6 +2063,7 @@ describe('channel vouchers during close settlement window', () => {
     const maxFeeBumpStroops = 5_000_000
     const windowMs = 10_000
 
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
     const method = channel({
       channel: CHANNEL_ADDRESS,
       checkOnChainState: false,
@@ -2074,6 +2075,7 @@ describe('channel vouchers during close settlement window', () => {
         windowMs,
       },
       store,
+      logger,
     })
 
     // First close settlement — should succeed, charges maxFeeBumpStroops against budget
@@ -2120,6 +2122,17 @@ describe('channel vouchers during close settlement window', () => {
         request: credential2.challenge.request,
       }),
     ).rejects.toThrow(/Fee budget exceeded/i)
+    // The full budget state goes to the server log, not to the client-facing message.
+    expect(logger.warn).toHaveBeenCalledWith(
+      `[stellar:channel] Fee budget exceeded for funder ${signerKp.publicKey()}: spent ${maxFeeBumpStroops} stroops + charge ${maxFeeBumpStroops} stroops exceeds budget ${maxFeeBumpStroops} stroops within ${windowMs} ms window.`,
+      {
+        funderKey: signerKp.publicKey(),
+        spentStroops: maxFeeBumpStroops,
+        charge: maxFeeBumpStroops,
+        budgetStroops: maxFeeBumpStroops,
+        windowMs,
+      },
+    )
 
     // Verify sendTransaction was NOT called for the second settlement
     const sendCalls = mockSendTransaction.mock.calls.length
