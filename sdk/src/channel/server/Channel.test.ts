@@ -3182,10 +3182,8 @@ describe('channel verification runs RPC outside the cumulative lock', () => {
 })
 
 describe('channel server commitment key pinning (on-chain CommitmentKey validation)', () => {
-  // The contract enforces vouchers against the CommitmentKey it stored at
-  // construction. The server must verify against that same key, read from
-  // instance storage, so a funder cannot deploy with key A while telling the
-  // operator to configure key B and pay with unenforceable B-signed vouchers.
+  // Vouchers must verify against the CommitmentKey the contract stored in its
+  // instance storage at construction since that is the key enforced at close.
 
   beforeEach(() => {
     mockSimulateTransaction.mockReset()
