@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Answer rejected charge and channel credentials with HTTP 402 and a fresh challenge again, instead of the HTTP 500 they have returned since the `mppx@0.10.1` bump. The SDK's error classes now extend `mppx`'s `PaymentError`, so the response names the rejection reason while `details` stay server-side. Settlement failures (`SettlementError`) keep a generic HTTP 500 and are logged through the configured `logger` [#83](https://github.com/stellar/stellar-mpp-sdk/pull/83)
   - Channel close failures after broadcast are now `SettlementError`s too, instead of retryable 402 verification failures
+  - Charge pre-submission simulation failures answer with a fixed message; the RPC error stays in `details`
 - Accept CAP-71 `SOROBAN_CREDENTIALS_ADDRESS_V2` auth entries alongside the legacy address arm across the charge client signing loop, the sponsored-flow server checks, and off-chain signature verification. The verifier now derives the signature payload with the SDK's `buildAuthorizationEntryPreimage`, so V2 entries are checked against the address-bound preimage the network validates; delegated credentials remain rejected. The charge client gains a `useUpgradedAuth` option that asks simulation for V2 entries in sponsored flows. The `@stellar/stellar-sdk` peer minimum rises to 16.3.0, whose `simulateTransaction` accepts the `useUpgradedAuth` flag [#74](https://github.com/stellar/stellar-mpp-sdk/pull/74)
 
 ### Security

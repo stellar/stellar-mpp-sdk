@@ -9,15 +9,31 @@ import {
 } from '@stellar/stellar-sdk'
 import { Challenge, Credential, Method, Store } from 'mppx'
 import { Mppx } from 'mppx/server'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { USDC_SAC_TESTNET } from '../../../../constants.js'
 import { SettlementError } from '../../../../shared/errors.js'
 import { charge as chargeMethod } from '../../../Methods.js'
-import { charge as serverCharge } from '../../../server/Charge.js'
+
+const mockSimulateTransaction = vi.fn()
+
+vi.mock('@stellar/stellar-sdk', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@stellar/stellar-sdk')>()
+  return {
+    ...actual,
+    rpc: {
+      ...actual.rpc,
+      Server: vi.fn().mockImplementation(function (this: Record<string, unknown>) {
+        this.simulateTransaction = mockSimulateTransaction
+      }),
+    },
+  }
+})
+
+const { charge: serverCharge } = await import('../../../server/Charge.js')
 
 // Drives rejected credentials through the real (unmocked) mppx server handler
-// and asserts the HTTP response a client receives. Every case is rejected
-// before any RPC call, so no network access is needed.
+// and asserts the HTTP response a client receives. Only the Soroban RPC client
+// is stubbed, so no network access is needed.
 
 const URL = 'http://localhost/resource'
 const SECRET_KEY = 'http-status-test-secret-key-min-32-bytes'
@@ -49,6 +65,10 @@ function chargeHandler(): Handler {
 }
 
 describe('charge rejection HTTP status (real mppx handler)', () => {
+  beforeEach(() => {
+    mockSimulateTransaction.mockReset()
+  })
+
   it('answers a rejected credential with 402, a fresh challenge, and the rejection reason', async () => {
     const response = await respondWith(chargeHandler(), {
       type: 'hash',
@@ -101,6 +121,44 @@ describe('charge rejection HTTP status (real mppx handler)', () => {
       title: 'Verification Failed',
       status: 402,
       detail: '[stellar:charge] Transfer amount does not match expected amount.',
+      challengeId: Challenge.fromResponse(response).id,
+    })
+  })
+
+  it('keeps the RPC simulation error out of the client-facing problem', async () => {
+    mockSimulateTransaction.mockResolvedValue({
+      id: '1',
+      latestLedger: 1,
+      error: 'HostError: Error(Contract, #10) via https://rpc.internal.example',
+    })
+    const tx = new TransactionBuilder(new Account(PAYER.publicKey(), '0'), {
+      fee: '100',
+      networkPassphrase: Networks.TESTNET,
+    })
+      .addOperation(
+        new Contract(USDC_SAC_TESTNET).call(
+          'transfer',
+          new Address(PAYER.publicKey()).toScVal(),
+          new Address(RECIPIENT).toScVal(),
+          nativeToScVal(10_000_000n, { type: 'i128' }),
+        ),
+      )
+      .setTimeout(180)
+      .build()
+    tx.sign(PAYER)
+
+    const response = await respondWith(chargeHandler(), {
+      type: 'transaction',
+      transaction: tx.toXDR(),
+    })
+
+    expect(mockSimulateTransaction).toHaveBeenCalledTimes(1)
+    expect(response.status).toBe(402)
+    expect(await response.json()).toEqual({
+      type: 'https://paymentauth.org/problems/verification-failed',
+      title: 'Verification Failed',
+      status: 402,
+      detail: '[stellar:charge] Pre-submission simulation failed.',
       challengeId: Challenge.fromResponse(response).id,
     })
   })

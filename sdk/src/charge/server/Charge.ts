@@ -789,10 +789,14 @@ export function charge(parameters: charge.Parameters) {
       })
     } catch (error) {
       if (error instanceof SimulationContractError) {
-        throw new PaymentVerificationError(
-          `${LOG_PREFIX} Pre-submission simulation failed: ${error.simulationError}`,
-          { simulationError: error.simulationError },
-        )
+        // The raw RPC error is logged and kept in details, not the client-visible message.
+        logger.warn(`${LOG_PREFIX} Verification failed`, {
+          error: 'Pre-submission simulation failed',
+          simulationError: error.simulationError,
+        })
+        throw new PaymentVerificationError(`${LOG_PREFIX} Pre-submission simulation failed.`, {
+          simulationError: error.simulationError,
+        })
       }
       // Timeout and network errors bubble up as-is
       throw error
