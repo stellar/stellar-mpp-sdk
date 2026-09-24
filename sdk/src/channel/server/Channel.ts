@@ -771,7 +771,7 @@ export function channel(parameters: channel.Parameters) {
 
       if (spentStroops + charge > feeBudget.maxStroops) {
         throw new ChannelVerificationError(
-          `${LOG_PREFIX} Fee budget exceeded for funder ${funderKey}: spent ${spentStroops} stroops + charge ${charge} stroops exceeds budget ${feeBudget.maxStroops} stroops within ${feeBudget.windowMs} ms window.`,
+          `${LOG_PREFIX} Fee budget exceeded for the settlement funder.`,
           {
             funderKey,
             spentStroops,

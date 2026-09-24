@@ -744,6 +744,11 @@ export function charge(parameters: charge.Parameters) {
             ...(externalId ? { externalId } : {}),
           })
         } catch (error) {
+          // mppx does not log payment errors, so surface settlement failures
+          // (which may need reconciliation) through the configured logger.
+          if (error instanceof SettlementError) {
+            logger.error(error.message, error.details)
+          }
           if (!mayBeOnChain) {
             // The transaction never reached the ledger, so release the claims
             // this call made. The payer can then retry the same challenge

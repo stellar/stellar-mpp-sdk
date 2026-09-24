@@ -2533,15 +2533,22 @@ describe('charge transaction verification', () => {
     mockSendTransaction.mockRejectedValueOnce(new Error('RPC down'))
 
     const cred = makeTransactionCredential(tx.toXDR())
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
       store: Store.memory(),
+      logger,
     })
 
     await expect(
       method.verify({ credential: cred as any, request: cred.challenge.request }),
     ).rejects.toThrow('Settlement failed')
+    // mppx does not log payment errors, so the SDK must surface the failure.
+    expect(logger.error).toHaveBeenCalledWith(
+      '[stellar:charge] Settlement failed: could not broadcast transaction.',
+      { details: 'RPC down' },
+    )
   })
 
   it('throws SettlementError when transaction not confirmed', async () => {
