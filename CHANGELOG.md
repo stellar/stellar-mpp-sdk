@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Raise the `mppx` peer dependency to `^0.11.0` (from `^0.10.1`) — consumers must bump. `mppx@0.11.0` removes the `memo` charge option in favor of automatically-generated challenge-bound attribution memos; this SDK never set that option, so no other changes are needed here [#86](https://github.com/stellar/stellar-mpp-sdk/pull/86)
 - Raise the `mppx` peer dependency to `^0.10.1` (from `^0.8.1`) — consumers must bump. `mppx@0.10.1` in turn raises its `viem` peer minimum to `>=2.54.0`; the development `viem` dependency here moves to `^2.54.0` to match. [#78](https://github.com/stellar/stellar-mpp-sdk/pull/78)
 - Raise the `@stellar/stellar-sdk` peer dependency to `^16.3.0` (from `^16.0.1`) — consumers must bump. Development builds track the same version [#74](https://github.com/stellar/stellar-mpp-sdk/pull/74)
 - Move Soroban RPC calls in channel credential verification (commitment-signature simulation and the on-chain state query) out of the cumulative lock, so a slow RPC no longer stalls every concurrent payer on a channel. The authoritative cumulative check and write still run under the lock. Adds a `verifyMaxConcurrent` channel server option (default 10) bounding how many verifications may hold RPC calls at once [#61](https://github.com/stellar/stellar-mpp-sdk/pull/61)
