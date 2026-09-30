@@ -1,7 +1,10 @@
 import { Address, Keypair, Networks, hash, nativeToScVal, xdr } from '@stellar/stellar-sdk'
 import { Challenge, Store } from 'mppx'
 import { describe, expect, it, vi } from 'vitest'
+import { STELLAR_PUBNET, STELLAR_TESTNET } from '../../constants.js'
 import { StellarMppError } from '../../shared/errors.js'
+import { I128_MAX } from '../../shared/validation.js'
+import { buildCommitmentMessage } from '../commitment.js'
 
 const mockGetAccount = vi.fn()
 const mockSimulateTransaction = vi.fn()
@@ -536,8 +539,6 @@ describe('channel pinning (allowedChannels)', () => {
 
   it('accepts channel address in allowedChannels list', async () => {
     mockSimulateTransaction.mockClear()
-    const commitmentBytes = buildCommitment({ amount: 1_000_000n })
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const method = channel({
       commitmentKey: TEST_KEYPAIR,
@@ -554,8 +555,8 @@ describe('channel pinning (allowedChannels)', () => {
     const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
     expect(decoded.payload.signature).toMatch(/^[0-9a-f]{128}$/)
 
-    // Verify simulate was called
-    expect(mockSimulateTransaction).toHaveBeenCalled()
+    // The client now signs locally. It accepts a pinned channel without RPC.
+    expect(mockSimulateTransaction).not.toHaveBeenCalled()
   })
 
   it('accepts channel address when explicitly opting out of pinning', async () => {
@@ -605,114 +606,165 @@ describe('channel pinning (allowedChannels)', () => {
 })
 
 describe('commitment byte-binding', () => {
-  it('refuses to sign when the simulated commitment encodes a different amount than intended', async () => {
-    // The client intends to sign cumulative 1000000, but the simulation
-    // returns a commitment for a different amount; it must refuse to sign.
-    mockSimulateTransaction.mockResolvedValueOnce(
-      successSimResult(buildCommitment({ amount: 999_999_999n })),
-    )
+  // An earlier version of the client fetched the commitment over RPC. It then
+  // checked that the returned bytes bound to the intended channel, amount and
+  // network. The client now builds those bytes itself, so it cannot produce a
+  // mismatch. These tests check the binding directly: the signature must verify
+  // against the intended message and against no other message.
 
-    const method = makeMethod()
-    const challenge = mockChallenge() // requests amount 1000000
+  /** Extracts the signature that the client produced for a challenge. */
+  async function signatureFor(overrides: Record<string, unknown> = {}) {
+    const method = makeMethod({ allowedChannels: [CHANNEL_ADDRESS] })
+    const credential = await method.createCredential({
+      challenge: mockChallenge(overrides) as any,
+      context: {} as any,
+    })
+    const token = credential.replace(/^Payment\s+/, '')
+    const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
+    return {
+      signature: Buffer.from(decoded.payload.signature, 'hex'),
+      amount: BigInt(decoded.payload.amount),
+    }
+  }
 
-    await expect(
-      method.createCredential({ challenge: challenge as any, context: {} as any }),
-    ).rejects.toThrow(/amount mismatch/i)
+  it('signs a message bound to the intended channel, amount and network', async () => {
+    const { signature, amount } = await signatureFor({ amount: '1000000' })
+
+    const intended = buildCommitmentMessage({
+      channel: CHANNEL_ADDRESS,
+      amount,
+      network: STELLAR_TESTNET,
+    })
+    expect(TEST_KEYPAIR.verify(intended, signature)).toBe(true)
   })
 
-  it('refuses to sign when the simulated commitment encodes a different channel', async () => {
-    mockSimulateTransaction.mockResolvedValueOnce(
-      successSimResult(
-        buildCommitment({
-          amount: 1_000_000n,
-          channel: 'CAYGVE5AUQQ2XNXWOXHH5VPGRHYX4APUAOWA4VOBI3VGMOYJ2IJ6VJG5',
-        }),
-      ),
-    )
+  it('produces a signature that does not verify for a different amount', async () => {
+    const { signature, amount } = await signatureFor({ amount: '1000000' })
 
-    const method = makeMethod()
-    const challenge = mockChallenge() // pinned/advertised channel is CHANNEL_ADDRESS
-
-    await expect(
-      method.createCredential({ challenge: challenge as any, context: {} as any }),
-    ).rejects.toThrow(/channel mismatch/i)
+    const otherAmount = buildCommitmentMessage({
+      channel: CHANNEL_ADDRESS,
+      amount: amount + 1n,
+      network: STELLAR_TESTNET,
+    })
+    expect(TEST_KEYPAIR.verify(otherAmount, signature)).toBe(false)
   })
 
-  it('signs when the simulated commitment binds to the intended channel and amount', async () => {
-    mockSimulateTransaction.mockResolvedValueOnce(
-      successSimResult(buildCommitment({ amount: 1_000_000n })),
-    )
+  it('produces a signature that does not verify for a different channel', async () => {
+    const { signature, amount } = await signatureFor({ amount: '1000000' })
 
-    const method = makeMethod()
-    const challenge = mockChallenge()
+    const otherChannel = buildCommitmentMessage({
+      channel: 'CAYGVE5AUQQ2XNXWOXHH5VPGRHYX4APUAOWA4VOBI3VGMOYJ2IJ6VJG5',
+      amount,
+      network: STELLAR_TESTNET,
+    })
+    expect(TEST_KEYPAIR.verify(otherChannel, signature)).toBe(false)
+  })
+
+  it('produces a signature that does not verify on a different network', async () => {
+    const { signature, amount } = await signatureFor({ amount: '1000000' })
+
+    const otherNetwork = buildCommitmentMessage({
+      channel: CHANNEL_ADDRESS,
+      amount,
+      network: STELLAR_PUBNET,
+    })
+    expect(TEST_KEYPAIR.verify(otherNetwork, signature)).toBe(false)
+  })
+
+  it('signs without making any RPC call', async () => {
+    mockSimulateTransaction.mockClear()
+    await signatureFor({ amount: '1000000' })
+    expect(mockSimulateTransaction).not.toHaveBeenCalled()
+  })
+})
+
+describe('channel client amount validation', () => {
+  // The client validates the counterparty amount and the integrator override
+  // before it converts them to BigInt. It then checks the cumulative sum
+  // against the signed i128 maximum. Each failure must be a typed
+  // StellarMppError. A rejected amount must not advance the stored baseline.
+  // None of these paths makes an RPC call.
+
+  const CUMULATIVE_KEY = `stellar:channel:client:stellar:testnet:${CHANNEL_ADDRESS}:cumulative`
+
+  /** Returns the rejection of `createCredential` so a test can inspect it. */
+  async function rejectionOf(
+    method: ReturnType<typeof makeMethod>,
+    challenge: ReturnType<typeof mockChallenge>,
+    context: Record<string, unknown> = {},
+  ): Promise<unknown> {
+    return method
+      .createCredential({ challenge: challenge as any, context: context as any })
+      .then(() => {
+        throw new Error('expected createCredential to reject')
+      })
+      .catch((error: unknown) => error)
+  }
+
+  it('rejects a malformed counterparty amount with a typed error', async () => {
+    const store = Store.memory()
+    const method = makeMethod({ store, allowedChannels: [CHANNEL_ADDRESS] })
+
+    const error = await rejectionOf(method, mockChallenge({ amount: '100abc' }))
+
+    expect(error).toBeInstanceOf(StellarMppError)
+    expect((error as Error).message).toContain('must be a positive integer string')
+    expect((await store.get(CUMULATIVE_KEY)) ?? null).toBeNull()
+  })
+
+  it('rejects a counterparty amount above the signed i128 maximum with a typed error', async () => {
+    const store = Store.memory()
+    const method = makeMethod({ store, allowedChannels: [CHANNEL_ADDRESS] })
+
+    const error = await rejectionOf(method, mockChallenge({ amount: (I128_MAX + 1n).toString() }))
+
+    expect(error).toBeInstanceOf(StellarMppError)
+    expect((error as Error).message).toContain('exceeds the signed i128 maximum')
+    expect((await store.get(CUMULATIVE_KEY)) ?? null).toBeNull()
+  })
+
+  it('rejects a cumulativeAmount override above the signed i128 maximum with a typed error', async () => {
+    const store = Store.memory()
+    const method = makeMethod({ store, allowedChannels: [CHANNEL_ADDRESS] })
+
+    const error = await rejectionOf(method, mockChallenge(), {
+      cumulativeAmount: (I128_MAX + 1n).toString(),
+    })
+
+    expect(error).toBeInstanceOf(StellarMppError)
+    expect((error as Error).message).toContain('exceeds the signed i128 maximum')
+    expect((await store.get(CUMULATIVE_KEY)) ?? null).toBeNull()
+  })
+
+  it('rejects a cumulative sum above the signed i128 maximum and keeps the stored baseline', async () => {
+    // The stored baseline is already at the maximum. Any payment overflows.
+    const store = Store.memory()
+    await store.put(CUMULATIVE_KEY, { amount: I128_MAX.toString() })
+    const method = makeMethod({ store, allowedChannels: [CHANNEL_ADDRESS] })
+
+    const error = await rejectionOf(method, mockChallenge({ amount: '1' }))
+
+    expect(error).toBeInstanceOf(StellarMppError)
+    expect((error as Error).message).toMatch(
+      /^Cumulative amount .* exceeds the signed i128 maximum/,
+    )
+    expect(await store.get(CUMULATIVE_KEY)).toEqual({ amount: I128_MAX.toString() })
+  })
+
+  it('signs a cumulative sum that equals the signed i128 maximum', async () => {
+    // The check is strict: a sum equal to the maximum is valid.
+    const store = Store.memory()
+    await store.put(CUMULATIVE_KEY, { amount: (I128_MAX - 1n).toString() })
+    const method = makeMethod({ store, allowedChannels: [CHANNEL_ADDRESS] })
 
     const credential = await method.createCredential({
-      challenge: challenge as any,
+      challenge: mockChallenge({ amount: '1' }) as any,
       context: {} as any,
     })
 
     const token = credential.replace(/^Payment\s+/, '')
     const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
-    expect(decoded.payload.signature).toMatch(/^[0-9a-f]{128}$/)
-  })
-})
-
-describe('channel client amount validation', () => {
-  it('rejects a malformed counterparty amount with a typed error', async () => {
-    const method = makeMethod({ allowedChannels: [CHANNEL_ADDRESS] })
-    const challenge = mockChallenge({ amount: '100abc' })
-
-    await expect(
-      method.createCredential({ challenge: challenge as any, context: {} as any }),
-    ).rejects.toThrow(StellarMppError)
-  })
-
-  it('rejects a counterparty amount exceeding the signed i128 maximum with a typed error', async () => {
-    const method = makeMethod({ allowedChannels: [CHANNEL_ADDRESS] })
-    const challenge = mockChallenge({ amount: (2n ** 127n).toString() })
-
-    await expect(
-      method.createCredential({ challenge: challenge as any, context: {} as any }),
-    ).rejects.toThrow(StellarMppError)
-  })
-
-  it('rejects a cumulativeAmount override exceeding the signed i128 maximum with a typed error', async () => {
-    const method = makeMethod({ allowedChannels: [CHANNEL_ADDRESS] })
-    const challenge = mockChallenge()
-
-    await expect(
-      method.createCredential({
-        challenge: challenge as any,
-        context: { cumulativeAmount: (2n ** 127n).toString() } as any,
-      }),
-    ).rejects.toThrow(StellarMppError)
-  })
-
-  it('rejects a cumulative total whose sum overflows the signed i128 maximum with a typed error', async () => {
-    const store = Store.memory()
-    await store.put(`stellar:channel:client:stellar:testnet:${CHANNEL_ADDRESS}:cumulative`, {
-      amount: (2n ** 127n - 1n).toString(),
-    })
-    const method = makeMethod({ store, allowedChannels: [CHANNEL_ADDRESS] })
-    const challenge = mockChallenge({ amount: '1000000' })
-
-    await expect(
-      method.createCredential({ challenge: challenge as any, context: {} as any }),
-    ).rejects.toThrow(StellarMppError)
-  })
-})
-
-describe('channel client simulation error handling', () => {
-  it('wraps a simulation failure in a typed StellarMppError', async () => {
-    // A counterparty-forced network/channel mismatch makes prepare_commitment
-    // simulation fail. simulateCall throws a SimulationContractError, which is
-    // not a StellarMppError; the client must surface it as a typed error.
-    mockSimulateTransaction.mockResolvedValueOnce({ error: 'contract trapped' })
-    const method = makeMethod({ allowedChannels: [CHANNEL_ADDRESS] })
-    const challenge = mockChallenge()
-
-    await expect(
-      method.createCredential({ challenge: challenge as any, context: {} as any }),
-    ).rejects.toThrow(StellarMppError)
+    expect(decoded.payload.amount).toBe(I128_MAX.toString())
+    expect(await store.get(CUMULATIVE_KEY)).toEqual({ amount: I128_MAX.toString() })
   })
 })

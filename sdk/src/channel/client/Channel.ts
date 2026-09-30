@@ -1,25 +1,10 @@
-import {
-  Account,
-  Contract,
-  Keypair,
-  TransactionBuilder,
-  nativeToScVal,
-  rpc,
-} from '@stellar/stellar-sdk'
+import { Keypair } from '@stellar/stellar-sdk'
 import { Credential, Method, Store } from 'mppx'
 import { z } from 'zod/mini'
-import {
-  ALL_ZEROS,
-  DEFAULT_FEE,
-  NETWORK_PASSPHRASE,
-  type NetworkId,
-  SOROBAN_RPC_URLS,
-} from '../../constants.js'
-import { DEFAULT_SIMULATION_TIMEOUT_MS } from '../../shared/defaults.js'
+import { type NetworkId } from '../../constants.js'
 import { StellarMppError } from '../../shared/errors.js'
-import { simulateCall } from '../../shared/simulate.js'
 import { I128_MAX, resolveNetworkId, validateAmount } from '../../shared/validation.js'
-import { assertCommitmentBinds } from '../commitment.js'
+import { buildCommitmentMessage } from '../commitment.js'
 import { channel as ChannelMethod } from '../Methods.js'
 
 /**
@@ -49,8 +34,6 @@ export function channel(parameters: channel.Parameters) {
     commitmentKey: commitmentKeyParam,
     commitmentSecret,
     onProgress,
-    rpcUrl,
-    simulationTimeoutMs = DEFAULT_SIMULATION_TIMEOUT_MS,
     store = Store.memory(),
     allowedChannels,
     allowUnpinnedChannel = false,
@@ -161,56 +144,17 @@ export function channel(parameters: channel.Parameters) {
         cumulativeAmount: cumulativeAmount.toString(),
       })
 
-      // Call prepare_commitment on the channel contract (read-only)
-      const resolvedRpcUrl = rpcUrl ?? SOROBAN_RPC_URLS[network]
-      const networkPassphrase = NETWORK_PASSPHRASE[network]
-      const server = new rpc.Server(resolvedRpcUrl)
-
-      const contract = new Contract(channelAddress)
-      const call = contract.call(
-        'prepare_commitment',
-        nativeToScVal(cumulativeAmount, { type: 'i128' }),
-      )
-
-      // Simulate the call to get the commitment bytes
-      const account = new Account(ALL_ZEROS, '0')
-      const simTx = new TransactionBuilder(account, {
-        fee: DEFAULT_FEE,
-        networkPassphrase,
-      })
-        .addOperation(call)
-        .setTimeout(simulationTimeoutMs / 1000)
-        .build()
-
-      // simulateCall throws its own Simulation* error classes, which do not
-      // extend StellarMppError. The triggering network/channel is
-      // counterparty-influenced, so wrap the failure to keep the public client
-      // API's typed-error contract.
-      let simResult
-      try {
-        simResult = await simulateCall(server, simTx, { timeoutMs: simulationTimeoutMs })
-      } catch (error) {
-        if (error instanceof StellarMppError) throw error
-        throw new StellarMppError(
-          `Channel commitment simulation failed: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-          { details: error instanceof Error ? error.message : String(error) },
-        )
-      }
-
-      // Extract the commitment bytes from the simulation result
-      const returnValue = simResult.result?.retval
-      if (!returnValue) {
-        throw new StellarMppError('prepare_commitment returned no value')
-      }
-
-      const commitmentBytes = returnValue.bytes()
-
-      // The simulation result is not authenticated, so confirm the commitment
-      // we are about to sign matches the channel, amount and network we
-      // intended before signing it.
-      assertCommitmentBinds(commitmentBytes, {
+      // Build the commitment locally. An earlier version simulated
+      // `prepare_commitment` on the channel contract. The client already chose
+      // the amount, the channel and the network, and those three values fully
+      // determine the message. The call therefore added no information, and the
+      // payer needed an RPC connection to sign.
+      //
+      // A local build also removes a trust step. Nothing authenticates a
+      // simulation result, so the client had to check each field of the fetched
+      // bytes before it signed them. Refer to `assertCommitmentBinds`. These
+      // bytes always bind to the intended channel, amount and network.
+      const commitmentBytes = buildCommitmentMessage({
         channel: channelAddress,
         amount: cumulativeAmount,
         network,
@@ -263,9 +207,17 @@ export declare namespace channel {
     commitmentSecret?: string
     /** Stellar Keypair for signing commitments. Provide either this or `commitmentSecret`. */
     commitmentKey?: Keypair
-    /** Custom Soroban RPC URL. Defaults based on network. */
+    /**
+     * @deprecated The client ignores this value. It builds the commitment
+     * locally and makes no RPC call. The option stays for backwards
+     * compatibility. A future minor release will remove it.
+     */
     rpcUrl?: string
-    /** Simulation timeout in milliseconds. @default 10_000 */
+    /**
+     * @deprecated The client ignores this value. It runs no simulation when it
+     * creates a credential. The option stays for backwards compatibility. A
+     * future minor release will remove it.
+     */
     simulationTimeoutMs?: number
     /**
      * Optional persistent store for client-side cumulative amount tracking.
@@ -286,9 +238,10 @@ export declare namespace channel {
      * The client enforces that any channel advertised by the server in the
      * commitment challenge matches one of the addresses in this list.
      *
-     * As a second layer, the client verifies the simulated commitment matches
-     * the pinned channel, the intended cumulative amount, the expected network,
-     * and the channel domain separator before signing.
+     * The client also builds the commitment that it signs. It uses the pinned
+     * channel, the intended cumulative amount, the expected network and the
+     * channel domain separator. The commitment therefore cannot bind to a
+     * different channel.
      *
      * Channel pinning is required by default. To disable it, explicitly set
      * `allowUnpinnedChannel: true`.
