@@ -11,6 +11,7 @@ import { DEFAULT_SIM_TIMEOUT_SECS, DEFAULT_SIMULATION_TIMEOUT_MS } from '../../s
 import { StellarMppError } from '../../shared/errors.js'
 import { scValToBigInt } from '../../shared/scval.js'
 import { withTimeout } from '../../shared/timeout.js'
+import { getStorageKey } from '../../shared/getStorageKey.js'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -124,11 +125,14 @@ export async function getChannelState(
   // Read CloseEffectiveAtLedger from contract instance storage.
   // The contract uses DataKey::CloseEffectiveAtLedger (enum variant index 5)
   // stored in instance storage.
-  const closeEffectiveAtLedger = await readCloseEffectiveAtLedger(
+  const closeEntry = await getStorageKey(
     server,
     channelAddress,
     simulationTimeoutMs,
+    'CloseEffectiveAtLedger',
   )
+
+  const closeEffectiveAtLedger = closeEntry ? closeEntry.u32() : null
 
   const latestLedger = await withTimeout(
     server.getLatestLedger(),
@@ -162,83 +166,4 @@ export declare namespace getChannelState {
      */
     simulationTimeoutMs?: number
   }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Read the CloseEffectiveAtLedger entry from the contract's instance storage.
- *
- * The contract's `DataKey` enum:
- * ```rust
- * enum DataKey { Token, From, CommitmentKey, To, RefundWaitingPeriod, CloseEffectiveAtLedger }
- * ```
- * Each variant is encoded as `ScVal::Vec([ScVal::Symbol(variant_name)])` in Soroban
- * for enum variants without data.
- *
- * We look for the `CloseEffectiveAtLedger` key in the contract's instance storage.
- */
-async function readCloseEffectiveAtLedger(
-  server: rpc.Server,
-  channelAddress: string,
-  simulationTimeoutMs: number,
-): Promise<number | null> {
-  // Build the LedgerKey for the contract's instance entry
-  const contractId = Address.fromString(channelAddress)
-  const instanceKey = xdr.LedgerKey.contractData(
-    new xdr.LedgerKeyContractData({
-      contract: contractId.toScAddress(),
-      key: xdr.ScVal.scvLedgerKeyContractInstance(),
-      durability: xdr.ContractDataDurability.persistent(),
-    }),
-  )
-
-  const response = await withTimeout(
-    server.getLedgerEntries(instanceKey),
-    simulationTimeoutMs,
-    `getLedgerEntries for channel ${channelAddress}`,
-  )
-  if (!response.entries || response.entries.length === 0) {
-    return null
-  }
-
-  const entry = response.entries[0]
-  const ledgerData = entry.val
-  const contractData = ledgerData?.contractData?.()
-  if (!contractData) return null
-  const instance = contractData.val?.()?.instance?.()
-  if (!instance) return null
-  const storage = instance.storage()
-
-  if (!storage) return null
-
-  // Search for the CloseEffectiveAtLedger key in the instance storage map.
-  // Soroban encodes simple enum variants as ScVal::Vec([ScVal::Symbol(name)])
-  for (const entry of storage) {
-    const key = entry.key()
-    // Check if this key matches DataKey::CloseEffectiveAtLedger
-    if (isEnumVariant(key, 'CloseEffectiveAtLedger')) {
-      const val = entry.val()
-      return val.u32()
-    }
-  }
-
-  return null
-}
-
-/** Check if an ScVal is a Soroban enum variant with the given name. */
-function isEnumVariant(scVal: xdr.ScVal, name: string): boolean {
-  try {
-    if (scVal.switch().value === xdr.ScValType.scvVec().value) {
-      const vec = scVal.vec()!
-      if (vec.length === 1 && vec[0].switch().value === xdr.ScValType.scvSymbol().value) {
-        return vec[0].sym().toString() === name
-      }
-    }
-  } catch {
-    // not the shape we expected
-  }
-  return false
 }
