@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING:** Base each channel commitment on the lower of two values: the highest cumulative that the client signed, and the cumulative in the server challenge. The client does not use a server value above the local value [#TBD](https://github.com/stellar/stellar-mpp-sdk/pull/TBD)
+  - The channel client rejects a challenge `cumulativeAmount` that is not a non-negative integer string in the i128 range, with a `StellarMppError`. Before, the client ignored this field. A server must send a valid value or omit the field
+  - The client store keeps the highest signed cumulative, not the last one. The client uses the atomic `update` of the store when it is available
+  - When a challenge has no `cumulativeAmount`, the client uses only its local cumulative and warns one time
 - Raise the `mppx` peer dependency to `^0.10.1` (from `^0.8.1`) — consumers must bump. `mppx@0.10.1` in turn raises its `viem` peer minimum to `>=2.54.0`; the development `viem` dependency here moves to `^2.54.0` to match. [#78](https://github.com/stellar/stellar-mpp-sdk/pull/78)
 - Raise the `@stellar/stellar-sdk` peer dependency to `^16.3.0` (from `^16.0.1`) — consumers must bump. Development builds track the same version [#74](https://github.com/stellar/stellar-mpp-sdk/pull/74)
 - Remove the per-voucher `prepare_commitment` RPC round trip from both channel client and server. The commitment message is fully determined by the amount, channel, network and a constant domain separator, so it is now built locally: signing and verification are CPU-only, and a payer no longer needs RPC reachability to sign a voucher. A live parity test (`integration/live`) asserts the local encoding matches the deployed contract byte-for-byte, replacing the contract round trip as the drift guard. `verifyMaxConcurrent` now bounds only the on-chain state read; the client's `rpcUrl` and `simulationTimeoutMs` options are deprecated and ignored [#64](https://github.com/stellar/stellar-mpp-sdk/pull/64)

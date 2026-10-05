@@ -75,6 +75,7 @@ export function channel(parameters: channel.Parameters) {
   }
 
   const commitmentKey = commitmentKeyParam ?? Keypair.fromSecret(commitmentSecret!)
+  let warnedNoServerCumulative = false
 
   return Method.toClient(ChannelMethod, {
     context: z.object({
@@ -115,18 +116,8 @@ export function channel(parameters: channel.Parameters) {
 
       const action = context?.action ?? 'voucher'
 
-      // The signed cumulative baseline comes solely from the client's own
-      // locally tracked value. The server-reported cumulative is not
-      // authoritative and is never adopted as the baseline — trusting it would
-      // let a rogue server inflate the amount the client signs.
-      let localPrevious = 0n
       const clientCumulativeKey = `stellar:channel:client:${network}:${channelAddress}:cumulative`
-      if (store) {
-        const localStored = await store.get(clientCumulativeKey)
-        if (localStored && typeof localStored === 'object' && 'amount' in localStored) {
-          localPrevious = BigInt((localStored as { amount: string }).amount)
-        }
-      }
+      const localPrevious = storedCumulative(await store.get(clientCumulativeKey)) ?? 0n
 
       // Validate the numeric inputs before converting them: a malformed or
       // out-of-range value would otherwise surface as an untyped
@@ -139,12 +130,27 @@ export function channel(parameters: channel.Parameters) {
         cumulativeAmount = BigInt(context.cumulativeAmount)
       } else {
         validateAmount(amount)
-        cumulativeAmount = localPrevious + BigInt(amount)
+        // The baseline is the lower of two values: the highest cumulative that
+        // this client signed, and the cumulative in the server challenge. The
+        // client does not use a server value above the local value.
+        const serverCumulative = parseServerCumulative(request.methodDetails?.cumulativeAmount)
+        if (serverCumulative === undefined && !warnedNoServerCumulative) {
+          warnedNoServerCumulative = true
+          console.warn(
+            '[stellar:channel:client] The server challenge has no cumulativeAmount — ' +
+              'the client uses only its local cumulative as the baseline.',
+          )
+        }
+        const baseline =
+          serverCumulative !== undefined && serverCumulative < localPrevious
+            ? serverCumulative
+            : localPrevious
+        cumulativeAmount = baseline + BigInt(amount)
       }
 
-      // The cumulative total is encoded as a Soroban i128 below; a sum that
-      // exceeds the signed i128 maximum (the locally tracked baseline plus this
-      // payment) must fail as a typed error rather than throwing from nativeToScVal.
+      // The cumulative total is encoded as a Soroban i128 below. A sum above
+      // the signed i128 maximum (the baseline plus this payment) must fail as a
+      // typed error rather than throwing from nativeToScVal.
       if (cumulativeAmount > I128_MAX) {
         throw new StellarMppError(
           `Cumulative amount ${cumulativeAmount.toString()} exceeds the signed i128 maximum (${I128_MAX.toString()}).`,
@@ -182,11 +188,8 @@ export function channel(parameters: channel.Parameters) {
       // Convert signature to hex string
       const sigHex = signature.toString('hex')
 
-      // Persist the signed cumulative amount so future calls can use the
-      // locally tracked baseline instead of trusting the server's claim.
-      if (store) {
-        await store.put(clientCumulativeKey, { amount: cumulativeAmount.toString() })
-      }
+      // The store keeps the highest cumulative that this client signed.
+      await persistHighestCumulative(store, clientCumulativeKey, cumulativeAmount)
 
       onProgress?.({
         type: 'signed',
@@ -203,6 +206,64 @@ export function channel(parameters: channel.Parameters) {
       })
     },
   })
+}
+
+/** Returns the cumulative of a client store record, or `undefined` if the record has no `amount`. */
+function storedCumulative(value: unknown): bigint | undefined {
+  return value && typeof value === 'object' && 'amount' in value
+    ? BigInt((value as { amount: string }).amount)
+    : undefined
+}
+
+/**
+ * Validates the cumulative in a server challenge.
+ *
+ * @returns The cumulative, or `undefined` if the challenge has no cumulative.
+ * @throws {StellarMppError} If the value is not a non-negative integer string
+ *   without leading zeros, or if it is more than the signed i128 maximum.
+ */
+function parseServerCumulative(value: unknown): bigint | undefined {
+  if (value === undefined) return undefined
+  if (
+    typeof value !== 'string' ||
+    value.length > I128_MAX.toString().length ||
+    !/^(0|[1-9]\d*)$/.test(value) ||
+    BigInt(value) > I128_MAX
+  ) {
+    throw new StellarMppError(
+      'Invalid server cumulative amount: it must be a non-negative integer string without leading zeros, not more than the signed i128 maximum.',
+    )
+  }
+  return BigInt(value)
+}
+
+/**
+ * Writes `amount` to `key` only if it is more than the stored cumulative.
+ *
+ * With an atomic `update`, concurrent calls cannot decrease the stored value.
+ * Other stores use a read and a write. Thus concurrent calls can keep a lower
+ * value, and the next payment can need more retries.
+ */
+async function persistHighestCumulative(
+  store: Store.Store,
+  key: string,
+  amount: bigint,
+): Promise<void> {
+  const atomic = store as Partial<Store.AtomicStore>
+  if (typeof atomic.update === 'function') {
+    await atomic.update(key, (current): Store.Change<{ amount: string }, void> => {
+      const previous = storedCumulative(current)
+      return previous !== undefined && previous >= amount
+        ? { op: 'noop', result: undefined }
+        : { op: 'set', value: { amount: amount.toString() }, result: undefined }
+    })
+    return
+  }
+
+  const previous = storedCumulative(await store.get(key))
+  if (previous === undefined || previous < amount) {
+    await store.put(key, { amount: amount.toString() })
+  }
 }
 
 export declare namespace channel {
@@ -236,10 +297,10 @@ export declare namespace channel {
     /**
      * Optional persistent store for client-side cumulative amount tracking.
      *
-     * When provided, the client persists the last signed cumulative amount
-     * and uses it as the sole baseline for subsequent commitments. The
-     * server-reported cumulative is never adopted as a baseline, so the value
-     * the client signs always derives from what it has already signed locally.
+     * The client keeps the highest cumulative that it signed. The next
+     * commitment starts from the lower of this value and the cumulative in the
+     * server challenge. For concurrent calls, use a store with an atomic
+     * `update`. The default in-memory store has it.
      *
      * Defaults to an in-memory store — the baseline is tracked within the
      * process lifetime but does not survive restarts. Pass a persistent

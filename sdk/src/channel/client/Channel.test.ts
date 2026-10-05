@@ -189,7 +189,15 @@ describe('channel createCredential voucher', () => {
     })
 
     const method = makeMethod({ store })
-    const challenge = mockChallenge({ amount: '500000' })
+    // The server reports the same accepted cumulative.
+    const challenge = mockChallenge({
+      amount: '500000',
+      methodDetails: {
+        reference: crypto.randomUUID(),
+        network: 'stellar:testnet',
+        cumulativeAmount: '2000000',
+      },
+    })
 
     const credential = await method.createCredential({
       challenge: challenge as any,
@@ -198,7 +206,7 @@ describe('channel createCredential voucher', () => {
 
     const token = credential.replace(/^Payment\s+/, '')
     const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
-    // local baseline 2000000 + requested 500000 = 2500000
+    // baseline 2000000 + requested 500000 = 2500000
     expect(decoded.payload.amount).toBe('2500000')
   })
 
@@ -307,18 +315,18 @@ describe('client-side cumulative tracking (store)', () => {
     expect(stored.amount).toBe('1000000') // 0 + 1000000
   })
 
-  it('uses the locally tracked cumulative and ignores the server-reported value', async () => {
-    const commitmentBytes = buildCommitment({ amount: 6_000_000n })
+  it('uses a lower server-reported cumulative as the baseline', async () => {
+    const commitmentBytes = buildCommitment({ amount: 3_000_000n })
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const store = Store.memory()
-    // Simulate client has already committed 5000000 locally
+    // The client has signed up to 5000000 locally.
     await store.put(`stellar:channel:client:stellar:testnet:${CHANNEL_ADDRESS}:cumulative`, {
       amount: '5000000',
     })
 
     const method = makeMethod({ store })
-    // Server reports a different cumulative; the client must ignore it.
+    // The server accepted only 2000000.
     const challenge = mockChallenge({
       amount: '1000000',
       methodDetails: {
@@ -335,50 +343,282 @@ describe('client-side cumulative tracking (store)', () => {
 
     const token = credential.replace(/^Payment\s+/, '')
     const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
-    // local baseline 5000000 (server-reported 2000000 ignored) + 1000000 = 6000000
-    expect(decoded.payload.amount).toBe('6000000')
+    // min(local 5000000, server 2000000) + 1000000 = 3000000
+    expect(decoded.payload.amount).toBe('3000000')
+    // The stored value stays at the highest signed cumulative.
+    const stored = (await store.get(
+      `stellar:channel:client:stellar:testnet:${CHANNEL_ADDRESS}:cumulative`,
+    )) as { amount: string }
+    expect(stored.amount).toBe('5000000')
   })
 
-  it('default in-memory store prevents cumulative reset across calls', async () => {
+  it('does not count a voucher again when the server did not accept it', async () => {
     mockSimulateTransaction.mockResolvedValueOnce(
       successSimResult(buildCommitment({ amount: 1_000_000n })),
     )
-    mockSimulateTransaction.mockResolvedValueOnce(
-      successSimResult(buildCommitment({ amount: 1_500_000n })),
-    )
 
-    const method = makeMethod() // no explicit store
+    const store = Store.memory()
+    const method = makeMethod({ store })
 
-    // First call: server reports cumulative 0, amount 1000000 → signs 1000000
-    const challenge1 = mockChallenge({
-      amount: '1000000',
-      methodDetails: {
-        reference: crypto.randomUUID(),
-        network: 'stellar:testnet',
-        cumulativeAmount: '0',
-      },
+    // First attempt signs 1000000. The server does not accept it.
+    const credential1 = await method.createCredential({
+      challenge: mockChallenge() as any,
+      context: {} as any,
     })
-    await method.createCredential({ challenge: challenge1 as any, context: {} as any })
-
-    // Second call reports cumulative 0 instead of the previously tracked value.
-    const challenge2 = mockChallenge({
-      amount: '500000',
-      methodDetails: {
-        reference: crypto.randomUUID(),
-        network: 'stellar:testnet',
-        cumulativeAmount: '0', // lower than the locally tracked value
-      },
-    })
+    // The new challenge still reports the accepted cumulative as 0.
     const credential2 = await method.createCredential({
-      challenge: challenge2 as any,
+      challenge: mockChallenge() as any,
       context: {} as any,
     })
 
-    const token = credential2.replace(/^Payment\s+/, '')
-    const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'))
-    // Default in-memory store tracked 1000000 from the first call, so the
-    // local baseline 1000000 + 500000 = 1500000 (server-reported 0 is ignored).
+    const decode = (c: string) =>
+      JSON.parse(Buffer.from(c.replace(/^Payment\s+/, ''), 'base64').toString('utf8'))
+    expect(decode(credential1).payload.amount).toBe('1000000')
+    expect(decode(credential2).payload.amount).toBe('1000000')
+    const stored = (await store.get(
+      `stellar:channel:client:stellar:testnet:${CHANNEL_ADDRESS}:cumulative`,
+    )) as { amount: string }
+    expect(stored.amount).toBe('1000000')
+  })
+
+  it('uses the server-reported cumulative after a concurrent voucher is not accepted', async () => {
+    const store = Store.memory()
+    // Two concurrent calls signed 1000000 and 3000000 from baseline 0. The
+    // local store kept 3000000, but the server accepted only 1000000.
+    await store.put(`stellar:channel:client:stellar:testnet:${CHANNEL_ADDRESS}:cumulative`, {
+      amount: '3000000',
+    })
+
+    const method = makeMethod({ store })
+    const credential = await method.createCredential({
+      challenge: mockChallenge({
+        amount: '500000',
+        methodDetails: {
+          reference: crypto.randomUUID(),
+          network: 'stellar:testnet',
+          cumulativeAmount: '1000000',
+        },
+      }) as any,
+      context: {} as any,
+    })
+
+    const decoded = JSON.parse(
+      Buffer.from(credential.replace(/^Payment\s+/, ''), 'base64').toString('utf8'),
+    )
+    // server 1000000 + requested 500000 = 1500000
     expect(decoded.payload.amount).toBe('1500000')
+  })
+
+  it('uses the local baseline when the server does not report a cumulative', async () => {
+    const store = Store.memory()
+    await store.put(`stellar:channel:client:stellar:testnet:${CHANNEL_ADDRESS}:cumulative`, {
+      amount: '2000000',
+    })
+
+    const method = makeMethod({ store })
+    const credential = await method.createCredential({
+      challenge: mockChallenge({
+        amount: '500000',
+        methodDetails: { reference: crypto.randomUUID(), network: 'stellar:testnet' },
+      }) as any,
+      context: {} as any,
+    })
+
+    const decoded = JSON.parse(
+      Buffer.from(credential.replace(/^Payment\s+/, ''), 'base64').toString('utf8'),
+    )
+    expect(decoded.payload.amount).toBe('2500000')
+  })
+
+  it.each<unknown>([
+    '-1',
+    '01',
+    'abc',
+    '1.5',
+    '',
+    '+1',
+    '1\n',
+    null,
+    5,
+    (2n ** 127n).toString(),
+    '9'.repeat(10000),
+    JSON.parse('{"toString":null}'),
+  ])(
+    'rejects an invalid server cumulative (case %#) with a typed error',
+    async (cumulativeAmount) => {
+      const method = makeMethod()
+      const challenge = mockChallenge({
+        methodDetails: {
+          reference: crypto.randomUUID(),
+          network: 'stellar:testnet',
+          cumulativeAmount,
+        },
+      })
+
+      const result = method.createCredential({ challenge: challenge as any, context: {} as any })
+      await expect(result).rejects.toThrow(StellarMppError)
+      await expect(result).rejects.toThrow(/Invalid server cumulative amount/)
+    },
+  )
+
+  it('accepts a server cumulative equal to the signed i128 maximum', async () => {
+    const method = makeMethod()
+    const credential = await method.createCredential({
+      challenge: mockChallenge({
+        methodDetails: {
+          reference: crypto.randomUUID(),
+          network: 'stellar:testnet',
+          cumulativeAmount: (2n ** 127n - 1n).toString(),
+        },
+      }) as any,
+      context: {} as any,
+    })
+
+    const decoded = JSON.parse(
+      Buffer.from(credential.replace(/^Payment\s+/, ''), 'base64').toString('utf8'),
+    )
+    // min(local 0, server i128 max) + 1000000 = 1000000
+    expect(decoded.payload.amount).toBe('1000000')
+  })
+
+  it('uses a lower server cumulative for a close credential', async () => {
+    const store = Store.memory()
+    await store.put(`stellar:channel:client:stellar:testnet:${CHANNEL_ADDRESS}:cumulative`, {
+      amount: '1000',
+    })
+
+    const method = makeMethod({ store })
+    const credential = await method.createCredential({
+      challenge: mockChallenge({
+        amount: '200',
+        methodDetails: {
+          reference: crypto.randomUUID(),
+          network: 'stellar:testnet',
+          cumulativeAmount: '400',
+        },
+      }) as any,
+      context: { action: 'close' } as any,
+    })
+
+    const decoded = JSON.parse(
+      Buffer.from(credential.replace(/^Payment\s+/, ''), 'base64').toString('utf8'),
+    )
+    expect(decoded.payload.action).toBe('close')
+    expect(decoded.payload.amount).toBe('600')
+    const stored = (await store.get(
+      `stellar:channel:client:stellar:testnet:${CHANNEL_ADDRESS}:cumulative`,
+    )) as { amount: string }
+    expect(stored.amount).toBe('1000')
+  })
+
+  it('ignores the server cumulative when the context overrides the cumulative amount', async () => {
+    const method = makeMethod()
+    const credential = await method.createCredential({
+      challenge: mockChallenge({
+        methodDetails: {
+          reference: crypto.randomUUID(),
+          network: 'stellar:testnet',
+          cumulativeAmount: 'not-a-number',
+        },
+      }) as any,
+      context: { action: 'close', cumulativeAmount: '3000000' } as any,
+    })
+
+    const decoded = JSON.parse(
+      Buffer.from(credential.replace(/^Payment\s+/, ''), 'base64').toString('utf8'),
+    )
+    expect(decoded.payload.amount).toBe('3000000')
+  })
+
+  it('warns once when the server challenge has no cumulative', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    try {
+      const method = makeMethod({ store: Store.memory() })
+      const noCumulative = () =>
+        mockChallenge({
+          methodDetails: { reference: crypto.randomUUID(), network: 'stellar:testnet' },
+        }) as any
+      await method.createCredential({ challenge: noCumulative(), context: {} as any })
+      await method.createCredential({ challenge: noCumulative(), context: {} as any })
+
+      const messages = warn.mock.calls.map(([message]) => String(message))
+      expect(messages.filter((m) => m.includes('has no cumulativeAmount'))).toHaveLength(1)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('does not lower the stored cumulative on a store without atomic update', async () => {
+    const backing = Store.memory()
+    await backing.put(`stellar:channel:client:stellar:testnet:${CHANNEL_ADDRESS}:cumulative`, {
+      amount: '4000000',
+    })
+    // A plain store exposes only get, put and delete.
+    const store: Store.Store = {
+      get: (key) => backing.get(key),
+      put: (key, value) => backing.put(key, value),
+      delete: (key) => backing.delete(key),
+    }
+
+    const method = makeMethod({ store })
+    const credential = await method.createCredential({
+      challenge: mockChallenge({
+        amount: '500000',
+        methodDetails: {
+          reference: crypto.randomUUID(),
+          network: 'stellar:testnet',
+          cumulativeAmount: '1000000',
+        },
+      }) as any,
+      context: {} as any,
+    })
+
+    const decoded = JSON.parse(
+      Buffer.from(credential.replace(/^Payment\s+/, ''), 'base64').toString('utf8'),
+    )
+    expect(decoded.payload.amount).toBe('1500000')
+    const stored = (await backing.get(
+      `stellar:channel:client:stellar:testnet:${CHANNEL_ADDRESS}:cumulative`,
+    )) as { amount: string }
+    expect(stored.amount).toBe('4000000')
+  })
+
+  it('keeps the highest cumulative when concurrent calls write to an atomic store', async () => {
+    const backing = Store.memory()
+    // Delay the write of the smaller amount so that it writes last.
+    const store: Store.AtomicStore = {
+      get: (key) => backing.get(key),
+      put: (key, value) => backing.put(key, value),
+      delete: (key) => backing.delete(key),
+      update: async (key, fn) => {
+        const change = fn(await backing.get(key))
+        if (change.op === 'set' && (change.value as { amount: string }).amount === '1000000') {
+          await new Promise((r) => setTimeout(r, 20))
+        }
+        return backing.update(key, fn)
+      },
+    }
+    const update = vi.spyOn(store, 'update')
+    const method = makeMethod({ store })
+
+    await Promise.all([
+      method.createCredential({
+        challenge: mockChallenge({ amount: '1000000' }) as any,
+        context: {} as any,
+      }),
+      method.createCredential({
+        challenge: mockChallenge({ amount: '3000000' }) as any,
+        context: {} as any,
+      }),
+    ])
+
+    // Both writes go through the atomic update.
+    expect(update).toHaveBeenCalledTimes(2)
+    const stored = (await backing.get(
+      `stellar:channel:client:stellar:testnet:${CHANNEL_ADDRESS}:cumulative`,
+    )) as { amount: string }
+    expect(stored.amount).toBe('3000000')
   })
 
   it('defaults to an in-memory store with a zero baseline, ignoring the server-reported cumulative', async () => {
@@ -408,11 +648,9 @@ describe('client-side cumulative tracking (store)', () => {
 })
 
 describe('cumulative baseline trust', () => {
-  it('ignores an inflated server-reported cumulative and signs only the local baseline plus the requested amount', async () => {
-    // Fresh client (cold in-memory store → local baseline 0). A rogue server
-    // claims a large existing cumulative; the client must not adopt it as the
-    // baseline, otherwise it would sign a close-valid commitment draining the
-    // channel while believing it authorised a single stroop.
+  it('ignores a server cumulative above the local baseline and signs only the local baseline plus the requested amount', async () => {
+    // Fresh client (cold in-memory store, local baseline 0). The server
+    // cumulative is more than the local value, so the client does not use it.
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(buildCommitment({ amount: 1n })))
 
     const method = makeMethod()
@@ -757,7 +995,17 @@ describe('channel client amount validation', () => {
     await store.put(CUMULATIVE_KEY, { amount: I128_MAX.toString() })
     const method = makeMethod({ store, allowedChannels: [CHANNEL_ADDRESS] })
 
-    const error = await rejectionOf(method, mockChallenge({ amount: '1' }))
+    const error = await rejectionOf(
+      method,
+      mockChallenge({
+        amount: '1',
+        methodDetails: {
+          reference: crypto.randomUUID(),
+          network: 'stellar:testnet',
+          cumulativeAmount: I128_MAX.toString(),
+        },
+      }),
+    )
 
     expect(error).toBeInstanceOf(StellarMppError)
     expect((error as Error).message).toMatch(
@@ -773,7 +1021,14 @@ describe('channel client amount validation', () => {
     const method = makeMethod({ store, allowedChannels: [CHANNEL_ADDRESS] })
 
     const credential = await method.createCredential({
-      challenge: mockChallenge({ amount: '1' }) as any,
+      challenge: mockChallenge({
+        amount: '1',
+        methodDetails: {
+          reference: crypto.randomUUID(),
+          network: 'stellar:testnet',
+          cumulativeAmount: (I128_MAX - 1n).toString(),
+        },
+      }) as any,
       context: {} as any,
     })
 
