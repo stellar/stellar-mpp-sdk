@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **BREAKING:** Base each channel commitment on the lower of two values: the highest cumulative that the client signed, and the cumulative in the server challenge. The client does not use a server value above the local value [#TBD](https://github.com/stellar/stellar-mpp-sdk/pull/TBD)
+- **BREAKING:** Base each channel commitment on the lower of two values: the highest cumulative that the client signed, and the cumulative in the server challenge. The client does not use a server value above the local value [#91](https://github.com/stellar/stellar-mpp-sdk/pull/91)
   - The channel client rejects a challenge `cumulativeAmount` that is not a non-negative integer string in the i128 range, with a `StellarMppError`. Before, the client ignored this field. A server must send a valid value or omit the field
   - The client store keeps the highest signed cumulative, not the last one. The client uses the atomic `update` of the store when it is available
   - When a challenge has no `cumulativeAmount`, the client uses only its local cumulative and warns one time
