@@ -124,6 +124,8 @@ export function channel(parameters: channel.Parameters) {
       // SyntaxError/RangeError from BigInt/nativeToScVal rather than a typed
       // StellarMppError. `amount` is counterparty-supplied; the override is the
       // integrator's own.
+      // The client rejects a malformed challenge cumulative on every path.
+      const serverCumulative = parseServerCumulative(request.methodDetails?.cumulativeAmount)
       let cumulativeAmount: bigint
       if (context?.cumulativeAmount !== undefined) {
         validateAmount(context.cumulativeAmount)
@@ -133,7 +135,6 @@ export function channel(parameters: channel.Parameters) {
         // The baseline is the lower of two values: the highest cumulative that
         // this client signed, and the cumulative in the server challenge. The
         // client does not use a server value above the local value.
-        const serverCumulative = parseServerCumulative(request.methodDetails?.cumulativeAmount)
         if (serverCumulative === undefined && !warnedNoServerCumulative) {
           warnedNoServerCumulative = true
           console.warn(

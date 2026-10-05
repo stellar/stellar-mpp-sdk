@@ -511,14 +511,31 @@ describe('client-side cumulative tracking (store)', () => {
     expect(stored.amount).toBe('1000')
   })
 
-  it('ignores the server cumulative when the context overrides the cumulative amount', async () => {
+  it('rejects a malformed server cumulative when the context overrides the cumulative amount', async () => {
+    const method = makeMethod()
+    const result = method.createCredential({
+      challenge: mockChallenge({
+        methodDetails: {
+          reference: crypto.randomUUID(),
+          network: 'stellar:testnet',
+          cumulativeAmount: 'not-a-number',
+        },
+      }) as any,
+      context: { action: 'close', cumulativeAmount: '3000000' } as any,
+    })
+
+    await expect(result).rejects.toThrow(StellarMppError)
+    await expect(result).rejects.toThrow(/Invalid server cumulative amount/)
+  })
+
+  it('ignores a valid server cumulative when the context overrides the cumulative amount', async () => {
     const method = makeMethod()
     const credential = await method.createCredential({
       challenge: mockChallenge({
         methodDetails: {
           reference: crypto.randomUUID(),
           network: 'stellar:testnet',
-          cumulativeAmount: 'not-a-number',
+          cumulativeAmount: '1000000',
         },
       }) as any,
       context: { action: 'close', cumulativeAmount: '3000000' } as any,
