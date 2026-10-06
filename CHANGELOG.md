@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Keep the latest accepted channel commitment on the server and add helpers to close the channel with it
+  - The commitment signature is stored next to the cumulative amount; `getLatestCommitment()` reads the pair. Records written by earlier versions have no signature until the next accepted voucher
+
 ### Changed
 
 - **BREAKING:** Base each channel commitment on the lower of two values: the highest cumulative that the client signed, and the cumulative in the server challenge. The client does not use a server value above the local value [#91](https://github.com/stellar/stellar-mpp-sdk/pull/91)
