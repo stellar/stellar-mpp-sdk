@@ -228,7 +228,7 @@ const data = await response.json()
 | `@stellar/mpp/charge/server`  | `stellar`, `charge`, `Mppx`, `Store`, `Expires`, `resolveKeypair`                                                                                                                                                                                                                |
 | `@stellar/mpp/channel`        | `channel` (method schema)                                                                                                                                                                                                                                                        |
 | `@stellar/mpp/channel/client` | `stellar`, `channel`, `Mppx`                                                                                                                                                                                                                                                     |
-| `@stellar/mpp/channel/server` | `stellar`, `channel`, `close`, `getChannelState`, `watchChannel`, `resolveKeypair`, `Mppx`, `Store`, `Expires`, `ChannelState` (type), `ChannelEvent` (type)                                                                                                                     |
+| `@stellar/mpp/channel/server` | `stellar`, `channel`, `close`, `getLatestCommitment`, `getChannelState`, `watchChannel`, `resolveKeypair`, `Mppx`, `Store`, `Expires`, `ChannelState` (type), `ChannelEvent` (type)                                                                                              |
 | `@stellar/mpp/env`            | `parseRequired`, `parseOptional`, `parsePort`, `parseStellarPublicKey`, `parseStellarSecretKey`, `parseContractAddress`, `parseHexKey`, `parseCommaSeparatedList`, `parseNumber`                                                                                                 |
 
 ### Server options (charge)
@@ -458,16 +458,23 @@ During an on-chain close the channel enters a fail-closed `settling` state and s
 **On-chain close (server-side):**
 
 ```ts
-import { close } from '@stellar/mpp/channel/server'
+import { close, getLatestCommitment } from '@stellar/mpp/channel/server'
 
-await close({
-  channel: 'CABC...', // channel contract address
-  amount: 8000000n, // commitment amount to close with
-  signature: commitmentSigBytes, // ed25519 signature from the latest commitment
-  feePayer: { envelopeSigner: recipientKeypair },
-  network: 'stellar:testnet',
-})
+const channel = 'CABC...' // channel contract address
+const latest = await getLatestCommitment({ store, channel }) // same store as the channel server
+if (latest) {
+  await close({
+    channel,
+    amount: latest.amount,
+    signature: latest.signature,
+    feePayer: { envelopeSigner: recipientKeypair },
+    network: 'stellar:testnet',
+  })
+}
 ```
+
+- The server stores the latest verified commitment amount and signature together so the recipient can close the channel with them. Records written by earlier versions have no signature until the next accepted voucher; `getLatestCommitment()` returns `null` when no signature is stored.
+- When `watchChannel` reports a `close` event with a future `effectiveAtLedger`, or `onDisputeDetected` fires, read the latest pair and call `close()` with it before the refund waiting period ends.
 
 ## Constants
 

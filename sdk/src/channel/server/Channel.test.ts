@@ -1,9 +1,17 @@
-import { Account, Address, Keypair, Networks, Transaction, xdr } from '@stellar/stellar-sdk'
+import {
+  Account,
+  Address,
+  Keypair,
+  Networks,
+  Transaction,
+  nativeToScVal,
+  xdr,
+} from '@stellar/stellar-sdk'
 import { STELLAR_TESTNET } from '../../constants.js'
 import { buildCommitmentMessage } from '../commitment.js'
 import { Challenge, Credential, Store } from 'mppx'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { SettlementError } from '../../shared/errors.js'
+import { ChannelVerificationError, SettlementError } from '../../shared/errors.js'
 
 // Hoisted mock stubs — accessible inside the vi.mock factory
 const mockGetAccount = vi.fn()
@@ -51,7 +59,7 @@ vi.mock('../../shared/fee-bump.js', () => ({
 }))
 
 // Re-import after mock is set up
-const { channel } = await import('./Channel.js')
+const { channel, close, getLatestCommitment } = await import('./Channel.js')
 
 // Default: getAccount returns a minimal account stub with a valid public key
 const MOCK_SOURCE_KEY = Keypair.random()
@@ -850,6 +858,15 @@ describe('stellar server channel verification', () => {
     // Settling marker rolled back.
     expect(await store.get(`stellar:channel:settling:${CHANNEL_ADDRESS}`)).toBeNull()
 
+    expect(await getLatestCommitment({ store, channel: CHANNEL_ADDRESS })).toEqual({
+      amount: 5000000n,
+      signature: Buffer.from(closeCred.payload.signature, 'hex'),
+    })
+    expect(await store.get(`stellar:channel:cumulative:${CHANNEL_ADDRESS}`)).toEqual({
+      amount: '5000000',
+      signature: closeCred.payload.signature,
+    })
+
     // A subsequent voucher above the attempted close amount still succeeds.
     const voucherCred = makeSignedCredential({
       action: 'voucher',
@@ -909,6 +926,10 @@ describe('stellar server channel verification', () => {
     const cumulative = await store.get(`stellar:channel:cumulative:${CHANNEL_ADDRESS}`)
     expect(cumulative).toBeDefined()
     expect((cumulative as any).amount).toBe('5000000')
+    expect(await getLatestCommitment({ store, channel: CHANNEL_ADDRESS })).toEqual({
+      amount: 5000000n,
+      signature: Buffer.from(credential.payload.signature, 'hex'),
+    })
   })
 
   it('rejects close with a logged SettlementError when sendTransaction returns non-PENDING status', async () => {
@@ -962,7 +983,6 @@ describe('stellar server channel verification', () => {
 
     const credential = makeSignedCredential({
       action: 'close',
-      commitmentBytes,
       cumulativeAmount: 5000000n,
       challengeAmount: '5000000',
     })
@@ -1150,6 +1170,11 @@ describe('stellar server channel verification', () => {
     // not blocked on the network round trip.
     const cumulative = await store.get(`stellar:channel:cumulative:${CHANNEL_ADDRESS}`)
     expect((cumulative as any)?.amount).toBe('5000000')
+    expect((cumulative as any)?.settling).toBe(true)
+    expect(await getLatestCommitment({ store, channel: CHANNEL_ADDRESS })).toEqual({
+      amount: 5000000n,
+      signature: Buffer.from(credential.payload.signature, 'hex'),
+    })
   })
 })
 
@@ -1494,6 +1519,196 @@ describe('stellar server channel dispute detection', () => {
 })
 
 // ── close() standalone function ───────────────────────────────────────────────
+
+describe('channel server keeps the latest commitment for recipient close', () => {
+  beforeEach(() => {
+    mockSimulateTransaction.mockReset()
+    mockGetChannelState.mockReset()
+    mockGetChannelState.mockResolvedValue(mockHealthyChannelState())
+    mockGetAccount.mockReset()
+    mockPrepareTransaction.mockReset()
+    mockSendTransaction.mockReset()
+    mockGetTransaction.mockReset()
+  })
+
+  function setup() {
+    const store = Store.memory()
+    const method = channel({
+      channel: CHANNEL_ADDRESS,
+      commitmentKey: COMMITMENT_KEY,
+      store,
+    })
+    return { store, method }
+  }
+
+  async function acceptVoucher(method: ReturnType<typeof channel>, amount: bigint) {
+    const commitmentBytes = Buffer.from(`commitment-${amount}`)
+    const credential = makeSignedCredential({
+      cumulativeAmount: amount,
+      challengeAmount: '100',
+    })
+    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
+    await method.verify({ credential: credential as any, request: credential.challenge.request })
+    return credential
+  }
+
+  it('stores the exact amount and signature together after one accepted voucher', async () => {
+    const { store, method } = setup()
+    const credential = await acceptVoucher(method, 100n)
+
+    expect(await store.get(`stellar:channel:cumulative:${CHANNEL_ADDRESS}`)).toEqual({
+      amount: '100',
+      signature: credential.payload.signature,
+    })
+    expect(await getLatestCommitment({ store, channel: CHANNEL_ADDRESS })).toEqual({
+      amount: 100n,
+      signature: Buffer.from(credential.payload.signature, 'hex'),
+    })
+  })
+
+  it('replaces both amount and signature with the second accepted voucher', async () => {
+    const { store, method } = setup()
+    const first = await acceptVoucher(method, 100n)
+    const second = await acceptVoucher(method, 200n)
+
+    expect(second.payload.signature).not.toBe(first.payload.signature)
+    expect(await getLatestCommitment({ store, channel: CHANNEL_ADDRESS })).toEqual({
+      amount: 200n,
+      signature: Buffer.from(second.payload.signature, 'hex'),
+    })
+  })
+
+  it('does not change the stored pair after a non-monotonic voucher is rejected', async () => {
+    const { store, method } = setup()
+    const accepted = await acceptVoucher(method, 100n)
+    const rejected = makeSignedCredential({
+      cumulativeAmount: 100n,
+      challengeAmount: '100',
+    })
+
+    await expect(
+      method.verify({ credential: rejected as any, request: rejected.challenge.request }),
+    ).rejects.toThrow('must be greater than previous cumulative')
+    expect(await getLatestCommitment({ store, channel: CHANNEL_ADDRESS })).toEqual({
+      amount: 100n,
+      signature: Buffer.from(accepted.payload.signature, 'hex'),
+    })
+  })
+
+  it('returns null for an empty store', async () => {
+    expect(
+      await getLatestCommitment({ store: Store.memory(), channel: CHANNEL_ADDRESS }),
+    ).toBeNull()
+  })
+
+  it('returns null for a legacy record until the next accepted voucher', async () => {
+    const { store, method } = setup()
+    await store.put(`stellar:channel:cumulative:${CHANNEL_ADDRESS}`, { amount: '100' })
+    expect(await getLatestCommitment({ store, channel: CHANNEL_ADDRESS })).toBeNull()
+
+    const credential = await acceptVoucher(method, 200n)
+    expect(await getLatestCommitment({ store, channel: CHANNEL_ADDRESS })).toEqual({
+      amount: 200n,
+      signature: Buffer.from(credential.payload.signature, 'hex'),
+    })
+  })
+
+  it('throws ChannelVerificationError for a malformed stored amount', async () => {
+    const store = Store.memory()
+    await store.put(`stellar:channel:cumulative:${CHANNEL_ADDRESS}`, {
+      amount: 'not-a-number',
+      signature: 'ab'.repeat(64),
+    })
+    await expect(getLatestCommitment({ store, channel: CHANNEL_ADDRESS })).rejects.toThrow(
+      ChannelVerificationError,
+    )
+  })
+
+  it.each(['', 'ab'.repeat(63), 'ab'.repeat(65), 'gg'.repeat(64), null, 123])(
+    'throws ChannelVerificationError for malformed stored signature %j',
+    async (signature) => {
+      const store = Store.memory()
+      await store.put(`stellar:channel:cumulative:${CHANNEL_ADDRESS}`, {
+        amount: '100',
+        signature,
+      })
+      await expect(getLatestCommitment({ store, channel: CHANNEL_ADDRESS })).rejects.toThrow(
+        ChannelVerificationError,
+      )
+    },
+  )
+
+  it('passes the exact stored pair to the standalone close contract call', async () => {
+    const { store, method } = setup()
+    const credential = await acceptVoucher(method, 100n)
+    const latest = await getLatestCommitment({ store, channel: CHANNEL_ADDRESS })
+    expect(latest).toEqual({
+      amount: 100n,
+      signature: Buffer.from(credential.payload.signature, 'hex'),
+    })
+    if (!latest) throw new Error('Expected a stored commitment')
+
+    const signer = Keypair.random()
+    mockGetAccount.mockResolvedValueOnce(new Account(signer.publicKey(), '100'))
+    mockPrepareTransaction.mockImplementationOnce((tx: Transaction) => tx)
+    mockSendTransaction.mockResolvedValueOnce({ hash: 'latest-close-hash', status: 'PENDING' })
+    mockGetTransaction.mockResolvedValueOnce({ status: 'SUCCESS' })
+
+    expect(
+      await close({
+        channel: CHANNEL_ADDRESS,
+        ...latest,
+        feePayer: { envelopeSigner: signer },
+      }),
+    ).toBe('latest-close-hash')
+    expect(mockSendTransaction).toHaveBeenCalledTimes(1)
+    const tx = mockSendTransaction.mock.calls[0]![0] as Transaction
+    const op = tx.operations[0]!
+    if (op.type !== 'invokeHostFunction') throw new Error('Expected contract invocation')
+    const invocation = op.func.invokeContract()
+    expect(Address.fromScAddress(invocation.contractAddress()).toString()).toBe(CHANNEL_ADDRESS)
+    expect(invocation.functionName().toString()).toBe('close')
+    expect(invocation.args()).toEqual([
+      nativeToScVal(100n, { type: 'i128' }),
+      nativeToScVal(Buffer.from(credential.payload.signature, 'hex'), { type: 'bytes' }),
+    ])
+  })
+
+  it('keeps the close credential pair while settlement is pending', async () => {
+    const store = Store.memory()
+    const signer = Keypair.random()
+    const commitmentBytes = Buffer.from('pending-close-commitment')
+    const credential = makeSignedCredential({
+      action: 'close',
+      cumulativeAmount: 200n,
+      challengeAmount: '100',
+    })
+    const method = channel({
+      channel: CHANNEL_ADDRESS,
+      commitmentKey: COMMITMENT_KEY,
+      feePayer: { envelopeSigner: signer },
+      store,
+    })
+    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
+    mockGetAccount.mockResolvedValueOnce(new Account(signer.publicKey(), '100'))
+    mockPrepareTransaction.mockImplementationOnce(async (tx: Transaction) => {
+      expect(await getLatestCommitment({ store, channel: CHANNEL_ADDRESS })).toEqual({
+        amount: 200n,
+        signature: Buffer.from(credential.payload.signature, 'hex'),
+      })
+      return tx
+    })
+    mockSendTransaction.mockResolvedValueOnce({ hash: 'pending-close-hash', status: 'PENDING' })
+    mockGetTransaction.mockResolvedValueOnce({ status: 'SUCCESS' })
+
+    const receipt = await method.verify({
+      credential: credential as any,
+      request: credential.challenge.request,
+    })
+    expect(receipt.reference).toBe('pending-close-hash')
+    expect(mockPrepareTransaction).toHaveBeenCalledTimes(1)
+  })
+})
 
 describe('close()', () => {
   beforeEach(() => {

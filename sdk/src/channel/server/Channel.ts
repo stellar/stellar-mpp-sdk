@@ -46,6 +46,8 @@ import { getChannelState, type ChannelState } from './State.js'
 type ChannelCredential = Parameters<Method.VerifyFn<typeof ChannelMethod>>[0]['credential']
 type CumulativeRecord = {
   amount: string
+  /** Hex ed25519 commitment signature for `amount`; absent on records written by earlier versions. */
+  signature?: string
   settling?: boolean
   settlingAmount?: string
   settledAt?: string
@@ -77,6 +79,11 @@ type CumulativeRecord = {
  */
 const LOG_PREFIX = '[stellar:channel]'
 const STORE_PREFIX = 'stellar:channel'
+
+/** Store key of a channel's cumulative record. */
+function cumulativeStoreKey(channelAddress: string): string {
+  return `${STORE_PREFIX}:cumulative:${channelAddress}`
+}
 
 /** Reads the cumulative amount from a stored record, treating an absent or
  * malformed record as a zero cumulative. */
@@ -180,7 +187,7 @@ export function channel(parameters: channel.Parameters) {
   const feeBumpKP = feePayer?.feeBumpSigner ? resolveKeypair(feePayer.feeBumpSigner) : undefined
 
   // Track cumulative amounts per channel in the store
-  const cumulativeKey = `${STORE_PREFIX}:cumulative:${channelAddress}`
+  const cumulativeKey = cumulativeStoreKey(channelAddress)
 
   // Track channel settlement in-progress state. Set under the lock when a close
   // is accepted, cleared after successful settlement. If settlement fails, the
@@ -535,11 +542,15 @@ export function channel(parameters: channel.Parameters) {
             action === 'close'
               ? {
                   amount: commitmentAmount.toString(),
+                  signature: signatureBytes.toString('hex'),
                   settling: true,
                   settlingAmount: commitmentAmount.toString(),
                   settledAt: new Date().toISOString(),
                 }
-              : { amount: commitmentAmount.toString() },
+              : {
+                  amount: commitmentAmount.toString(),
+                  signature: signatureBytes.toString('hex'),
+                },
         }
       },
     )
@@ -690,7 +701,10 @@ export function channel(parameters: channel.Parameters) {
       // of bricking it. After broadcast the outcome is ambiguous, so the markers
       // remain set and recovery requires reconciliation.
       if (!broadcast) {
-        await store.put(cumulativeKey, { amount: commitmentAmount.toString() })
+        await store.put(cumulativeKey, {
+          amount: commitmentAmount.toString(),
+          signature: Buffer.from(signatureBytes).toString('hex'),
+        })
         await store.delete(settlingKey)
       }
       throw error
@@ -996,6 +1010,40 @@ function assertPreparedCloseIsSafe(preparedTx: Transaction, channelAddress: stri
 }
 
 /**
+ * Returns the latest verified commitment amount and signature from the channel
+ * server's store, or null when no signature is stored (including records written
+ * by earlier versions).
+ *
+ * Pass the pair to {@link close} to close the channel with it, for example when
+ * `watchChannel` reports a `close` event with a future `effectiveAtLedger`,
+ * before the refund waiting period ends.
+ *
+ * @throws {ChannelVerificationError} If the stored record is malformed.
+ */
+export async function getLatestCommitment(parameters: {
+  /** Store passed to the channel server method. */
+  store: Store.Store
+  /** On-chain channel contract address (C...). */
+  channel: string
+}): Promise<{ amount: bigint; signature: Uint8Array } | null> {
+  const { store, channel: channelAddress } = parameters
+  const record = (await store.get(cumulativeStoreKey(channelAddress))) as CumulativeRecord | null
+  if (!record || record.signature === undefined) return null
+
+  try {
+    validateHexSignature(record.signature)
+    return {
+      amount: BigInt(record.amount),
+      signature: Buffer.from(record.signature, 'hex'),
+    }
+  } catch {
+    throw new ChannelVerificationError(`${LOG_PREFIX} Stored commitment record is malformed.`, {
+      channel: channelAddress,
+    })
+  }
+}
+
+/**
  * Close the channel contract on-chain using a signed commitment.
  * Transfers the committed amount to the recipient and auto-refunds
  * the remaining balance to the funder. This is a server-side
@@ -1155,6 +1203,8 @@ export declare namespace channel {
     /**
      * Called when a dispute is detected on-chain (close_start has been called).
      * Use this to trigger a close response before the waiting period elapses.
+     * Read the stored pair with `getLatestCommitment` and pass it to `close`
+     * once the verification that fired this callback completes.
      */
     onDisputeDetected?: (state: ChannelState) => void
     /**

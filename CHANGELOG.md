@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Keep the latest accepted channel commitment on the server and add helpers to close the channel with it
+  - The commitment signature is stored next to the cumulative amount; `getLatestCommitment()` reads the pair. Records written by earlier versions have no signature until the next accepted voucher
+
 ### Changed
 
 - Raise the `mppx` peer dependency to `^0.10.1` (from `^0.8.1`) — consumers must bump. `mppx@0.10.1` in turn raises its `viem` peer minimum to `>=2.54.0`; the development `viem` dependency here moves to `^2.54.0` to match. [#78](https://github.com/stellar/stellar-mpp-sdk/pull/78)
