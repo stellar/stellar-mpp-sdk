@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Bump vulnerable transitive dependencies (`ip-address`, `proxy-addr`, `brace-expansion`, `qs`, `smol-toml`, `source-map-js`) to patched versions [#93](https://github.com/stellar/stellar-mpp-sdk/pull/93)
 - Answer rejected charge and channel credentials with HTTP 402 and a fresh challenge again, instead of the HTTP 500 they have returned since the `mppx@0.10.1` bump. The SDK's error classes now extend `mppx`'s `PaymentError`, so the response names the rejection reason while `details` stay server-side. Settlement failures (`SettlementError`) keep a generic HTTP 500 and are logged through the configured `logger` [#83](https://github.com/stellar/stellar-mpp-sdk/pull/83)
   - Channel close failures after broadcast are now `SettlementError`s too, instead of retryable 402 verification failures
   - Charge pre-submission simulation failures answer with a fixed message; the RPC error stays in `details`
