@@ -5221,10 +5221,8 @@ describe('charge challenge id uniqueness', () => {
     expect(parsed.id).toBe(challenge.id)
   })
 
-  // The nonce is only of use if a change to it is easy to detect. A client
-  // that could exchange another challenge's nonce, or remove it, could again
-  // select its replay slot. These tests show that the HMAC covers the nonce.
-  // A successful `Challenge.verify` on an unchanged challenge does not show this.
+  // The HMAC must cover the nonce and the issuance stamp, so any change to
+  // either one invalidates the challenge.
   function tamperedRequest(
     challenge: ReturnType<typeof issue>,
     methodDetails: Record<string, unknown>,
