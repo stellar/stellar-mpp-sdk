@@ -86,11 +86,8 @@ export const charge = Method.from({
           /**
            * A nonce that the server generates for each issue (UUID).
            *
-           * The challenge identifier is an HMAC over the challenge contents.
-           * Without a value that changes at each issue, two challenges for the same
-           * route and price would have the same identifier. The server keys
-           * single-use replay state on the identifier. Each issue must have a
-           * different identifier.
+           * The challenge identifier is an HMAC over the challenge contents, so
+           * this value gives every issued challenge its own identifier.
            *
            * The server's `request()` hook sets this value automatically.
            */
