@@ -2,6 +2,8 @@ import { Account, Keypair } from '@stellar/stellar-sdk'
 import { Challenge, Credential, Store } from 'mppx'
 import { Mppx } from 'mppx/server'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { STELLAR_TESTNET } from '../../../../constants.js'
+import { buildCommitmentMessage } from '../../../commitment.js'
 
 // Drives channel credentials through the real (unmocked) mppx server handler
 // and asserts the HTTP response a client receives. Only the Soroban RPC client
@@ -91,10 +93,10 @@ describe('channel rejection HTTP status (real mppx handler)', () => {
   it('answers a close whose settlement fails with a generic 500 that exposes no settlement details', async () => {
     const commitmentKey = Keypair.random()
     const envelopeSigner = Keypair.random()
-    const commitmentBytes = Buffer.from('close-commitment-bytes')
-    mockSimulateTransaction.mockResolvedValue({
-      result: { retval: { bytes: () => commitmentBytes } },
-      transactionData: 'mock',
+    const commitmentBytes = buildCommitmentMessage({
+      channel: CHANNEL_ADDRESS,
+      amount: 10_000_000n,
+      network: STELLAR_TESTNET,
     })
     mockGetAccount.mockResolvedValue(new Account(envelopeSigner.publicKey(), '100'))
     mockPrepareTransaction.mockImplementation((tx: unknown) => tx)
