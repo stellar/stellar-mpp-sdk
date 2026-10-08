@@ -3,7 +3,12 @@ import { Credential, Method, Store } from 'mppx'
 import { z } from 'zod/mini'
 import { type NetworkId } from '../../constants.js'
 import { StellarMppError } from '../../shared/errors.js'
-import { I128_MAX, resolveNetworkId, validateAmount } from '../../shared/validation.js'
+import {
+  I128_MAX,
+  resolveNetworkId,
+  validateAmount,
+  validateContractAddress,
+} from '../../shared/validation.js'
 import { buildCommitmentMessage } from '../commitment.js'
 import { channel as ChannelMethod } from '../Methods.js'
 
@@ -61,6 +66,10 @@ export function channel(parameters: channel.Parameters) {
     )
   }
 
+  if (allowedChannels) {
+    for (const address of allowedChannels) validateContractAddress(address)
+  }
+
   if (!commitmentKeyParam && !commitmentSecret) {
     throw new StellarMppError('Either commitmentKey or commitmentSecret must be provided.')
   }
@@ -78,6 +87,11 @@ export function channel(parameters: channel.Parameters) {
       const { request } = challenge
       const { amount, channel: channelAddress } = request
       const network = resolveNetworkId(request.methodDetails?.network)
+
+      // The channel string is server-supplied. Validate its format before it reaches
+      // the Address constructor in buildCommitmentMessage. This runs before the pinning
+      // check, so it covers both the pinned and the allowUnpinnedChannel paths.
+      validateContractAddress(channelAddress)
 
       // Enforce channel pinning: reject if the server-provided channel is not in the allowed list.
       if (allowedChannels && allowedChannels.length > 0) {

@@ -1,4 +1,4 @@
-import { Address, Keypair, Networks, hash, nativeToScVal, xdr } from '@stellar/stellar-sdk'
+import { Address, Keypair, Networks, hash, nativeToScVal, StrKey, xdr } from '@stellar/stellar-sdk'
 import { Challenge, Store } from 'mppx'
 import { describe, expect, it, vi } from 'vitest'
 import { STELLAR_PUBNET, STELLAR_TESTNET } from '../../constants.js'
@@ -520,10 +520,10 @@ describe('network pinning', () => {
 describe('channel pinning (allowedChannels)', () => {
   it('rejects channel address not in allowedChannels list', async () => {
     mockSimulateTransaction.mockClear()
-
+    const sampleChannelAddress = StrKey.encodeContract(Buffer.alloc(32))
     const method = channel({
       commitmentKey: TEST_KEYPAIR,
-      allowedChannels: ['CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF46W'],
+      allowedChannels: [sampleChannelAddress],
     })
     const challenge = mockChallenge({
       channel: CHANNEL_ADDRESS, // different from allowed channel
@@ -592,7 +592,8 @@ describe('channel pinning (allowedChannels)', () => {
   it('rejects when allowedChannels is set but channel is not in the list', async () => {
     mockSimulateTransaction.mockClear()
 
-    const allowed = ['CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF46W']
+    const sampleChannelAddress = StrKey.encodeContract(Buffer.alloc(32))
+    const allowed = [sampleChannelAddress]
     const method = channel({
       commitmentKey: TEST_KEYPAIR,
       allowedChannels: allowed,
@@ -709,6 +710,20 @@ describe('channel client amount validation', () => {
 
     expect(error).toBeInstanceOf(StellarMppError)
     expect((error as Error).message).toContain('must be a positive integer string')
+    expect((await store.get(CUMULATIVE_KEY)) ?? null).toBeNull()
+  })
+
+  it('rejects a malformed channel address with a typed error', async () => {
+    // makeMethod leaves the client unpinned (allowUnpinnedChannel: true), so
+    // the server-provided address reaches commitment encoding unchecked unless
+    // the client validates its format first.
+    const store = Store.memory()
+    const method = makeMethod({ store })
+
+    const error = await rejectionOf(method, mockChallenge({ channel: 'not-a-valid-address' }))
+
+    expect(error).toBeInstanceOf(StellarMppError)
+    expect((error as Error).message).toContain('Invalid contract address')
     expect((await store.get(CUMULATIVE_KEY)) ?? null).toBeNull()
   })
 

@@ -33,7 +33,11 @@ import { resolveKeypair } from '../../shared/keypairs.js'
 import { noopLogger, type Logger } from '../../shared/logger.js'
 import { pollTransaction } from '../../shared/poll.js'
 import { toBaseUnits } from '../../shared/units.js'
-import { validateAmount, validateHexSignature } from '../../shared/validation.js'
+import {
+  validateAmount,
+  validateContractAddress,
+  validateHexSignature,
+} from '../../shared/validation.js'
 import { verifyInvokeContractOp } from '../../shared/verify-invoke.js'
 import { buildCommitmentMessage } from '../commitment.js'
 import { channel as ChannelMethod } from '../Methods.js'
@@ -151,6 +155,9 @@ export function channel(parameters: channel.Parameters) {
     feeBudget,
     logger = noopLogger,
   } = parameters
+
+  // Fail fast on a misconfigured channel address
+  validateContractAddress(channelAddress)
 
   const resolvedRpcUrl = rpcUrl ?? SOROBAN_RPC_URLS[network]
   const networkPassphrase = NETWORK_PASSPHRASE[network]

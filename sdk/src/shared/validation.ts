@@ -1,3 +1,4 @@
+import { StrKey } from '@stellar/stellar-sdk'
 import { NETWORK_PASSPHRASE, STELLAR_TESTNET, type NetworkId } from '../constants.js'
 import { StellarMppError } from './errors.js'
 
@@ -33,6 +34,24 @@ export function resolveNetworkId(network: unknown): NetworkId {
   throw new StellarMppError(
     `Unsupported Stellar network identifier: "${network}". Supported networks: ${supported}`,
   )
+}
+
+/**
+ * Validates that `address` is a well-formed Stellar contract address (C...).
+ *
+ * The channel address is server-supplied on the client, and an invalid
+ * value would otherwise surface as an untyped `Error` from the `Address`
+ * constructor inside commitment encoding.
+ *
+ * @param address - The value to validate.
+ * @throws {StellarMppError} If the value is not a valid contract address.
+ */
+export function validateContractAddress(address: unknown): void {
+  if (typeof address !== 'string' || !StrKey.isValidContract(address)) {
+    throw new StellarMppError(
+      `Invalid contract address: "${String(address)}" must be a valid Stellar contract address (C...)`,
+    )
+  }
 }
 
 /** Largest value representable by a signed 128-bit integer (Soroban `i128`). */

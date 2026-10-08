@@ -25,8 +25,11 @@ import { buildCommitmentMessage } from '../../../commitment.js'
  * This is safe only while the local encoding matches the contract encoding.
  * This test compares the two encodings against a real deployed channel.
  *
- * The RPC call previously gave that guarantee for each voucher at runtime. This
- * test gives the same guarantee one time for each CI run.
+ * The RPC call previously gave that guarantee for each voucher at runtime.
+ * This test provides the guarantee against a live deployment, but only when it
+ * runs: it belongs to the live testnet tier (`pnpm test:integration`), which
+ * the default test run and CI exclude. The guarantee that always runs under
+ * `make check` is the pinned-bytes unit test in `channel/commitment.test.ts`.
  *
  * `CHANNEL_CONTRACT` must hold the address of a one-way-channel contract on
  * testnet. The test skips when that variable is empty, so the suite still runs
