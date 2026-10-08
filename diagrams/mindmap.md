@@ -31,7 +31,7 @@ mindmap
         keypair.sign
         Progress events
       Channel — channel/client/Channel.ts
-        simulate prepare_commitment
+        build commitment bytes locally
         ed25519.sign commitment bytes
         Cumulative amount tracking
         No on-chain tx needed
@@ -49,7 +49,7 @@ mindmap
         verify hook
           Hex validation 128 chars
           Monotonicity check
-          prepare_commitment simulation
+          build commitment bytes locally
           Ed25519 signature verification
           Store update
         close function

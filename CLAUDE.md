@@ -67,7 +67,7 @@ Charge has 6 combinations from 3 axes: **push vs pull**, **sponsored vs unsponso
 
 - **mppx integration**: Methods defined via `Method.from()`, adapted with `.toClient()` / `.toServer()`.
 - **Replay protection**: Servers claim challenges and tx hashes via atomic `store.update()` compare-and-set (a `Store.AtomicStore` is required and validated at construction), so each is consumed exactly once without a get-then-put race.
-- **Contract simulation**: Uses Soroban RPC `simulateTransaction` for read-only verification — SEP-41 transfer validation, `prepare_commitment` for commitment bytes, and channel state queries.
+- **Contract simulation**: Uses Soroban RPC `simulateTransaction` for read-only verification — SEP-41 transfer validation and channel state queries.
 - **Configurable defaults**: Server/client functions accept optional parameters with defaults from `shared/defaults.ts`.
 - **Store key naming**: `stellar:{intent}:{type}:{id}` (e.g., `stellar:charge:challenge:abc123`).
 - **Env parsing**: Published as `@stellar/mpp/env`. Per-example `Env` classes in `examples/config/` compose primitives from `sdk/src/env.ts`.

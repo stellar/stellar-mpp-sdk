@@ -19,8 +19,7 @@ sequenceDiagram
 
     App->>CC: createCredential(challenge)
     CC->>CC: newCumulative = previousCumulative + amount
-    CC->>RPC: simulate prepare_commitment(newCumulative)
-    RPC-->>CC: commitment bytes (32 bytes)
+    CC->>CC: buildCommitmentMessage(channel, newCumulative, network)
     CC->>CC: ed25519.sign(commitmentBytes, commitmentKey)
     CC->>CC: Convert signature → 128 hex chars
     CC-->>App: Credential {amount: cumulative, signature: hex}
@@ -29,8 +28,7 @@ sequenceDiagram
     SC->>SC: Validate hex (128 chars, valid hex)
     SC->>Store: Get previousCumulative
     SC->>SC: Verify monotonicity:<br/>commitmentAmount ≥ prev + requested
-    SC->>RPC: simulate prepare_commitment(commitmentAmount)
-    RPC-->>SC: commitment bytes
+    SC->>SC: buildCommitmentMessage(channel, commitmentAmount, network)
     SC->>SC: commitmentKey.verify(signature, commitmentBytes)
     SC->>Store: Save new cumulative amount
     SC-->>App: Receipt {status:'success'}

@@ -59,12 +59,13 @@ Client (Funder)                 Server (Recipient)                Stellar
   |  (pay 1 XLM, cumulative: 0)   |                                  |
   |<------------------------------|                                  |
   |                               |                                  |
-  |  simulate prepare_commitment------------------------------------>|
+  |  Build commitment locally     |                                  |
   |  Sign commitment off-chain    |                                  |
   |  (cumulative: 1 XLM + sig)    |                                  |
   |------------------------------>|                                  |
-  |                               |  simulate prepare_commitment --->|
+  |                               |  Build commitment locally        |
   |                               |  Verify ed25519 signature        |
+  |                               |  get channel state ------------->|
   |  200 OK + data                |                                  |
   |<------------------------------|                                  |
   |                               |                                  |
@@ -75,12 +76,13 @@ Client (Funder)                 Server (Recipient)                Stellar
   |   cumulative: 1 XLM)          |                                  |
   |<------------------------------|                                  |
   |                               |                                  |
-  |  simulate prepare_commitment------------------------------------>|
+  |  Build commitment locally     |                                  |
   |  Sign commitment              |                                  |
   |  (cumulative: 2 XLM + sig)    |                                  |
   |------------------------------>|                                  |
-  |                               |  simulate prepare_commitment --->|
+  |                               |  Build commitment locally        |
   |                               |  Verify, 200 OK                  |
+  |                               |  get channel state ------------->|
   |<------------------------------|                                  |
   |                               |                                  |
   |                               |  [close channel when convenient] |
@@ -297,7 +299,7 @@ stellar.channel({
   pollDelayMs?: number,           // delay between poll attempts in ms (default: 1,000)
   pollTimeoutMs?: number,         // overall poll timeout in ms (default: 20,000)
   simulationTimeoutMs?: number,   // simulation timeout in ms (default: 10,000)
-  verifyMaxConcurrent?: number, // max verifications making RPC calls at once (default: 10)
+  verifyMaxConcurrent?: number, // max concurrent on-chain state reads (default: 10)
   logger?: Logger,                // structured logger (default: no-op)
 })
 ```
@@ -308,10 +310,13 @@ stellar.channel({
 stellar.channel({
   commitmentKey?: Keypair,        // ed25519 Keypair for signing commitments
   commitmentSecret?: string,      // ed25519 secret key (S...)
-  rpcUrl?: string,                // custom Soroban RPC URL
-  simulationTimeoutMs?: number,   // simulation timeout in ms (default: 10,000)
-  sourceAccount?: string,         // funded G... address for simulations
+  network?: 'stellar:testnet' | 'stellar:pubnet', // pin the network (default: the network the server advertises)
+  store?: Store.Store,            // persists the local cumulative baseline (default: in-memory)
+  allowedChannels?: string[],     // channel addresses the client will sign for
+  allowUnpinnedChannel?: boolean, // opt out of channel pinning (default: false)
   onProgress?: (event) => void,   // lifecycle callback
+  rpcUrl?: string,                // deprecated - ignored, credential creation makes no RPC call
+  simulationTimeoutMs?: number,   // deprecated - ignored, credential creation runs no simulation
 })
 ```
 
@@ -433,8 +438,9 @@ Payment channels allow many off-chain micro-payments with minimal on-chain trans
 
 - The client signs cumulative commitment amounts off-chain using the ed25519 commitment key
 - The client should pin the channel contract with `allowedChannels` so it only signs for trusted channel addresses
-- Before signing, the client verifies the simulated commitment matches the pinned channel, the intended cumulative amount, the expected network, and the channel domain separator
-- The server verifies signatures by simulating `prepare_commitment` on the channel contract and checking the ed25519 signature
+- The client builds the commitment message locally from the pinned channel, the intended cumulative amount, the expected network, and the channel domain separator, so it never signs bytes that another party supplied
+- The server builds the same message locally and checks the ed25519 signature against it. Signature verification makes no RPC call
+- When `checkOnChainState` is enabled (the default), the server also reads the channel state on-chain after the signature check. That read is the only RPC call left in the verification path, and `verifyMaxConcurrent` limits how many run at the same time
 - An atomic `Store` is required on the server to track cumulative amounts and channel lifecycle state across requests
 - The server can call `close()` on-chain at any time to settle accumulated payments
 

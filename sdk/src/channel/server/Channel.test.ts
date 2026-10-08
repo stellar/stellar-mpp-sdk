@@ -1,4 +1,6 @@
 import { Account, Address, Keypair, Networks, Transaction, xdr } from '@stellar/stellar-sdk'
+import { STELLAR_TESTNET } from '../../constants.js'
+import { buildCommitmentMessage } from '../commitment.js'
 import { Challenge, Credential, Store } from 'mppx'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SettlementError } from '../../shared/errors.js'
@@ -116,12 +118,20 @@ function makeCredential(opts: {
 /** Build a credential with a real ed25519 signature over `commitmentBytes`. */
 function makeSignedCredential(opts: {
   action?: 'voucher' | 'close'
-  commitmentBytes: Buffer
   cumulativeAmount: bigint
   challengeAmount: string
   previousCumulative?: string
 }) {
-  const sig = COMMITMENT_KEY.sign(opts.commitmentBytes)
+  // The server builds this message locally. A credential is therefore valid
+  // only if the client signs the real encoding for its amount. Arbitrary bytes
+  // are not sufficient.
+  const sig = COMMITMENT_KEY.sign(
+    buildCommitmentMessage({
+      channel: CHANNEL_ADDRESS,
+      amount: opts.cumulativeAmount,
+      network: STELLAR_TESTNET,
+    }),
+  )
   const sigHex = Buffer.from(sig).toString('hex')
   const challenge = Challenge.from({
     id: `test-${crypto.randomUUID()}`,
@@ -281,7 +291,6 @@ describe('stellar server channel', () => {
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const credential = makeSignedCredential({
-      commitmentBytes,
       cumulativeAmount: 1000000n,
       challengeAmount: '1000000',
     })
@@ -632,7 +641,6 @@ describe('stellar server channel verification', () => {
     await store.put(`stellar:channel:cumulative:${CHANNEL_ADDRESS}`, { amount: '10000' })
 
     const credential = makeSignedCredential({
-      commitmentBytes: Buffer.from('non-monotonic-precheck-bytes'),
       cumulativeAmount: 1000n, // below the stored cumulative of 10000
       challengeAmount: '1000',
       previousCumulative: '10000',
@@ -663,7 +671,6 @@ describe('stellar server channel verification', () => {
     const cumulativeKey = `stellar:channel:cumulative:${CHANNEL_ADDRESS}`
 
     const credential = makeSignedCredential({
-      commitmentBytes,
       cumulativeAmount: 1000000n,
       challengeAmount: '1000000',
     })
@@ -723,7 +730,6 @@ describe('stellar server channel verification', () => {
     const store = Store.memory()
 
     const credential = makeSignedCredential({
-      commitmentBytes,
       cumulativeAmount: 1000000n,
       challengeAmount: '1000000',
     })
@@ -756,7 +762,6 @@ describe('stellar server channel verification', () => {
 
     const credential = makeSignedCredential({
       action: 'close',
-      commitmentBytes,
       cumulativeAmount: 1000000n,
       challengeAmount: '1000000',
     })
@@ -792,7 +797,6 @@ describe('stellar server channel verification', () => {
     // Close is rejected because no envelope signer is configured.
     const closeCred = makeSignedCredential({
       action: 'close',
-      commitmentBytes,
       cumulativeAmount: 1000000n,
       challengeAmount: '1000000',
     })
@@ -806,7 +810,6 @@ describe('stellar server channel verification', () => {
     // A subsequent voucher still succeeds — the channel was not left settling.
     const voucherCred = makeSignedCredential({
       action: 'voucher',
-      commitmentBytes,
       cumulativeAmount: 2000000n,
       challengeAmount: '2000000',
     })
@@ -836,7 +839,6 @@ describe('stellar server channel verification', () => {
     // Close passes validation but settlement fails before broadcast.
     const closeCred = makeSignedCredential({
       action: 'close',
-      commitmentBytes,
       cumulativeAmount: 5000000n,
       challengeAmount: '5000000',
     })
@@ -851,7 +853,6 @@ describe('stellar server channel verification', () => {
     // A subsequent voucher above the attempted close amount still succeeds.
     const voucherCred = makeSignedCredential({
       action: 'voucher',
-      commitmentBytes,
       cumulativeAmount: 6000000n,
       challengeAmount: '1000000',
     })
@@ -874,7 +875,6 @@ describe('stellar server channel verification', () => {
     const store = Store.memory()
     const credential = makeSignedCredential({
       action: 'close',
-      commitmentBytes,
       cumulativeAmount: 5000000n,
       challengeAmount: '5000000',
     })
@@ -922,7 +922,6 @@ describe('stellar server channel verification', () => {
 
     const credential = makeSignedCredential({
       action: 'close',
-      commitmentBytes,
       cumulativeAmount: 5000000n,
       challengeAmount: '5000000',
     })
@@ -1003,7 +1002,6 @@ describe('stellar server channel verification', () => {
 
     const credential = makeSignedCredential({
       action: 'close',
-      commitmentBytes,
       cumulativeAmount: 5000000n,
       challengeAmount: '5000000',
     })
@@ -1040,7 +1038,6 @@ describe('stellar server channel verification', () => {
 
     const credential = makeSignedCredential({
       action: 'close',
-      commitmentBytes,
       cumulativeAmount: 5000000n,
       challengeAmount: '5000000',
     })
@@ -1083,7 +1080,6 @@ describe('stellar server channel verification', () => {
 
     const credential = makeSignedCredential({
       action: 'close',
-      commitmentBytes,
       cumulativeAmount: 5000000n,
       challengeAmount: '5000000',
     })
@@ -1121,7 +1117,6 @@ describe('stellar server channel verification', () => {
     const store = Store.memory()
     const credential = makeSignedCredential({
       action: 'close',
-      commitmentBytes,
       cumulativeAmount: 5000000n,
       challengeAmount: '5000000',
     })
@@ -1174,7 +1169,6 @@ describe('stellar server channel dispute detection', () => {
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const credential = makeSignedCredential({
-      commitmentBytes,
       cumulativeAmount: 1000000n,
       challengeAmount: '1000000',
     })
@@ -1213,7 +1207,6 @@ describe('stellar server channel dispute detection', () => {
     const onDisputeDetected = vi.fn()
 
     const credential = makeSignedCredential({
-      commitmentBytes,
       cumulativeAmount: 1000000n,
       challengeAmount: '1000000',
     })
@@ -1245,7 +1238,6 @@ describe('stellar server channel dispute detection', () => {
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const credential = makeSignedCredential({
-      commitmentBytes,
       cumulativeAmount: 1000000n,
       challengeAmount: '1000000',
     })
@@ -1284,7 +1276,6 @@ describe('stellar server channel dispute detection', () => {
     const store = Store.memory()
 
     const credential = makeSignedCredential({
-      commitmentBytes,
       cumulativeAmount: 1000000n,
       challengeAmount: '1000000',
     })
@@ -1318,7 +1309,6 @@ describe('stellar server channel dispute detection', () => {
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const credential = makeSignedCredential({
-      commitmentBytes,
       cumulativeAmount: 1000000n,
       challengeAmount: '1000000',
     })
@@ -1373,7 +1363,6 @@ describe('stellar server channel dispute detection', () => {
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const credential = makeSignedCredential({
-      commitmentBytes,
       cumulativeAmount: 1000000n,
       challengeAmount: '1000000',
     })
@@ -1411,7 +1400,6 @@ describe('stellar server channel dispute detection', () => {
     const onDisputeDetected = vi.fn()
 
     const credential = makeSignedCredential({
-      commitmentBytes,
       cumulativeAmount: 1000000n,
       challengeAmount: '1000000',
     })
@@ -1449,7 +1437,6 @@ describe('stellar server channel dispute detection', () => {
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const credential = makeSignedCredential({
-      commitmentBytes,
       cumulativeAmount: 5000000n, // exactly at balance
       challengeAmount: '5000000',
     })
@@ -1485,7 +1472,6 @@ describe('stellar server channel dispute detection', () => {
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const credential = makeSignedCredential({
-      commitmentBytes,
       cumulativeAmount: 1000000n,
       challengeAmount: '1000000',
     })
@@ -1719,7 +1705,6 @@ describe('channel challenge replay across instances sharing a store', () => {
 
     // Same credential sent to both instances — only one should succeed
     const credential = makeSignedCredential({
-      commitmentBytes,
       cumulativeAmount: 1000000n,
       challengeAmount: '1000000',
     })
@@ -1763,7 +1748,6 @@ describe('channel challenge replay across instances sharing a store', () => {
     })
 
     const credential = makeSignedCredential({
-      commitmentBytes: commitmentBytes1,
       cumulativeAmount: 500000n,
       challengeAmount: '500000',
     })
@@ -1858,7 +1842,6 @@ describe('channel vouchers during close settlement window', () => {
 
     const closeCredential = makeSignedCredential({
       action: 'close',
-      commitmentBytes: closeBytes,
       cumulativeAmount: 100n,
       challengeAmount: '100',
     })
@@ -1871,7 +1854,6 @@ describe('channel vouchers during close settlement window', () => {
 
     const voucherCredential = makeSignedCredential({
       action: 'voucher',
-      commitmentBytes: voucherBytes,
       cumulativeAmount: 110n,
       challengeAmount: '10',
       previousCumulative: '100',
@@ -1908,7 +1890,6 @@ describe('channel vouchers during close settlement window', () => {
 
     const credential = makeSignedCredential({
       action: 'voucher',
-      commitmentBytes,
       cumulativeAmount: 6000000n,
       challengeAmount: '1000000',
       previousCumulative: '5000000',
@@ -1945,7 +1926,6 @@ describe('channel vouchers during close settlement window', () => {
 
     const credential = makeSignedCredential({
       action: 'close',
-      commitmentBytes,
       cumulativeAmount: 6000000n,
       challengeAmount: '1000000',
       previousCumulative: '5000000',
@@ -2053,7 +2033,6 @@ describe('channel vouchers during close settlement window', () => {
 
     const credential = makeSignedCredential({
       action: 'close',
-      commitmentBytes,
       cumulativeAmount: 5000000n,
       challengeAmount: '5000000',
     })
@@ -2086,7 +2065,6 @@ describe('channel vouchers during close settlement window', () => {
 
     const voucherCredential = makeSignedCredential({
       action: 'voucher',
-      commitmentBytes: voucherBytes,
       cumulativeAmount: 6000000n,
       challengeAmount: '1000000',
       previousCumulative: '5000000',
@@ -2144,7 +2122,6 @@ describe('channel vouchers during close settlement window', () => {
     // First close settlement — should succeed, charges maxFeeBumpStroops against budget
     const credential1 = makeSignedCredential({
       action: 'close',
-      commitmentBytes: bytes1,
       cumulativeAmount: 1000000n,
       challengeAmount: '1000000',
     })
@@ -2174,7 +2151,6 @@ describe('channel vouchers during close settlement window', () => {
     // Second close settlement within window — should fail (budget exceeded)
     const credential2 = makeSignedCredential({
       action: 'close',
-      commitmentBytes: bytes2,
       cumulativeAmount: 2000000n,
       challengeAmount: '1000000',
     })
@@ -2251,7 +2227,6 @@ describe('channel vouchers during close settlement window', () => {
     for (let i = 0; i < allowedSettlements; i++) {
       const credential = makeSignedCredential({
         action: 'close',
-        commitmentBytes: settlementBytes[i],
         cumulativeAmount: BigInt((i + 1) * 1_000_000),
         challengeAmount: '1000000',
       })
@@ -2277,7 +2252,6 @@ describe('channel vouchers during close settlement window', () => {
     // The next settlement exceeds the cap and must be rejected before broadcast.
     const overBudget = makeSignedCredential({
       action: 'close',
-      commitmentBytes: settlementBytes[allowedSettlements],
       cumulativeAmount: BigInt((allowedSettlements + 1) * 1_000_000),
       challengeAmount: '1000000',
     })
@@ -2337,7 +2311,6 @@ describe('channel vouchers during close settlement window', () => {
       // First close settlement at t=0
       const credential1 = makeSignedCredential({
         action: 'close',
-        commitmentBytes: windowBytes1,
         cumulativeAmount: 1000000n,
         challengeAmount: '1000000',
       })
@@ -2366,7 +2339,6 @@ describe('channel vouchers during close settlement window', () => {
       // Second close settlement after window elapses — should succeed and start new window
       const credential2 = makeSignedCredential({
         action: 'close',
-        commitmentBytes: windowBytes2,
         cumulativeAmount: 2000000n,
         challengeAmount: '1000000',
       })
@@ -2422,7 +2394,6 @@ describe('channel vouchers during close settlement window', () => {
     // First close
     const credential1 = makeSignedCredential({
       action: 'close',
-      commitmentBytes: noBudgetBytes1,
       cumulativeAmount: 1000000n,
       challengeAmount: '1000000',
     })
@@ -2444,7 +2415,6 @@ describe('channel vouchers during close settlement window', () => {
     // Second close — no budget so should succeed
     const credential2 = makeSignedCredential({
       action: 'close',
-      commitmentBytes: noBudgetBytes2,
       cumulativeAmount: 2000000n,
       challengeAmount: '1000000',
     })
@@ -2491,7 +2461,6 @@ describe('channel vouchers during close settlement window', () => {
     // First close settlement
     const credential1 = makeSignedCredential({
       action: 'close',
-      commitmentBytes,
       cumulativeAmount: 1000000n,
       challengeAmount: '1000000',
     })
@@ -2573,7 +2542,13 @@ describe('atomic challenge replay protection (channel)', () => {
     })
 
     const amount = '200'
-    const signature = COMMITMENT_KEY.sign(Buffer.from('test-commitment-bytes')).toString('hex')
+    const signature = COMMITMENT_KEY.sign(
+      buildCommitmentMessage({
+        channel: CHANNEL_ADDRESS,
+        amount: BigInt(amount),
+        network: STELLAR_TESTNET,
+      }),
+    ).toString('hex')
 
     const cred = Object.assign(
       Credential.from({
@@ -2758,7 +2733,13 @@ describe('atomic challenge replay protection (channel)', () => {
 
     // Commitment of 200 is > 100 and covers 100 + 50 = 150, should succeed
     const amount = '200'
-    const signature = COMMITMENT_KEY.sign(Buffer.from('test-commitment-bytes')).toString('hex')
+    const signature = COMMITMENT_KEY.sign(
+      buildCommitmentMessage({
+        channel: CHANNEL_ADDRESS,
+        amount: BigInt(amount),
+        network: STELLAR_TESTNET,
+      }),
+    ).toString('hex')
 
     const cred = Object.assign(
       Credential.from({
@@ -2815,7 +2796,6 @@ describe('channel server recipient pinning (on-chain payout address validation)'
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const credential = makeSignedCredential({
-      commitmentBytes,
       cumulativeAmount: 1000000n,
       challengeAmount: '1000000',
     })
@@ -2838,7 +2818,6 @@ describe('channel server recipient pinning (on-chain payout address validation)'
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const credential = makeSignedCredential({
-      commitmentBytes,
       cumulativeAmount: 1000000n,
       challengeAmount: '1000000',
     })
@@ -2898,7 +2877,6 @@ describe('channel server currency pinning (on-chain token validation)', () => {
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const credential = makeSignedCredential({
-      commitmentBytes,
       cumulativeAmount: 1000000n,
       challengeAmount: '1000000',
     })
@@ -2921,7 +2899,6 @@ describe('channel server currency pinning (on-chain token validation)', () => {
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const credential = makeSignedCredential({
-      commitmentBytes,
       cumulativeAmount: 1000000n,
       challengeAmount: '1000000',
     })
@@ -3016,7 +2993,6 @@ describe('channel server close transaction inspection (auth-tree injection)', ()
 
     const credential = makeSignedCredential({
       action: 'close',
-      commitmentBytes,
       cumulativeAmount: 5000000n,
       challengeAmount: '5000000',
     })
@@ -3060,6 +3036,9 @@ describe('channel server close transaction inspection (auth-tree injection)', ()
 // ---------------------------------------------------------------------------
 
 describe('channel verification runs RPC outside the cumulative lock', () => {
+  // The server verifies commitment signatures against a message that it builds
+  // locally. The on-chain state read is therefore the only RPC call that stays
+  // in the verification path.
   const COMMITMENT_BYTES = Buffer.from('unlocked-rpc-commitment-bytes')
 
   // These tests swap in delayed mock implementations. Mocks are not auto-cleared
@@ -3069,28 +3048,6 @@ describe('channel verification runs RPC outside the cumulative lock', () => {
     mockGetChannelState.mockReset()
     mockGetChannelState.mockResolvedValue(mockHealthyChannelState())
   })
-
-  /**
-   * Replaces the simulate mock with a slow one that records how many
-   * simulations are in flight at once.
-   *
-   * @returns A live counter — read `max` after the verifies settle.
-   */
-  function trackSimulateConcurrency(delayMs = 50) {
-    const counter = { inFlight: 0, max: 0 }
-    mockSimulateTransaction.mockReset()
-    mockSimulateTransaction.mockImplementation(() => {
-      counter.inFlight++
-      counter.max = Math.max(counter.max, counter.inFlight)
-      return new Promise((resolve) =>
-        setTimeout(() => {
-          counter.inFlight--
-          resolve(successSimResult(COMMITMENT_BYTES))
-        }, delayMs),
-      )
-    })
-    return counter
-  }
 
   /**
    * Replaces the on-chain state mock with a slow one that records how many
@@ -3124,40 +3081,17 @@ describe('channel verification runs RPC outside the cumulative lock', () => {
   function makeConcurrentCredentials(amounts: bigint[]) {
     return amounts.map((amount) =>
       makeSignedCredential({
-        commitmentBytes: COMMITMENT_BYTES,
         cumulativeAmount: amount,
         challengeAmount: amount.toString(),
       }),
     )
   }
 
-  it('overlaps simulations across concurrent verifies instead of serializing them', async () => {
-    // The regression this guards: when the signature simulation ran under the
-    // cumulative lock, only one could ever be in flight, so a slow RPC stalled
-    // every concurrent payer on the channel.
-    const counter = trackSimulateConcurrency()
-
-    const method = channel({
-      channel: CHANNEL_ADDRESS,
-      checkOnChainState: false,
-      commitmentKey: COMMITMENT_KEY,
-      store: Store.memory(),
-    })
-
-    const credentials = makeConcurrentCredentials([1000n, 2000n, 3000n, 4000n])
-    await Promise.allSettled(
-      credentials.map((c) => method.verify({ credential: c as any, request: c.challenge.request })),
-    )
-
-    expect(counter.max).toBe(4)
-  })
-
   it('overlaps on-chain state reads across concurrent verifies', async () => {
     // Same guarantee as above, for the other RPC path. `verifyOnChainState`
     // costs several calls, so serializing it under the lock would stall
     // concurrent payers just as badly — and the checkOnChainState: false tests
     // above cannot detect that.
-    trackSimulateConcurrency(0)
     const stateReads = trackStateReadConcurrency()
 
     const method = channel({
@@ -3179,7 +3113,6 @@ describe('channel verification runs RPC outside the cumulative lock', () => {
 
   it('bounds concurrent on-chain state reads by verifyMaxConcurrent', async () => {
     // The semaphore wraps both RPC paths, so it caps state reads too.
-    trackSimulateConcurrency(0)
     const stateReads = trackStateReadConcurrency()
 
     const method = channel({
@@ -3198,33 +3131,10 @@ describe('channel verification runs RPC outside the cumulative lock', () => {
     expect(stateReads.max).toBe(2)
   })
 
-  it('bounds concurrent simulations by verifyMaxConcurrent', async () => {
-    // With the lock no longer serializing RPC, the semaphore is the only cap on
-    // fan-out onto the RPC provider.
-    const counter = trackSimulateConcurrency()
-
-    const method = channel({
-      channel: CHANNEL_ADDRESS,
-      checkOnChainState: false,
-      commitmentKey: COMMITMENT_KEY,
-      store: Store.memory(),
-      verifyMaxConcurrent: 2,
-    })
-
-    const credentials = makeConcurrentCredentials([1000n, 2000n, 3000n, 4000n])
-    await Promise.allSettled(
-      credentials.map((c) => method.verify({ credential: c as any, request: c.challenge.request })),
-    )
-
-    expect(counter.max).toBe(2)
-  })
-
   it('still admits exactly one of several concurrent credentials at the same cumulative', async () => {
     // Unlocked RPC must not weaken monotonicity: all four clear the pre-RPC
     // short-circuit against a cumulative of 0, then serialize in the locked
     // commit, where only the first can advance the cumulative.
-    trackSimulateConcurrency()
-
     const method = channel({
       channel: CHANNEL_ADDRESS,
       checkOnChainState: false,
