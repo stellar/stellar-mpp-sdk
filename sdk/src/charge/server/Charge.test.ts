@@ -5152,10 +5152,8 @@ describe('charge sponsored dedup key (canonical on-chain inner hash)', () => {
 
 // ---------------------------------------------------------------------------
 // Challenge identifiers must be different. The identifier is an HMAC over
-// the challenge contents. The request hook must add a value that changes at
-// each issue. If it did not, two customers who buy the same resource at the
-// same price would receive the same identifier. They would then collide on
-// the single-use replay slot.
+// the challenge contents, so the request hook adds a value that changes at
+// each issue. Every challenge then has its own single-use replay slot.
 // ---------------------------------------------------------------------------
 
 describe('charge challenge id uniqueness', () => {
