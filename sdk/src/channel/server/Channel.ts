@@ -40,6 +40,8 @@ import {
   validateAmount,
   validateContractAddress,
   validateHexSignature,
+  validateNonNegativeSafeInteger,
+  validatePositiveSafeInteger,
 } from '../../shared/validation.js'
 import { verifyInvokeContractOp } from '../../shared/verify-invoke.js'
 import { buildCommitmentMessage } from '../commitment.js'
@@ -207,6 +209,18 @@ export function channel(parameters: channel.Parameters) {
 
   // Fail fast on a misconfigured channel address
   validateContractAddress(channelAddress)
+  validateNonNegativeSafeInteger('decimals', decimals)
+  validatePositiveSafeInteger('maxFeeBumpStroops', maxFeeBumpStroops)
+  validatePositiveSafeInteger('pollMaxAttempts', pollMaxAttempts)
+  validatePositiveSafeInteger('pollMaxConcurrent', pollMaxConcurrent)
+  validateNonNegativeSafeInteger('pollDelayMs', pollDelayMs)
+  validatePositiveSafeInteger('pollTimeoutMs', pollTimeoutMs)
+  validatePositiveSafeInteger('verifyMaxConcurrent', verifyMaxConcurrent)
+  validatePositiveSafeInteger('simulationTimeoutMs', simulationTimeoutMs)
+  if (feeBudget) {
+    validatePositiveSafeInteger('feeBudget.maxStroops', feeBudget.maxStroops)
+    validatePositiveSafeInteger('feeBudget.windowMs', feeBudget.windowMs)
+  }
 
   const resolvedRpcUrl = rpcUrl ?? SOROBAN_RPC_URLS[network]
   const networkPassphrase = NETWORK_PASSPHRASE[network]
@@ -1178,12 +1192,13 @@ export async function closeWithLatestCommitment(
     store: Store.AtomicStore
     /**
      * Maximum close transactions sent for this channel across all calls and
-     * instances. @default 10
+     * instances. Must be a positive safe integer. @default 10
      */
     maxCloseSends?: number
   },
 ): Promise<string | null> {
   const { store, maxCloseSends = DEFAULT_MAX_CLOSE_SENDS, ...rest } = parameters
+  validatePositiveSafeInteger('maxCloseSends', maxCloseSends)
   const { channel: channelAddress, network = STELLAR_TESTNET, rpcUrl, logger = noopLogger } = rest
   const cumulativeKey = cumulativeStoreKey(channelAddress)
   const closedKey = closedStoreKey(channelAddress)
@@ -1343,6 +1358,7 @@ async function buildClose(parameters: close.Parameters): Promise<PreparedClose> 
     rpcUrl,
     maxFeeBumpStroops = DEFAULT_MAX_FEE_BUMP_STROOPS,
   } = parameters
+  validatePositiveSafeInteger('maxFeeBumpStroops', maxFeeBumpStroops)
 
   const resolvedRpcUrl = rpcUrl ?? SOROBAN_RPC_URLS[network]
   const networkPassphrase = NETWORK_PASSPHRASE[network]
@@ -1448,17 +1464,18 @@ export declare namespace close {
     /**
      * Ceiling in stroops on the total fee the server signs for a close, with or
      * without a FeeBump. A close simulated above this is refused before signing.
+     * Must be a positive safe integer.
      *
      * @default 10_000_000
      */
     maxFeeBumpStroops?: number
-    /** Maximum poll attempts. */
+    /** Maximum poll attempts. Must be a positive safe integer. */
     pollMaxAttempts?: number
-    /** Poll delay in ms. */
+    /** Poll delay in ms. Must be a non-negative safe integer. */
     pollDelayMs?: number
-    /** Poll timeout in ms. */
+    /** Poll timeout in ms. Must be a positive safe integer. */
     pollTimeoutMs?: number
-    /** Per-RPC timeout for the on-chain state read in milliseconds. @default 10000 */
+    /** Per-RPC timeout for the on-chain state read in milliseconds. Must be a positive safe integer. @default 10000 */
     simulationTimeoutMs?: number
     /** Logger instance. */
     logger?: Logger
@@ -1491,11 +1508,12 @@ export declare namespace channel {
      * Accepts a Stellar public key string (G...) or a Keypair instance.
      */
     commitmentKey: string | Keypair
-    /** Number of decimal places for amount conversion. @default 7 */
+    /** Number of decimal places for amount conversion. Must be a non-negative safe integer. @default 7 */
     decimals?: number
     /**
      * Ceiling in stroops on the total fee the server signs for a close, with or
      * without a FeeBump. A close simulated above this is refused before signing.
+     * Must be a positive safe integer.
      *
      * @default 10_000_000
      */
@@ -1534,13 +1552,13 @@ export declare namespace channel {
      * the token is not verified and a startup warning is logged.
      */
     currency?: string
-    /** Maximum poll attempts when waiting for transaction confirmation. @default 20 */
+    /** Maximum poll attempts when waiting for transaction confirmation. Must be a positive safe integer. @default 20 */
     pollMaxAttempts?: number
-    /** Maximum concurrent polling operations for this server instance. @default 10 */
+    /** Maximum concurrent polling operations for this server instance. Must be a positive safe integer. @default 10 */
     pollMaxConcurrent?: number
-    /** Poll delay between attempts in milliseconds. @default 1000 */
+    /** Poll delay between attempts in milliseconds. Must be a non-negative safe integer. @default 1000 */
     pollDelayMs?: number
-    /** Poll timeout in milliseconds. @default 20_000 */
+    /** Poll timeout in milliseconds. Must be a positive safe integer. @default 20_000 */
     pollTimeoutMs?: number
     /**
      * Custom Soroban RPC URL.
@@ -1563,10 +1581,12 @@ export declare namespace channel {
      * Commitment signatures are verified against a locally-built message, so
      * they never touch RPC and are not covered by this limit.
      *
+     * Must be a positive safe integer.
+     *
      * @default 10
      */
     verifyMaxConcurrent?: number
-    /** Simulation timeout in milliseconds. @default 10_000 */
+    /** Simulation timeout in milliseconds. Must be a positive safe integer. @default 10_000 */
     simulationTimeoutMs?: number
     /**
      * Persistent atomic store for replay protection, cumulative amount tracking,
@@ -1616,9 +1636,9 @@ export declare namespace channel {
      * the latter bounds its sends with `maxCloseSends` instead.
      */
     feeBudget?: {
-      /** Maximum total stroops per server paying key, shared across its close settlements within the window. */
+      /** Maximum total stroops per server paying key, shared across its close settlements within the window. Must be a positive safe integer. */
       maxStroops: number
-      /** Rolling time window in milliseconds. */
+      /** Rolling time window in milliseconds. Must be a positive safe integer. */
       windowMs: number
     }
     /** Logger for debug/warn messages. @default noopLogger */

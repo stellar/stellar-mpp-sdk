@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { validateHexSignature, validateAmount, resolveNetworkId } from './validation.js'
+import {
+  validateHexSignature,
+  validateAmount,
+  validateNonNegativeSafeInteger,
+  validatePositiveSafeInteger,
+  resolveNetworkId,
+} from './validation.js'
 import { StellarMppError } from './errors.js'
 
 describe('validateHexSignature', () => {
@@ -95,5 +101,47 @@ describe('validateAmount', () => {
   it('throws StellarMppError on a value exceeding the signed i128 maximum', () => {
     expect(() => validateAmount((2n ** 127n).toString())).toThrow(StellarMppError)
     expect(() => validateAmount((2n ** 127n).toString())).toThrow(/i128 maximum/)
+  })
+})
+
+describe('validatePositiveSafeInteger', () => {
+  it('accepts 1', () => {
+    expect(() => validatePositiveSafeInteger('maxCloseSends', 1)).not.toThrow()
+  })
+
+  it('accepts 10_000_000', () => {
+    expect(() => validatePositiveSafeInteger('maxFeeBumpStroops', 10_000_000)).not.toThrow()
+  })
+
+  it.each([
+    ['NaN', NaN],
+    ['Infinity', Infinity],
+    ['0', 0],
+    ['-1', -1],
+    ['1.5', 1.5],
+    ['beyond MAX_SAFE_INTEGER', 2 ** 53],
+  ])('rejects %s with a StellarMppError naming the option', (_label, value) => {
+    expect(() => validatePositiveSafeInteger('maxFeeBumpStroops', value)).toThrow(StellarMppError)
+    expect(() => validatePositiveSafeInteger('maxFeeBumpStroops', value)).toThrow(
+      '`maxFeeBumpStroops` must be a positive safe integer.',
+    )
+  })
+})
+
+describe('validateNonNegativeSafeInteger', () => {
+  it.each([0, 7])('accepts %s', (value) => {
+    expect(() => validateNonNegativeSafeInteger('decimals', value)).not.toThrow()
+  })
+
+  it.each([
+    ['NaN', NaN],
+    ['Infinity', Infinity],
+    ['-1', -1],
+    ['1.5', 1.5],
+  ])('rejects %s with a StellarMppError naming the option', (_label, value) => {
+    expect(() => validateNonNegativeSafeInteger('decimals', value)).toThrow(StellarMppError)
+    expect(() => validateNonNegativeSafeInteger('decimals', value)).toThrow(
+      '`decimals` must be a non-negative safe integer.',
+    )
   })
 })
