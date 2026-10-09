@@ -359,8 +359,9 @@ export function channel(parameters: channel.Parameters) {
    *
    * The function claims the challenge, validates the formats and proves that
    * the commitment signature is authentic. The signature check is local and
-   * makes no RPC call. The function writes no channel state, except for the
-   * self-synchronising challenge claim.
+   * makes no RPC call. The function writes no channel state, except for two
+   * self-synchronising writes: the challenge claim and, for a close, the
+   * fee-budget charge.
    *
    * The lifecycle reads here are therefore advisory. They reject an invalid
    * credential early, before the server makes an RPC call. {@link doCommit}
@@ -480,8 +481,9 @@ export function channel(parameters: channel.Parameters) {
         )
       }
       // Likewise, a close the fee budget would refuse must not latch the
-      // channel. This read-only check mirrors the charge taken before broadcast.
-      assertFeeBudgetAvailable(await store.get(feeBudgetStoreKey()))
+      // channel, so the budget is charged here, before the latch, in its own
+      // atomic update. A charge that a later check wastes only over-counts.
+      await enforceFeeBudget()
     }
 
     return {
@@ -671,9 +673,6 @@ export function channel(parameters: channel.Parameters) {
         })
       }
 
-      // Enforce fee budget before broadcast (fail-safe: charge BEFORE broadcast)
-      await enforceFeeBudget()
-
       const txHash = await broadcastAndPoll(txToSubmit, 'Close')
 
       logger.debug(`${LOG_PREFIX} Channel closed, marking in store`)
@@ -749,10 +748,11 @@ export function channel(parameters: channel.Parameters) {
    * fee-payer key within a rolling window. The conservative per-settlement
    * charge is `maxFeeBumpStroops` (the configured ceiling on network fees).
    *
-   * The charge is recorded BEFORE broadcast (fail-safe: admitted-but-reverting
-   * txs still cost fees, so we must not under-count). A read-only check runs
-   * earlier, before the closing latch is written, so a close the budget would
-   * refuse does not stop the channel.
+   * The charge is taken in {@link doPrepare}, before the closing latch is
+   * written and before any transaction is built or broadcast. A close the
+   * budget refuses therefore never latches the channel, and a close that is
+   * admitted but fails later has still been counted: admitted-but-reverting
+   * transactions cost fees, so over-counting is the safe direction.
    */
   type FeeBudgetRecord = { windowStartMs: number; spentStroops: number }
 
@@ -798,12 +798,6 @@ export function channel(parameters: channel.Parameters) {
     }
 
     return { windowStartMs, spentStroops: spentStroops + charge }
-  }
-
-  /** Read-only budget check; writes nothing. */
-  function assertFeeBudgetAvailable(current: unknown): void {
-    if (!feeBudget) return
-    chargeFeeBudget((current as FeeBudgetRecord | null) ?? null)
   }
 
   /**
@@ -1078,7 +1072,8 @@ function parseStoredCommitment(record: CumulativeRecord, channelAddress: string)
  *
  * Completion is judged from the chain, not from a transaction's outcome. The
  * helper first reads the channel state and returns `null` without sending
- * anything when `withdrawn` already covers the stored amount. Otherwise it
+ * anything when a close has started on-chain and `withdrawn` already covers
+ * the stored amount. Otherwise it
  * sends `close(amount, signature)` and polls for confirmation. The contract
  * pays only the amount not yet withdrawn, so the helper is safe to call again
  * after any failure or unknown outcome: a rejected send, an on-chain failure,
@@ -1100,8 +1095,8 @@ function parseStoredCommitment(record: CumulativeRecord, channelAddress: string)
  * server's `feeBudget`. RPC and store errors propagate unchanged.
  *
  * @returns The close transaction hash, or `null` when a confirmed close is
- *   already recorded or the chain already showed the stored amount withdrawn,
- *   so nothing was sent.
+ *   already recorded or the chain already showed a started close with the
+ *   stored amount withdrawn, so nothing was sent.
  * @throws {ChannelVerificationError} If the stored commitment is missing or
  *   malformed, the store has no atomic
  *   `update()`, the send cap is reached, or the broadcast returns a
@@ -1181,14 +1176,15 @@ export async function closeWithLatestCommitment(
   const { amount, signature } = selection
 
   // The chain decides whether the close is already done. A close that landed
-  // after an unknown outcome shows up here, and nothing is sent.
+  // after an unknown outcome shows up here, and nothing is sent. `settle` also
+  // advances `withdrawn` without closing, so the close must have started too.
   const state = await getChannelState({
     channel: channelAddress,
     network,
     rpcUrl,
     simulationTimeoutMs: rest.simulationTimeoutMs,
   })
-  if (state.withdrawn >= amount) {
+  if (state.closeEffectiveAtLedger != null && state.withdrawn >= amount) {
     logger.info(`${LOG_PREFIX} Stored commitment already withdrawn on-chain; nothing to send.`, {
       channel: channelAddress,
       amount: amount.toString(),
@@ -1511,8 +1507,8 @@ export declare namespace channel {
      * - `feeBumpSigner.publicKey()` if `feeBumpSigner` is set
      * - Otherwise, `envelopeSigner.publicKey()`
      *
-     * A read-only budget check runs before a close credential latches the
-     * channel, and the charge is taken before broadcast in `doVerifyClose`.
+     * The charge is taken before a close credential latches the channel, so a
+     * close the budget refuses never stops the channel.
      * A settlement rejected for budget exhaustion throws `ChannelVerificationError` with
      * clear context (funder key, spent, cap, window).
      *
