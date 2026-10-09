@@ -14,7 +14,7 @@ const MIN_BASE_FEE_STROOPS = 100
 /** Soroban resource fee of a transaction, or 0 for a classic transaction. */
 function resourceFeeOf(tx: Transaction): number {
   const envelope = tx.toEnvelope()
-  if (envelope.switch() !== xdr.EnvelopeType.envelopeTypeTx()) return 0
+  if (envelope.switch().value !== xdr.EnvelopeType.envelopeTypeTx().value) return 0
   const sorobanData = envelope.v1().tx().ext().value()
   return sorobanData ? Number(sorobanData.resourceFee().toBigInt()) : 0
 }
