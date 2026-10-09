@@ -4,15 +4,14 @@ import { STELLAR_TESTNET } from '../../../../constants.js'
 import { buildCommitmentMessage } from '../../../commitment.js'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-// End-to-end settling-window rejection.
+// End-to-end closing-latch rejection.
 //
 // Unlike the unit tests in server/Channel.test.ts (which pre-populate the
-// settling marker or exercise the internal cumulative/marker race), this test
-// drives a REAL close credential through the public verify() dispatch so the
-// marker is set by the actual close path. The close's broadcast then fails,
-// leaving the channel settling (fail-closed). A subsequent higher-cumulative
-// voucher — one that would otherwise pass every monotonic/coverage check and
-// settle — must be rejected because the channel is settling.
+// closing latch), this test drives a REAL close credential through the public
+// verify() dispatch so the latch is set by the actual close path. The close's
+// broadcast then fails. Closing is final, so a subsequent higher-cumulative
+// voucher — one that would otherwise pass every monotonic/coverage check — must
+// be rejected because the channel is closing.
 
 const COMMITMENT_KEY = Keypair.random()
 const ENVELOPE_KEY = Keypair.random()
@@ -97,7 +96,7 @@ function successSimResult(commitmentBytes: Buffer) {
   return { result: { retval: { bytes: () => commitmentBytes } }, transactionData: 'mock' }
 }
 
-describe('channel settling-window rejection — end-to-end', () => {
+describe('channel closing-latch rejection — end-to-end', () => {
   beforeEach(() => {
     mockSimulateTransaction.mockReset()
     mockGetAccount.mockReset()
@@ -105,22 +104,22 @@ describe('channel settling-window rejection — end-to-end', () => {
     mockSendTransaction.mockReset()
   })
 
-  it('rejects a higher-cumulative voucher after a real close has set the settling marker', async () => {
+  it('rejects a higher-cumulative voucher after a real close has latched the channel', async () => {
     const store = Store.memory()
     const closeBytes = Buffer.from('close-commitment-bytes')
     const voucherBytes = Buffer.from('voucher-commitment-bytes')
 
     // verifyCommitmentSignature simulates prepare_commitment once per credential:
-    // first the close, then (only if the settling guard is bypassed) the voucher.
+    // first the close, then (only if the closing guard is bypassed) the voucher.
     mockSimulateTransaction
       .mockResolvedValueOnce(successSimResult(closeBytes))
       .mockResolvedValueOnce(successSimResult(voucherBytes))
 
-    // Let the close reach broadcast, then fail it so the settling marker remains
-    // set (fail-closed) — the channel must not silently reopen to new vouchers.
+    // Let the close reach broadcast, then fail it. The latch stays: the channel
+    // must not reopen to new vouchers.
     mockGetAccount.mockResolvedValue(new Account(ENVELOPE_KEY.publicKey(), '100'))
     mockPrepareTransaction.mockImplementation((tx: any) => tx)
-    mockSendTransaction.mockResolvedValue({ hash: 'close-broadcast-fail', status: 'ERROR' })
+    mockSendTransaction.mockRejectedValue(new Error('RPC down'))
 
     const server = serverChannel({
       channel: CHANNEL_ADDRESS,
@@ -131,8 +130,8 @@ describe('channel settling-window rejection — end-to-end', () => {
     })
 
     // 1. Drive a real close credential through verify(). Phase 1 writes the
-    //    cumulative (settling: true) and the settling marker under the lock;
-    //    phase 2 broadcast fails, so verify() rejects and the marker remains.
+    //    cumulative with the closing latch under the lock; phase 2 broadcast
+    //    fails, so verify() rejects and the latch remains.
     const closeCredential = makeSignedCredential({
       action: 'close',
       commitmentBytes: closeBytes,
@@ -146,19 +145,16 @@ describe('channel settling-window rejection — end-to-end', () => {
       }),
     ).rejects.toThrow('broadcast failed')
 
-    // The settling marker must be set by the real close path (fail-closed).
-    const settling = await store.get(`stellar:channel:settling:${CHANNEL_ADDRESS}`)
-    expect(settling).not.toBeNull()
-    const cumulative = (await store.get(`stellar:channel:cumulative:${CHANNEL_ADDRESS}`)) as {
-      amount: string
-      settling?: boolean
-    }
-    expect(cumulative.amount).toBe('5000000')
-    expect(cumulative.settling).toBe(true)
+    // The latch must be set by the real close path, with the pair to close with.
+    expect(await store.get(`stellar:channel:cumulative:${CHANNEL_ADDRESS}`)).toEqual({
+      amount: '5000000',
+      signature: closeCredential.payload.signature,
+      closing: true,
+    })
 
     // 2. A higher-cumulative voucher that WOULD otherwise settle (7,000,000 >
     //    previous 5,000,000 and covers the requested amount) must be rejected
-    //    because the channel is settling.
+    //    because the channel is closing.
     const voucherCredential = makeSignedCredential({
       action: 'voucher',
       commitmentBytes: voucherBytes,
@@ -171,12 +167,13 @@ describe('channel settling-window rejection — end-to-end', () => {
         credential: voucherCredential as any,
         request: voucherCredential.challenge.request,
       }),
-    ).rejects.toThrow('settling')
+    ).rejects.toThrow('Channel is closing — no further credentials accepted.')
 
-    // The settling voucher must not have advanced the cumulative.
-    const afterVoucher = (await store.get(`stellar:channel:cumulative:${CHANNEL_ADDRESS}`)) as {
-      amount: string
-    }
-    expect(afterVoucher.amount).toBe('5000000')
+    // The rejected voucher must not have advanced the cumulative.
+    expect(await store.get(`stellar:channel:cumulative:${CHANNEL_ADDRESS}`)).toEqual({
+      amount: '5000000',
+      signature: closeCredential.payload.signature,
+      closing: true,
+    })
   })
 })

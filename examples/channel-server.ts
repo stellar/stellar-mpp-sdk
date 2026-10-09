@@ -20,9 +20,16 @@ import helmet from 'helmet'
 import rateLimit from 'express-rate-limit'
 import pino from 'pino'
 import pinoHttp from 'pino-http'
-import { StrKey } from '@stellar/stellar-sdk'
+import { setTimeout as sleep } from 'node:timers/promises'
+import { StrKey, rpc } from '@stellar/stellar-sdk'
 import { Mppx, Store } from 'mppx/server'
-import { stellar } from '../sdk/src/channel/server/index.js'
+import { SOROBAN_RPC_URLS } from '../sdk/src/index.js'
+import {
+  closeWithLatestCommitment,
+  getChannelState,
+  stellar,
+  watchChannel,
+} from '../sdk/src/channel/server/index.js'
 import { Env } from './config/channel-server.js'
 
 const logger = pino({ level: Env.logLevel })
@@ -38,6 +45,9 @@ app.use(express.json())
 // Convert the raw ed25519 public key (hex) to a Stellar G... address for verification
 const commitmentPublicKeyG = StrKey.encodeEd25519PublicKey(Buffer.from(Env.commitmentPubkey, 'hex'))
 
+// Store.memory() keeps the example self-contained, but it starts empty after a
+// restart, losing the commitments the startup close check below needs. Use a
+// persistent Store.AtomicStore such as Store.redis() for restart recovery.
 const store = Store.memory()
 
 const mppx = Mppx.create({
@@ -53,6 +63,100 @@ const mppx = Mppx.create({
     }),
   ],
 })
+
+// Close with the latest stored commitment when a close starts on-chain, before
+// the refund waiting period ends. watchChannel only reports events from the
+// ledger it starts at, so read the latest ledger, then check the channel state,
+// and watch from that ledger on: a close that starts in between shows up in at
+// least one of them. closeWithLatestCommitment is idempotent and reads the
+// chain before sending, so every failure is handled the same way: wait, check
+// the waiting period is still running, call it again.
+function closeWhenCloseStarts(feePayer: { envelopeSigner: string; feeBumpSigner?: string }) {
+  const network = 'stellar:testnet'
+  const retryDelayMs = 15_000
+  let closing: Promise<void> | undefined
+
+  async function reconcileClose(trigger: string, effectiveAtLedger: number) {
+    for (;;) {
+      try {
+        const txHash = await closeWithLatestCommitment({
+          store,
+          channel: Env.channelContract,
+          feePayer,
+          network,
+          logger,
+        })
+        if (txHash === null) {
+          logger.info({ trigger }, 'Channel already closed on-chain with the latest commitment')
+        } else {
+          logger.info({ trigger, txHash }, 'Channel closed with the latest commitment')
+        }
+        return
+      } catch (err) {
+        if (err instanceof Error && err.message.includes('Close send limit reached')) {
+          logger.error({ trigger, err }, 'Close send limit reached; operator action required')
+          return
+        }
+        logger.warn({ trigger, err }, 'Close with the latest commitment failed; retrying')
+      }
+      await sleep(retryDelayMs)
+      // Stop only once the chain shows the waiting period ended. While the
+      // chain cannot be read, keep retrying.
+      const state = await getChannelState({ channel: Env.channelContract, network }).catch(
+        () => null,
+      )
+      if (state && state.closeStatusLedger >= effectiveAtLedger) {
+        logger.error({ trigger }, 'Refund waiting period ended before the close landed')
+        return
+      }
+    }
+  }
+
+  function onCloseStarted(trigger: string, effectiveAtLedger: number) {
+    closing ??= reconcileClose(trigger, effectiveAtLedger).finally(() => {
+      closing = undefined
+    })
+  }
+
+  function watchFrom(startLedger: number) {
+    watchChannel({
+      channel: Env.channelContract,
+      network,
+      startLedger,
+      onEvent(event) {
+        if (event.type === 'close' && event.effectiveAtLedger > event.ledger) {
+          onCloseStarted('close event', event.effectiveAtLedger)
+        }
+      },
+      onError: (err) => logger.warn({ err }, 'Channel watcher poll failed'),
+    })
+  }
+
+  // Retry until both reads succeed: a close that is already pending is only
+  // found by the state check.
+  async function checkAtStartup() {
+    const server = new rpc.Server(SOROBAN_RPC_URLS[network])
+    for (;;) {
+      try {
+        const { sequence } = await server.getLatestLedger()
+        const state = await getChannelState({ channel: Env.channelContract, network })
+        if (
+          state.closeEffectiveAtLedger !== null &&
+          state.closeStatusLedger < state.closeEffectiveAtLedger
+        ) {
+          onCloseStarted('startup', state.closeEffectiveAtLedger)
+        }
+        watchFrom(sequence)
+        return
+      } catch (err) {
+        logger.warn({ err }, 'Startup channel state check failed; retrying')
+        await sleep(retryDelayMs)
+      }
+    }
+  }
+
+  void checkAtStartup()
+}
 
 // Main MPP channel endpoint — catch-all so every route is payment-gated (matches original behavior)
 app.use(async (req, res) => {
@@ -96,3 +200,5 @@ app.listen(Env.port, () => {
     'Stellar MPP Channel server started',
   )
 })
+
+if (Env.feePayer) closeWhenCloseStarts(Env.feePayer)

@@ -24,6 +24,9 @@ export class PollMaxAttemptsError extends Error {
   }
 }
 
+/** The transaction was included in a ledger and failed, leaving contract state unchanged. */
+export class TransactionFailedError extends StellarMppError {}
+
 export interface PollOptions {
   maxAttempts?: number
   delayMs?: number
@@ -40,7 +43,7 @@ export interface PollOptions {
  *
  * Repeatedly calls `getTransaction` until the transaction reaches a terminal state (`SUCCESS` or
  * `FAILED`) or a timeout / max-attempts limit is hit. If the state is `FAILED`, it throws a
- * {@link StellarMppError}.
+ * {@link TransactionFailedError}.
  *
  * @param rpcServer - Any object exposing a Soroban-compatible `getTransaction` method.
  * @param hash - The hex-encoded transaction hash to poll for.
@@ -86,7 +89,7 @@ export async function pollTransaction(
       }
 
       if (result.status === 'FAILED') {
-        throw new StellarMppError(
+        throw new TransactionFailedError(
           `Transaction ${hash} failed: ${result.resultXdr ?? 'unknown error'}`,
         )
       }
