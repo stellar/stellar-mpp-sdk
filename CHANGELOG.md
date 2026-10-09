@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Keep the latest accepted channel commitment on the server and add helpers to close the channel with it [#92](https://github.com/stellar/stellar-mpp-sdk/pull/92)
   - The commitment signature is stored next to the cumulative amount; `getLatestCommitment()` reads the pair. Records written by earlier versions have no signature until the next accepted voucher
-  - `closeWithLatestCommitment()` stops voucher acceptance and selects the pair in one atomic store update, so every voucher is either covered by the close or rejected. It reads `withdrawn` on-chain first and returns `null` without sending when the stored amount is already withdrawn, so it is safe to call repeatedly and from several instances after any failure
+  - `closeWithLatestCommitment()` stops voucher acceptance and selects the pair in one atomic store update, so every voucher is either covered by the close or rejected. It reads the chain first and returns `null` without sending when a close has started and the stored amount is already withdrawn, so it is safe to call repeatedly and from several instances after any failure
   - Sends per channel are counted in the store and capped at `maxCloseSends` (default 10); past the cap the helper throws and the channel stays closing for operator reconciliation
   - `ChannelState` gains `withdrawn` and `deposited`, plus `closeStatusLedger`, the ledger the close status was read at
   - `TransactionFailedError`, `PollTimeoutError` and `PollMaxAttemptsError` are exported from `@stellar/mpp`

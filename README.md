@@ -469,11 +469,11 @@ const txHash = await closeWithLatestCommitment({
   feePayer: { envelopeSigner: recipientKeypair },
   network: 'stellar:testnet',
 })
-// string: close sent and confirmed; null: a close was already confirmed or the chain showed the amount withdrawn
+// string: close sent and confirmed; null: a close was already confirmed, or the chain showed a started close with the amount withdrawn
 ```
 
 - The server stores the latest verified commitment amount and signature together. Records written by earlier versions have no signature until the next accepted voucher; `getLatestCommitment()` returns `null` when no signature is stored.
-- `closeWithLatestCommitment()` marks the channel closing and reads the latest commitment in one atomic store update, so every voucher is either covered by the close or rejected. It then reads `withdrawn` on-chain: if it already covers the stored amount it returns `null` without sending; otherwise it sends the close and polls for confirmation.
+- `closeWithLatestCommitment()` marks the channel closing and reads the latest commitment in one atomic store update, so every voucher is either covered by the close or rejected. It then reads the chain: if a close has started and `withdrawn` already covers the stored amount it returns `null` without sending; otherwise it sends the close and polls for confirmation.
 - It is safe to call repeatedly and from several instances. Any failure (`ChannelVerificationError` for a non-`PENDING` send, `TransactionFailedError`, `PollTimeoutError`, `PollMaxAttemptsError`) leaves the channel closing; call it again after a delay. Sends are counted per channel in the store and capped at `maxCloseSends` (default 10); past the cap it throws "Close send limit reached" and an operator has to reconcile. Reads that send nothing are not counted.
 - Call it before the refund waiting period ends, when `watchChannel` reports a `close` event with a future `effectiveAtLedger`. `watchChannel` starts at the latest ledger, so on startup read the latest ledger, call `getChannelState()`, call it when `closeEffectiveAtLedger` is set and later than `closeStatusLedger`, and pass the ledger read first as the watcher's `startLedger`. This needs a store that persists across restarts. `examples/channel-server.ts` wires all of this and retries every 15 s until the chain shows the waiting period ended. `onDisputeDetected` can also start it, but only fires while credentials are verified, so don't rely on it alone. The callback does not await the close, so attach a rejection handler.
 

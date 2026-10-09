@@ -1852,10 +1852,15 @@ describe('closeWithLatestCommitment', () => {
     }
   }
 
-  /** On-chain state after `withdrawn` has been paid out to the recipient. */
+  /** On-chain state after a close paid `withdrawn` to the recipient. */
   function withdrawnState(withdrawn: bigint) {
     const healthy = mockHealthyChannelState()
-    return { ...healthy, withdrawn, balance: healthy.balance - withdrawn }
+    return {
+      ...healthy,
+      withdrawn,
+      balance: healthy.balance - withdrawn,
+      closeEffectiveAtLedger: healthy.closeStatusLedger,
+    }
   }
 
   /** Every send so far was `close(amount, signature)` for the given voucher. */
@@ -1892,7 +1897,7 @@ describe('closeWithLatestCommitment', () => {
     await expect(method.verify(voucher(200n))).rejects.toEqual(closedError)
   })
 
-  it('returns null without sending when the stored amount is already withdrawn', async () => {
+  it('returns null without sending when a close already withdrew the stored amount', async () => {
     const { store, method, parameters } = setup()
     const accepted = voucher(100n)
     await method.verify(accepted)
@@ -1912,6 +1917,26 @@ describe('closeWithLatestCommitment', () => {
       ],
     ])
     await expect(method.verify(voucher(200n))).rejects.toEqual(closedError)
+  })
+
+  it('still closes when the stored amount was settled but no close has started', async () => {
+    const { store, method, parameters } = setup()
+    const accepted = voucher(100n)
+    await method.verify(accepted)
+    // `settle` advanced `withdrawn` without closing the channel.
+    mockGetChannelState.mockResolvedValueOnce({
+      ...withdrawnState(100n),
+      closeEffectiveAtLedger: null,
+    })
+
+    expect(await closeWithLatestCommitment(parameters)).toBe('stored-close-hash')
+    expectCloseArgs(accepted)
+    expect(await store.get(closedKey)).toEqual({
+      closedAt: now,
+      txHash: 'stored-close-hash',
+      amount: '100',
+    })
+    expect(await store.get(closeSendsKey)).toEqual({ count: 1 })
   })
 
   it('rejects an in-flight voucher on another instance once the pair is selected', async () => {
@@ -2803,8 +2828,12 @@ describe('channel vouchers after a close credential latches the channel', () => 
       }),
     ).rejects.toEqual(closingError)
 
-    // The close landed after all: the chain shows the withdrawal, so nothing is resent.
-    mockGetChannelState.mockResolvedValueOnce({ ...mockHealthyChannelState(), withdrawn: 5000000n })
+    // The close landed after all: the chain shows a close with the withdrawal, so nothing is resent.
+    mockGetChannelState.mockResolvedValueOnce({
+      ...mockHealthyChannelState(),
+      withdrawn: 5000000n,
+      closeEffectiveAtLedger: 4000,
+    })
     expect(
       await closeWithLatestCommitment({
         store,
@@ -3012,6 +3041,56 @@ describe('channel vouchers after a close credential latches the channel', () => 
         amount: '6000000',
         signature: voucherCredential.payload.signature,
       })
+    })
+
+    it('charges the fee budget before the closing latch is written', async () => {
+      const signerKp = Keypair.random()
+      const store = Store.memory()
+      const budgetKey = `stellar:channel:feebudget:${signerKp.publicKey()}`
+      // Snapshot the cumulative record at the moment the budget is charged.
+      const cumulativeAtCharge: unknown[] = []
+      const update = store.update.bind(store)
+      store.update = (async (key: string, fn: any) => {
+        if (key === budgetKey) cumulativeAtCharge.push(await store.get(cumulativeKey))
+        return update(key, fn)
+      }) as any
+      mockSimulateTransaction.mockResolvedValueOnce(
+        successSimResult(Buffer.from('budget-order-bytes')),
+      )
+      mockGetAccount.mockResolvedValueOnce(new Account(signerKp.publicKey(), '1'))
+      mockPrepareTransaction.mockImplementationOnce((tx: any) => tx)
+      mockSendTransaction.mockResolvedValueOnce({ hash: 'budget-order-hash', status: 'PENDING' })
+      mockGetTransaction.mockResolvedValueOnce({ status: 'SUCCESS' })
+      const method = channel({
+        channel: CHANNEL_ADDRESS,
+        checkOnChainState: false,
+        commitmentKey: COMMITMENT_KEY,
+        feePayer: { envelopeSigner: signerKp },
+        maxFeeBumpStroops: 5_000_000,
+        feeBudget: { maxStroops: 10_000_000, windowMs: 60_000 },
+        store,
+      })
+
+      const closeCredential = makeSignedCredential({
+        action: 'close',
+        cumulativeAmount: 5000000n,
+        challengeAmount: '5000000',
+      })
+      const receipt = await method.verify({
+        credential: closeCredential as any,
+        request: closeCredential.challenge.request,
+      })
+
+      expect(receipt.status).toBe('success')
+      expect(cumulativeAtCharge).toEqual([null])
+      expect(await store.get(cumulativeKey)).toEqual({
+        amount: '5000000',
+        signature: closeCredential.payload.signature,
+        closing: true,
+      })
+      expect(((await store.get(budgetKey)) as { spentStroops: number }).spentStroops).toBe(
+        5_000_000,
+      )
     })
   })
 
