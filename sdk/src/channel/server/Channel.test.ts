@@ -4,6 +4,7 @@ import {
   Keypair,
   Networks,
   Transaction,
+  TransactionBuilder,
   nativeToScVal,
   xdr,
 } from '@stellar/stellar-sdk'
@@ -172,6 +173,16 @@ function makeSignedCredential(opts: {
 }
 
 /** Create a successful simulation result returning given commitment bytes. */
+/** Rebuilds a prepared close with a different total fee, as RPC simulation can return. */
+function withFee(tx: Transaction, fee: string): Transaction {
+  const builder = new TransactionBuilder(new Account(tx.source, '0'), {
+    fee,
+    networkPassphrase: tx.networkPassphrase,
+  })
+  tx.tx.operations().forEach((op) => builder.addOperation(op))
+  return builder.setTimeout(30).build()
+}
+
 function successSimResult(commitmentBytes: Buffer) {
   return {
     result: {
@@ -1880,6 +1891,25 @@ describe('closeWithLatestCommitment', () => {
     }
   }
 
+  it('refuses a stored close whose prepared fee exceeds maxFeeBumpStroops without counting a send', async () => {
+    const { store, method, parameters } = setup()
+    await method.verify(voucher(100n))
+    mockPrepareTransaction.mockImplementationOnce((tx: Transaction) => withFee(tx, '10000001'))
+
+    const error = await closeWithLatestCommitment(parameters).catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(ChannelVerificationError)
+    expect((error as ChannelVerificationError).message).toBe(
+      '[stellar:channel] Close fee exceeds the configured maximum.',
+    )
+    expect((error as ChannelVerificationError).details).toEqual({
+      fee: '10000001',
+      maxFeeBumpStroops: 10_000_000,
+    })
+    expect(mockSendTransaction).not.toHaveBeenCalled()
+    expect(await store.get(closeSendsKey)).toBeNull()
+  })
+
   it('closes with the accepted pair, records closure, and rejects later vouchers', async () => {
     const { store, method, parameters } = setup()
     const accepted = voucher(100n)
@@ -2134,9 +2164,118 @@ describe('closeWithLatestCommitment', () => {
     })
   })
 
+  it('latches an empty channel without sending and rejects later vouchers', async () => {
+    const { store, parameters } = setup()
+    const method = channel({
+      channel: CHANNEL_ADDRESS,
+      commitmentKey: COMMITMENT_KEY,
+      store,
+      checkOnChainState: false,
+    })
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+
+    expect(await closeWithLatestCommitment({ ...parameters, logger })).toBeNull()
+    expect(await store.get(cumulativeKey)).toEqual({ amount: '0', closing: true })
+    expect(await store.get(closedKey)).toBeNull()
+    expect(await store.get(closeSendsKey)).toBeNull()
+    expect(mockSendTransaction).toHaveBeenCalledTimes(0)
+    expect(mockGetChannelState).toHaveBeenCalledTimes(0)
+    expect(mockGetAccount).toHaveBeenCalledTimes(0)
+    expect(mockSimulateTransaction).toHaveBeenCalledTimes(0)
+    expect(mockPrepareTransaction).toHaveBeenCalledTimes(0)
+    expect(logger.info.mock.calls).toEqual([
+      [
+        '[stellar:channel] No stored commitment; nothing is owed and the channel stays closing.',
+        { channel: CHANNEL_ADDRESS },
+      ],
+    ])
+    await expect(method.verify(voucher(100n))).rejects.toEqual(closingError)
+  })
+
+  it('latches a legacy unsigned record before reporting the missing commitment', async () => {
+    const { store, parameters } = setup()
+    const method = channel({
+      channel: CHANNEL_ADDRESS,
+      commitmentKey: COMMITMENT_KEY,
+      store,
+      checkOnChainState: false,
+    })
+    await store.put(cumulativeKey, { amount: '100' })
+
+    await expect(closeWithLatestCommitment(parameters)).rejects.toEqual(
+      new ChannelVerificationError('[stellar:channel] No stored commitment to close with', {
+        channel: CHANNEL_ADDRESS,
+      }),
+    )
+    expect(await store.get(cumulativeKey)).toEqual({ amount: '100', closing: true })
+    expect(await store.get(closeSendsKey)).toBeNull()
+    expect(mockSendTransaction).toHaveBeenCalledTimes(0)
+    expect(mockGetChannelState).toHaveBeenCalledTimes(0)
+    await expect(method.verify(voucher(200n))).rejects.toEqual(closingError)
+  })
+
+  it('returns null without writes when an empty channel is already latched', async () => {
+    const { store, parameters } = setup()
+    expect(await closeWithLatestCommitment(parameters)).toBeNull()
+    const put = vi.spyOn(store, 'put')
+    const remove = vi.spyOn(store, 'delete')
+    const update = store.update.bind(store)
+    const operations: string[] = []
+    const updateSpy = vi.spyOn(store, 'update').mockImplementation((async (key: string, fn: any) =>
+      update(key, (current) => {
+        const change = fn(current)
+        operations.push(change.op)
+        return change
+      })) as any)
+
+    expect(await closeWithLatestCommitment(parameters)).toBeNull()
+    expect(operations).toEqual(['noop'])
+    expect(updateSpy.mock.calls[0]![0]).toBe(cumulativeKey)
+    expect(put).toHaveBeenCalledTimes(0)
+    expect(remove).toHaveBeenCalledTimes(0)
+    expect(await store.get(cumulativeKey)).toEqual({ amount: '0', closing: true })
+    expect(await store.get(closeSendsKey)).toBeNull()
+    expect(mockSendTransaction).toHaveBeenCalledTimes(0)
+    expect(mockGetChannelState).toHaveBeenCalledTimes(0)
+    expect(mockGetAccount).toHaveBeenCalledTimes(0)
+  })
+
+  it.each([null, { amount: '100' }])(
+    'rejects an in-flight voucher after latching an unsigned record: %j',
+    async (record) => {
+      const { store, method, parameters } = setup()
+      if (record) await store.put(cumulativeKey, record)
+      const stateReadStarted = deferred<void>()
+      const stateRead = deferred<ReturnType<typeof mockHealthyChannelState>>()
+      mockGetChannelState.mockImplementationOnce(() => {
+        stateReadStarted.resolve()
+        return stateRead.promise
+      })
+      const verification = method.verify(voucher(200n))
+      await stateReadStarted.promise
+      try {
+        if (record) {
+          await expect(closeWithLatestCommitment(parameters)).rejects.toEqual(
+            new ChannelVerificationError('[stellar:channel] No stored commitment to close with', {
+              channel: CHANNEL_ADDRESS,
+            }),
+          )
+        } else {
+          expect(await closeWithLatestCommitment(parameters)).toBeNull()
+        }
+      } finally {
+        stateRead.resolve(mockHealthyChannelState())
+      }
+      await expect(verification).rejects.toEqual(closingError)
+      expect(await store.get(cumulativeKey)).toEqual({
+        amount: record?.amount ?? '0',
+        closing: true,
+      })
+      expect(mockSendTransaction).toHaveBeenCalledTimes(0)
+    },
+  )
+
   it.each([
-    { record: null, message: 'No stored commitment to close with' },
-    { record: { amount: '100' }, message: 'No stored commitment to close with' },
     ...['', 'ab'.repeat(63), 'ab'.repeat(65), 'gg'.repeat(64), null, 123].map((signature) => ({
       record: { amount: '100', signature },
       message: 'Stored commitment record is malformed.',
@@ -2389,6 +2528,45 @@ describe('close()', () => {
     const mod = await import('./Channel.js')
     closeFn = mod.close
     expect(typeof closeFn).toBe('function')
+  })
+
+  it('refuses a close whose prepared fee exceeds maxFeeBumpStroops before sending', async () => {
+    const signer = Keypair.random()
+    mockGetAccount.mockResolvedValueOnce(new Account(signer.publicKey(), '100'))
+    mockPrepareTransaction.mockImplementationOnce((tx: Transaction) => withFee(tx, '10000001'))
+
+    const error = await closeFn({
+      channel: CHANNEL_ADDRESS,
+      amount: 5000000n,
+      signature: new Uint8Array(64).fill(3),
+      feePayer: { envelopeSigner: signer },
+      network: 'stellar:testnet',
+    }).catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(ChannelVerificationError)
+    expect((error as ChannelVerificationError).message).toBe(
+      '[stellar:channel] Close fee exceeds the configured maximum.',
+    )
+    expect(mockSendTransaction).not.toHaveBeenCalled()
+  })
+
+  it('broadcasts a close whose prepared fee equals maxFeeBumpStroops', async () => {
+    const signer = Keypair.random()
+    mockGetAccount.mockResolvedValueOnce(new Account(signer.publicKey(), '100'))
+    mockPrepareTransaction.mockImplementationOnce((tx: Transaction) => withFee(tx, '10000000'))
+    mockSendTransaction.mockResolvedValueOnce({ hash: 'ceiling-close-hash', status: 'PENDING' })
+    mockGetTransaction.mockResolvedValueOnce({ status: 'SUCCESS' })
+
+    const hash = await closeFn({
+      channel: CHANNEL_ADDRESS,
+      amount: 5000000n,
+      signature: new Uint8Array(64).fill(4),
+      feePayer: { envelopeSigner: signer },
+      network: 'stellar:testnet',
+    })
+
+    expect(hash).toBe('ceiling-close-hash')
+    expect(mockSendTransaction).toHaveBeenCalledTimes(1)
   })
 
   it('broadcasts close transaction and returns hash on success', async () => {
@@ -2895,6 +3073,37 @@ describe('channel vouchers after a close credential latches the channel', () => 
       return { store, credential, verifyClose, verifyVoucher, completeClose }
     }
 
+    it('refuses a close credential whose prepared fee exceeds maxFeeBumpStroops, before signing or sending', async () => {
+      const { store, credential, verifyClose, completeClose } = setupClose()
+      mockPrepareTransaction.mockImplementation((tx: Transaction) => withFee(tx, '10000001'))
+
+      // The channel latches `closing` in doPrepare, before the fee is checked.
+      // The refused close stays latched, and closeWithLatestCommitment refuses
+      // the same fee, so no close is sent until the ceiling or the RPC changes.
+      const error = await verifyClose().catch((e: unknown) => e)
+      expect(error).toBeInstanceOf(ChannelVerificationError)
+      expect((error as ChannelVerificationError).message).toBe(
+        '[stellar:channel] Close fee exceeds the configured maximum.',
+      )
+      expect((error as ChannelVerificationError).details).toEqual({
+        fee: '10000001',
+        maxFeeBumpStroops: 10_000_000,
+      })
+      expect(mockSendTransaction).not.toHaveBeenCalled()
+      expect(await store.get(cumulativeKey)).toEqual({
+        amount: '5000000',
+        signature: credential.payload.signature,
+        closing: true,
+      })
+
+      const retry = await completeClose().catch((e: unknown) => e)
+      expect((retry as ChannelVerificationError).message).toBe(
+        '[stellar:channel] Close fee exceeds the configured maximum.',
+      )
+      expect(mockSendTransaction).not.toHaveBeenCalled()
+      expect(await store.get(`stellar:channel:closeSends:${CHANNEL_ADDRESS}`)).toBeNull()
+    })
+
     it.each([
       {
         failure: 'ERROR',
@@ -3173,7 +3382,7 @@ describe('channel vouchers after a close credential latches the channel', () => 
     ).rejects.toThrow(/Fee budget exceeded/i)
     // The full budget state goes to the server log, not to the client-facing message.
     expect(logger.warn).toHaveBeenCalledWith(
-      `[stellar:channel] Fee budget exceeded for funder ${signerKp.publicKey()}: spent ${maxFeeBumpStroops} stroops + charge ${maxFeeBumpStroops} stroops exceeds budget ${maxFeeBumpStroops} stroops within ${windowMs} ms window.`,
+      `[stellar:channel] Fee budget exceeded for fee-payer key ${signerKp.publicKey()}: spent ${maxFeeBumpStroops} stroops + charge ${maxFeeBumpStroops} stroops exceeds budget ${maxFeeBumpStroops} stroops within ${windowMs} ms window.`,
       {
         funderKey: signerKp.publicKey(),
         spentStroops: maxFeeBumpStroops,
@@ -3943,12 +4152,11 @@ describe('channel server currency pinning (on-chain token validation)', () => {
 })
 
 describe('channel server close transaction inspection (auth-tree injection)', () => {
-  // A contract-supplied auth entry whose root `close` invocation carries an
-  // injected `transfer` sub-invocation — the shape a malicious channel contract
-  // would use to ride the envelope signature and drain the signer's account.
+  // Only the channel close may be authorized by the envelope signer; unrelated
+  // root calls and nested token transfers must be refused before signing.
   const injectedTokenContract = Address.contract(Buffer.alloc(32, 7)).toString()
 
-  function injectedTransferAuthEntry(): xdr.SorobanAuthorizationEntry {
+  function injectedTransferAuthEntry(args: xdr.ScVal[]): xdr.SorobanAuthorizationEntry {
     const transferArgs = new xdr.InvokeContractArgs({
       contractAddress: new Address(injectedTokenContract).toScAddress(),
       functionName: 'transfer',
@@ -3961,7 +4169,7 @@ describe('channel server close transaction inspection (auth-tree injection)', ()
     const closeArgs = new xdr.InvokeContractArgs({
       contractAddress: new Address(CHANNEL_ADDRESS).toScAddress(),
       functionName: 'close',
-      args: [],
+      args,
     })
     const rootInvocation = new xdr.SorobanAuthorizedInvocation({
       function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(closeArgs),
@@ -3976,13 +4184,30 @@ describe('channel server close transaction inspection (auth-tree injection)', ()
   /** Returns the prepared close tx with an injected sub-invocation auth entry. */
   function preparedCloseWithInjectedAuth(tx: Transaction): Transaction {
     const envelope = tx.toEnvelope()
-    envelope
-      .v1()
-      .tx()
-      .operations()[0]
-      .body()
-      .invokeHostFunctionOp()
-      .auth([injectedTransferAuthEntry()])
+    const op = envelope.v1().tx().operations()[0].body().invokeHostFunctionOp()
+    op.auth([injectedTransferAuthEntry(op.hostFunction().invokeContract().args())])
+    return new Transaction(envelope, Networks.TESTNET)
+  }
+
+  /** Keep a valid first entry to ensure every authorization entry is inspected. */
+  function preparedCloseWithAuth(
+    tx: Transaction,
+    mutate?: (entry: xdr.SorobanAuthorizationEntry) => void,
+  ): Transaction {
+    const envelope = tx.toEnvelope()
+    const op = envelope.v1().tx().operations()[0].body().invokeHostFunctionOp()
+    const entry = new xdr.SorobanAuthorizationEntry({
+      credentials: xdr.SorobanCredentials.sorobanCredentialsSourceAccount(),
+      rootInvocation: new xdr.SorobanAuthorizedInvocation({
+        function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(
+          op.hostFunction().invokeContract(),
+        ),
+        subInvocations: [],
+      }),
+    })
+    const secondEntry = xdr.SorobanAuthorizationEntry.fromXDR(entry.toXDR())
+    mutate?.(secondEntry)
+    op.auth([entry, secondEntry])
     return new Transaction(envelope, Networks.TESTNET)
   }
 
@@ -3991,7 +4216,178 @@ describe('channel server close transaction inspection (auth-tree injection)', ()
     mockSimulateTransaction.mockReset()
     mockSendTransaction.mockReset()
     mockPrepareTransaction.mockReset()
+    mockGetTransaction.mockReset()
+    mockGetChannelState.mockReset()
+    mockGetChannelState.mockResolvedValue(mockHealthyChannelState())
   })
+
+  describe.each(['credential close', 'closeWithLatestCommitment', 'close()'] as const)(
+    '%s',
+    (path) => {
+      async function runClose() {
+        const signer = Keypair.random()
+        const store = Store.memory()
+        const credential = makeSignedCredential({
+          action: 'close',
+          cumulativeAmount: 5000000n,
+          challengeAmount: '5000000',
+        })
+        const parameters = {
+          channel: CHANNEL_ADDRESS,
+          feePayer: { envelopeSigner: signer },
+          store,
+        }
+        mockGetAccount.mockResolvedValueOnce(new Account(signer.publicKey(), '72'))
+        mockSendTransaction.mockResolvedValueOnce({ status: 'PENDING', hash: 'safe-close-hash' })
+        mockGetTransaction.mockResolvedValueOnce({ status: 'SUCCESS' })
+
+        if (path === 'credential close') {
+          const method = channel({
+            ...parameters,
+            checkOnChainState: false,
+            commitmentKey: COMMITMENT_KEY,
+          })
+          const receipt = await method.verify({
+            credential: credential as any,
+            request: credential.challenge.request,
+          })
+          expect(receipt.status).toBe('success')
+          return receipt.reference
+        }
+        if (path === 'closeWithLatestCommitment') {
+          await store.put(`stellar:channel:cumulative:${CHANNEL_ADDRESS}`, {
+            amount: credential.payload.amount,
+            signature: credential.payload.signature,
+          })
+          return closeWithLatestCommitment(parameters)
+        }
+        return close({
+          ...parameters,
+          amount: BigInt(credential.payload.amount),
+          signature: Buffer.from(credential.payload.signature, 'hex'),
+        })
+      }
+
+      const invalidEntries: {
+        name: string
+        mutate: (entry: xdr.SorobanAuthorizationEntry) => void
+        message: string
+      }[] = [
+        {
+          name: 'a root targeting another contract',
+          mutate: (entry) => {
+            entry
+              .rootInvocation()
+              .function()
+              .contractFn()
+              .contractAddress(new Address(injectedTokenContract).toScAddress())
+          },
+          message: 'targets an unexpected contract.',
+        },
+        {
+          name: 'a root calling another function',
+          mutate: (entry) => {
+            entry.rootInvocation().function().contractFn().functionName('settle')
+          },
+          message: 'invokes an unexpected function.',
+        },
+        {
+          name: 'address credentials',
+          mutate: (entry) => {
+            entry.credentials(
+              xdr.SorobanCredentials.sorobanCredentialsAddress(
+                new xdr.SorobanAddressCredentials({
+                  address: new Address(COMMITMENT_KEY.publicKey()).toScAddress(),
+                  nonce: xdr.Int64.fromString('1'),
+                  signatureExpirationLedger: 5000,
+                  signature: xdr.ScVal.scvVoid(),
+                }),
+              ),
+            )
+          },
+          message: 'must use source-account credentials.',
+        },
+        {
+          name: 'a non-contract root function',
+          mutate: (entry) => {
+            entry.rootInvocation().function(
+              xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeCreateContractHostFn(
+                new xdr.CreateContractArgs({
+                  contractIdPreimage: xdr.ContractIdPreimage.contractIdPreimageFromAddress(
+                    new xdr.ContractIdPreimageFromAddress({
+                      address: new Address(CHANNEL_ADDRESS).toScAddress(),
+                      salt: Buffer.alloc(32),
+                    }),
+                  ),
+                  executable: xdr.ContractExecutable.contractExecutableWasm(Buffer.alloc(32)),
+                }),
+              ),
+            )
+          },
+          message: 'must invoke a contract function.',
+        },
+        {
+          name: 'a root with a different amount',
+          mutate: (entry) => {
+            const args = entry.rootInvocation().function().contractFn().args()
+            args[0] = nativeToScVal(5000001n, { type: 'i128' })
+          },
+          message: 'arguments do not match the close operation.',
+        },
+        {
+          name: 'a root with a different signature',
+          mutate: (entry) => {
+            const args = entry.rootInvocation().function().contractFn().args()
+            args[1] = nativeToScVal(Buffer.alloc(64), { type: 'bytes' })
+          },
+          message: 'arguments do not match the close operation.',
+        },
+        {
+          name: 'a root with a different argument count',
+          mutate: (entry) => {
+            entry.rootInvocation().function().contractFn().args().pop()
+          },
+          message: 'arguments do not match the close operation.',
+        },
+        {
+          name: 'a root with sub-invocations',
+          mutate: (entry) => {
+            entry.rootInvocation(
+              injectedTransferAuthEntry(
+                entry.rootInvocation().function().contractFn().args(),
+              ).rootInvocation(),
+            )
+          },
+          message: 'carries unexpected sub-invocations.',
+        },
+      ]
+
+      it.each(invalidEntries)('rejects $name before signing', async ({ mutate, message }) => {
+        let prepared: Transaction | undefined
+        mockPrepareTransaction.mockImplementationOnce((tx: Transaction) => {
+          prepared = preparedCloseWithAuth(tx, mutate)
+          return prepared
+        })
+
+        await expect(runClose()).rejects.toEqual(
+          new ChannelVerificationError(`[stellar:channel] Prepared close authorization ${message}`),
+        )
+        expect(prepared?.signatures).toEqual([])
+        expect(mockSendTransaction).not.toHaveBeenCalled()
+      })
+
+      it('accepts source-account roots matching the close operation without sub-invocations', async () => {
+        mockPrepareTransaction.mockImplementationOnce((tx: Transaction) =>
+          preparedCloseWithAuth(tx),
+        )
+
+        await expect(runClose()).resolves.toBe('safe-close-hash')
+        expect(mockSendTransaction).toHaveBeenCalledTimes(1)
+        const sent = mockSendTransaction.mock.calls[0][0] as Transaction
+        expect(sent.signatures).toHaveLength(1)
+      })
+    },
+  )
 
   it('rejects a verified close whose prepared auth tree carries injected sub-invocations', async () => {
     const signerKp = Keypair.random()
@@ -4018,7 +4414,11 @@ describe('channel server close transaction inspection (auth-tree injection)', ()
 
     await expect(
       method.verify({ credential: credential as any, request: credential.challenge.request }),
-    ).rejects.toThrow('Prepared close authorization carries unexpected sub-invocations.')
+    ).rejects.toEqual(
+      new ChannelVerificationError(
+        '[stellar:channel] Prepared close authorization carries unexpected sub-invocations.',
+      ),
+    )
     expect(mockSendTransaction).not.toHaveBeenCalled()
   })
 
@@ -4037,7 +4437,11 @@ describe('channel server close transaction inspection (auth-tree injection)', ()
         signature: Buffer.alloc(64, 1),
         feePayer: { envelopeSigner: signerKp },
       }),
-    ).rejects.toThrow('Prepared close authorization carries unexpected sub-invocations.')
+    ).rejects.toEqual(
+      new ChannelVerificationError(
+        '[stellar:channel] Prepared close authorization carries unexpected sub-invocations.',
+      ),
+    )
     expect(mockSendTransaction).not.toHaveBeenCalled()
   })
 })

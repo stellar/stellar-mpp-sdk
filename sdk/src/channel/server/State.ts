@@ -8,7 +8,7 @@ import {
   type NetworkId,
 } from '../../constants.js'
 import { DEFAULT_SIM_TIMEOUT_SECS, DEFAULT_SIMULATION_TIMEOUT_MS } from '../../shared/defaults.js'
-import { StellarMppError } from '../../shared/errors.js'
+import { ChannelVerificationError, StellarMppError } from '../../shared/errors.js'
 import { scValToBigInt } from '../../shared/scval.js'
 import { withTimeout } from '../../shared/timeout.js'
 
@@ -58,6 +58,9 @@ export type ChannelState = {
  *
  * This calls the contract's public getter functions via simulation
  * (no transaction fees) and reads instance storage for dispute status.
+ * Getter simulation failures propagate before the instance-storage read.
+ *
+ * @throws {ChannelVerificationError} If the instance entry is missing when read.
  *
  * @example
  * ```ts
@@ -198,6 +201,10 @@ export declare namespace getChannelState {
  * for enum variants without data.
  *
  * We look for the `CloseEffectiveAtLedger` key in the contract's instance storage.
+ * An existing instance without that key is open; a missing instance cannot be
+ * treated as open because it may be archived or the address may be wrong.
+ *
+ * @throws {ChannelVerificationError} If the channel instance entry is missing.
  */
 async function readCloseEffectiveAtLedger(
   server: rpc.Server,
@@ -221,7 +228,10 @@ async function readCloseEffectiveAtLedger(
   )
   const unset = { closeEffectiveAtLedger: null, closeStatusLedger: response.latestLedger }
   if (!response.entries || response.entries.length === 0) {
-    return unset
+    throw new ChannelVerificationError(
+      '[stellar:channel] Channel instance entry not found on-chain (archived or wrong address).',
+      { channel: channelAddress },
+    )
   }
 
   const entry = response.entries[0]

@@ -87,7 +87,10 @@ function closeWhenCloseStarts(feePayer: { envelopeSigner: string; feeBumpSigner?
           logger,
         })
         if (txHash === null) {
-          logger.info({ trigger }, 'Channel already closed on-chain with the latest commitment')
+          logger.info(
+            { trigger },
+            'Nothing to send: channel already closed on-chain or no commitment stored',
+          )
         } else {
           logger.info({ trigger, txHash }, 'Channel closed with the latest commitment')
         }
