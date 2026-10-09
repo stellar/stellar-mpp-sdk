@@ -7,6 +7,12 @@ export const DEFAULT_POLL_BACKOFF_MULTIPLIER = 1.2
 export const DEFAULT_POLL_JITTER_MS = 200
 export const DEFAULT_POLL_TIMEOUT_MS = 20_000
 export const DEFAULT_POLL_MAX_CONCURRENT = 10
+/**
+ * Maximum close transactions `closeWithLatestCommitment` sends per channel
+ * before it stops and requires operator reconciliation. Bounds the fee spend
+ * on a close that keeps failing.
+ */
+export const DEFAULT_MAX_CLOSE_SENDS = 10
 export const DEFAULT_SIMULATION_TIMEOUT_MS = 10_000
 /**
  * The maximum number of credential verifications that can hold an on-chain

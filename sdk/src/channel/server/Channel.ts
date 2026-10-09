@@ -1,4 +1,5 @@
 import {
+  Address,
   Contract,
   FeeBumpTransaction,
   Keypair,
@@ -6,6 +7,7 @@ import {
   TransactionBuilder,
   nativeToScVal,
   rpc,
+  xdr,
 } from '@stellar/stellar-sdk'
 import { Method, Receipt, Store } from 'mppx'
 import {
@@ -18,6 +20,7 @@ import {
   type NetworkId,
 } from '../../constants.js'
 import {
+  DEFAULT_MAX_CLOSE_SENDS,
   DEFAULT_MAX_FEE_BUMP_STROOPS,
   DEFAULT_POLL_DELAY_MS,
   DEFAULT_POLL_MAX_ATTEMPTS,
@@ -31,12 +34,14 @@ import { ChannelVerificationError, SettlementError } from '../../shared/errors.j
 import { wrapFeeBump } from '../../shared/fee-bump.js'
 import { resolveKeypair } from '../../shared/keypairs.js'
 import { noopLogger, type Logger } from '../../shared/logger.js'
-import { pollTransaction } from '../../shared/poll.js'
+import { pollTransaction, TransactionFailedError } from '../../shared/poll.js'
 import { toBaseUnits } from '../../shared/units.js'
 import {
   validateAmount,
   validateContractAddress,
   validateHexSignature,
+  validateNonNegativeSafeInteger,
+  validatePositiveSafeInteger,
 } from '../../shared/validation.js'
 import { verifyInvokeContractOp } from '../../shared/verify-invoke.js'
 import { buildCommitmentMessage } from '../commitment.js'
@@ -44,11 +49,23 @@ import { channel as ChannelMethod } from '../Methods.js'
 import { getChannelState, type ChannelState } from './State.js'
 
 type ChannelCredential = Parameters<Method.VerifyFn<typeof ChannelMethod>>[0]['credential']
+
+/**
+ * The channel's cumulative record: the latest accepted commitment and, once a
+ * close has been selected, the permanent `closing` latch.
+ */
 type CumulativeRecord = {
   amount: string
+  /** Hex ed25519 commitment signature for `amount`; absent on empty-channel latches and legacy records. */
+  signature?: string
+  /**
+   * Set once a close has been accepted for this channel, in the same atomic
+   * update that selects the commitment to close with. Never cleared: the
+   * channel is ending, and completion is read from the chain, not the store.
+   */
+  closing?: true
+  /** @deprecated Written by earlier versions; read as `closing`. */
   settling?: boolean
-  settlingAmount?: string
-  settledAt?: string
 }
 
 /**
@@ -58,6 +75,13 @@ type CumulativeRecord = {
  * 1. Issues challenges with the channel contract address and cumulative amount
  * 2. Verifies commitment signatures against the channel's commitment key
  * 3. Optionally closes the channel and settles funds on-chain
+ *
+ * Closing is final. Once a close credential is accepted, or
+ * {@link closeWithLatestCommitment} selects the stored commitment, the channel
+ * stops accepting credentials for good. Whether the on-chain close has taken
+ * effect is read from the chain (`withdrawn`), never inferred from a
+ * transaction's outcome, and the contract's `close` pays only the amount not
+ * yet withdrawn, so a close can be sent again at any time.
  *
  * @example
  * ```ts
@@ -77,6 +101,33 @@ type CumulativeRecord = {
  */
 const LOG_PREFIX = '[stellar:channel]'
 const STORE_PREFIX = 'stellar:channel'
+
+/** Store key of a channel's cumulative record. */
+function cumulativeStoreKey(channelAddress: string): string {
+  return `${STORE_PREFIX}:cumulative:${channelAddress}`
+}
+
+function closedStoreKey(channelAddress: string): string {
+  return `${STORE_PREFIX}:closed:${channelAddress}`
+}
+
+function closeSendsStoreKey(channelAddress: string): string {
+  return `${STORE_PREFIX}:closeSends:${channelAddress}`
+}
+
+/** Whether a stored record carries the closing latch (or its legacy spelling). */
+function isClosing(record: unknown): boolean {
+  if (!record || typeof record !== 'object') return false
+  const { closing, settling } = record as CumulativeRecord
+  return closing === true || settling === true
+}
+
+function closingError(channelAddress: string): ChannelVerificationError {
+  return new ChannelVerificationError(
+    `${LOG_PREFIX} Channel is closing — no further credentials accepted.`,
+    { channel: channelAddress },
+  )
+}
 
 /** Reads the cumulative amount from a stored record, treating an absent or
  * malformed record as a zero cumulative. */
@@ -158,6 +209,18 @@ export function channel(parameters: channel.Parameters) {
 
   // Fail fast on a misconfigured channel address
   validateContractAddress(channelAddress)
+  validateNonNegativeSafeInteger('decimals', decimals)
+  validatePositiveSafeInteger('maxFeeBumpStroops', maxFeeBumpStroops)
+  validatePositiveSafeInteger('pollMaxAttempts', pollMaxAttempts)
+  validatePositiveSafeInteger('pollMaxConcurrent', pollMaxConcurrent)
+  validateNonNegativeSafeInteger('pollDelayMs', pollDelayMs)
+  validatePositiveSafeInteger('pollTimeoutMs', pollTimeoutMs)
+  validatePositiveSafeInteger('verifyMaxConcurrent', verifyMaxConcurrent)
+  validatePositiveSafeInteger('simulationTimeoutMs', simulationTimeoutMs)
+  if (feeBudget) {
+    validatePositiveSafeInteger('feeBudget.maxStroops', feeBudget.maxStroops)
+    validatePositiveSafeInteger('feeBudget.windowMs', feeBudget.windowMs)
+  }
 
   const resolvedRpcUrl = rpcUrl ?? SOROBAN_RPC_URLS[network]
   const networkPassphrase = NETWORK_PASSPHRASE[network]
@@ -180,13 +243,7 @@ export function channel(parameters: channel.Parameters) {
   const feeBumpKP = feePayer?.feeBumpSigner ? resolveKeypair(feePayer.feeBumpSigner) : undefined
 
   // Track cumulative amounts per channel in the store
-  const cumulativeKey = `${STORE_PREFIX}:cumulative:${channelAddress}`
-
-  // Track channel settlement in-progress state. Set under the lock when a close
-  // is accepted, cleared after successful settlement. If settlement fails, the
-  // marker remains to fail-closed: prevent acceptance of new credentials pending
-  // operator reconciliation.
-  const settlingKey = `${STORE_PREFIX}:settling:${channelAddress}`
+  const cumulativeKey = cumulativeStoreKey(channelAddress)
 
   // Serialize cumulative amount updates to prevent concurrent double-acceptance.
   // Without a transactional store, two concurrent verify calls could both
@@ -214,7 +271,7 @@ export function channel(parameters: channel.Parameters) {
 
   if (feeBumpKP && !feeBudget) {
     logger.warn(
-      `${LOG_PREFIX} A fee-bump signer is configured without a feeBudget — sponsor fee spending per funder is not capped. Set feeBudget to bound settlement fee usage in fee-sponsoring deployments.`,
+      `${LOG_PREFIX} A fee-bump signer is configured without a feeBudget — sponsor fee spending per fee-payer key is not capped. Set feeBudget to bound settlement fee usage in fee-sponsoring deployments.`,
     )
   }
 
@@ -295,13 +352,13 @@ export function channel(parameters: channel.Parameters) {
   }
 
   /**
-   * Rejects credentials once the channel has been closed on-chain.
+   * Rejects credentials once a close has been confirmed for this channel.
    *
    * Read by both phases: {@link doPrepare} rejects early to avoid spending RPC,
    * and {@link doCommit} re-reads because an RPC round-trip has elapsed since.
    */
   async function assertNotClosed(): Promise<void> {
-    const closed = await store.get(`${STORE_PREFIX}:closed:${channelAddress}`)
+    const closed = await store.get(closedStoreKey(channelAddress))
     if (closed) {
       logger.warn(`${LOG_PREFIX} Rejecting credential — channel already closed`, {
         channel: channelAddress,
@@ -318,8 +375,9 @@ export function channel(parameters: channel.Parameters) {
    *
    * The function claims the challenge, validates the formats and proves that
    * the commitment signature is authentic. The signature check is local and
-   * makes no RPC call. The function writes no channel state, except for the
-   * self-synchronising challenge claim.
+   * makes no RPC call. The function writes no channel state, except for two
+   * self-synchronising writes: the challenge claim and, for a close, the
+   * fee-budget charge.
    *
    * The lifecycle reads here are therefore advisory. They reject an invalid
    * credential early, before the server makes an RPC call. {@link doCommit}
@@ -340,34 +398,15 @@ export function channel(parameters: channel.Parameters) {
     // Advisory lifecycle reads — re-checked authoritatively in doCommit.
     await assertNotClosed()
 
-    // Reject all actions if a close is currently settling. The settling marker is set
-    // atomically under the lock when a close is accepted, and remains set until settlement
-    // completes or fails. During settlement, the channel must not accept new credentials.
-    // If settlement fails, the marker stays set to fail-closed: no silent reopening.
-    const settling = await store.get(settlingKey)
-    if (settling) {
-      logger.warn(`${LOG_PREFIX} Rejecting credential — channel is settling`, {
-        channel: channelAddress,
-      })
-      throw new ChannelVerificationError(
-        `${LOG_PREFIX} Channel is settling — no further credentials accepted until settlement completes.`,
-        { channel: channelAddress },
-      )
-    }
+    // Reject all actions once a close has been selected for this channel. The
+    // closing latch is set atomically with the commitment it closes with and is
+    // never cleared, so no credential accepted afterwards could go uncovered.
     const cumulativeRecord = await store.get(cumulativeKey)
-    if (
-      cumulativeRecord &&
-      typeof cumulativeRecord === 'object' &&
-      'settling' in cumulativeRecord &&
-      (cumulativeRecord as CumulativeRecord).settling
-    ) {
-      logger.warn(`${LOG_PREFIX} Rejecting credential — channel is settling`, {
+    if (isClosing(cumulativeRecord)) {
+      logger.warn(`${LOG_PREFIX} Rejecting credential — channel is closing`, {
         channel: channelAddress,
       })
-      throw new ChannelVerificationError(
-        `${LOG_PREFIX} Channel is settling — no further credentials accepted until settlement completes.`,
-        { channel: channelAddress },
-      )
+      throw closingError(channelAddress)
     }
 
     // Replay protection via atomic compare-and-set: reject if challenge already used.
@@ -446,14 +485,21 @@ export function channel(parameters: channel.Parameters) {
       }
     }
 
-    // A close can only be settled by a server configured with an envelope signer.
-    // Reject it before the cumulative update writes the settling markers, so a
-    // voucher-only server is not bricked by a close it can never complete.
-    if (action === 'close' && !envelopeKP) {
-      throw new ChannelVerificationError(
-        `${LOG_PREFIX} Close action requires a feePayer.envelopeSigner (transaction source and envelope signer) to be configured.`,
-        {},
-      )
+    if (action === 'close') {
+      // A close can only be settled by a server configured with an envelope
+      // signer. Reject it before the cumulative update writes the closing
+      // latch, so a voucher-only server is not bricked by a close it can never
+      // complete.
+      if (!envelopeKP) {
+        throw new ChannelVerificationError(
+          `${LOG_PREFIX} Close action requires a feePayer.envelopeSigner (transaction source and envelope signer) to be configured.`,
+          {},
+        )
+      }
+      // Likewise, a close the fee budget would refuse must not latch the
+      // channel, so the budget is charged here, before the latch, in its own
+      // atomic update. A charge that a later check wastes only over-counts.
+      await enforceFeeBudget()
     }
 
     return {
@@ -470,9 +516,9 @@ export function channel(parameters: channel.Parameters) {
   /**
    * Phase 1b — authoritative state write (runs UNDER {@link cumulativeLock}).
    *
-   * Holds the lock for store operations only: one atomic cumulative update plus
-   * a marker write. For vouchers this returns the receipt directly; for a close
-   * it returns the validated state so settlement can run outside the lock.
+   * Holds the lock for store operations only: one atomic cumulative update.
+   * For vouchers this returns the receipt directly; for a close it returns the
+   * validated state so settlement can run outside the lock.
    */
   async function doCommit(prepared: PreparedCredential): Promise<ValidatedCredential> {
     const {
@@ -486,13 +532,15 @@ export function channel(parameters: channel.Parameters) {
     } = prepared
 
     // Re-read: an RPC round-trip elapsed inside doPrepare, so its lifecycle
-    // reads may be seconds stale. The cumulative update below covers `settling`
-    // (that flag lives in the cumulative record); `closed` is a separate key and
-    // has to be re-read here.
+    // reads may be seconds stale. The cumulative update below covers `closing`
+    // (that latch lives in the cumulative record); `closed` is a separate key
+    // and has to be re-read here.
     await assertNotClosed()
 
     // Atomic cumulative monotonic check and write: reject if invariants fail,
-    // or write the new cumulative if all checks pass.
+    // or write the new cumulative if all checks pass. A close credential sets
+    // the closing latch in the same write, so every voucher is either covered
+    // by the close or rejected.
     type CumulativeResult = { success: true } | { success: false; error: ChannelVerificationError }
 
     const cumulativeUpdateResult = await store.update(
@@ -500,20 +548,13 @@ export function channel(parameters: channel.Parameters) {
       (current): Store.Change<CumulativeRecord, CumulativeResult> => {
         let previousCumulative = 0n
         if (current && typeof current === 'object' && 'amount' in current) {
-          const record = current as CumulativeRecord
-          if (record.settling) {
+          if (isClosing(current)) {
             return {
               op: 'noop',
-              result: {
-                success: false,
-                error: new ChannelVerificationError(
-                  `${LOG_PREFIX} Channel is settling — no further credentials accepted until settlement completes.`,
-                  { channel: channelAddress },
-                ),
-              },
+              result: { success: false, error: closingError(channelAddress) },
             }
           }
-          previousCumulative = BigInt(record.amount)
+          previousCumulative = BigInt((current as CumulativeRecord).amount)
         }
 
         // Authoritative monotonicity check against the latest stored cumulative,
@@ -528,18 +569,14 @@ export function channel(parameters: channel.Parameters) {
         }
 
         // All checks passed, write the new cumulative
+        const record: CumulativeRecord = {
+          amount: commitmentAmount.toString(),
+          signature: signatureBytes.toString('hex'),
+        }
         return {
           op: 'set',
           result: { success: true },
-          value:
-            action === 'close'
-              ? {
-                  amount: commitmentAmount.toString(),
-                  settling: true,
-                  settlingAmount: commitmentAmount.toString(),
-                  settledAt: new Date().toISOString(),
-                }
-              : { amount: commitmentAmount.toString() },
+          value: action === 'close' ? { ...record, closing: true } : record,
         }
       },
     )
@@ -548,15 +585,14 @@ export function channel(parameters: channel.Parameters) {
       throw cumulativeUpdateResult.error
     }
 
-    // Close: set settling marker to block new credentials during phase 2 settlement.
-    // Cumulative was already written atomically above. The settling marker remains set
-    // until settlement completes (marker cleared) or fails (marker remains to fail-closed).
     if (action === 'close') {
-      await store.put(settlingKey, {
-        settlingAmount: commitmentAmount.toString(),
-        settledAt: new Date().toISOString(),
-      })
-      return { action: 'close', commitmentAmount, signatureBytes, challengeStoreKey, externalId }
+      return {
+        action: 'close',
+        commitmentAmount,
+        signatureBytes,
+        challengeStoreKey,
+        externalId,
+      }
     }
 
     // Voucher path: cumulative was already written atomically above.
@@ -601,6 +637,10 @@ export function channel(parameters: channel.Parameters) {
    * 5. Broadcasts and polls for on-chain confirmation.
    * 6. Marks the channel as closed and the challenge as used in the store.
    *
+   * The closing latch written by {@link doCommit} stays whatever happens here.
+   * If the close does not confirm, {@link closeWithLatestCommitment} completes
+   * it later with the same stored commitment.
+   *
    * @throws {ChannelVerificationError} If no envelopeSigner is configured.
    * @throws {SettlementError} If the broadcast fails or the on-chain tx does
    *   not confirm.
@@ -620,10 +660,6 @@ export function channel(parameters: channel.Parameters) {
       )
     }
 
-    // Tracks whether the close transaction may have reached the chain. Before
-    // broadcast a failure is safe to roll back; after it the outcome is
-    // ambiguous and the settling markers must stay set (fail-closed).
-    let broadcast = false
     try {
       const contract = new Contract(channelAddress)
       const closeOp = contract.call(
@@ -643,6 +679,7 @@ export function channel(parameters: channel.Parameters) {
 
       const prepared = await rpcServer.prepareTransaction(closeTx)
       assertPreparedCloseIsSafe(prepared, channelAddress)
+      assertCloseFeeWithinCeiling(prepared, maxFeeBumpStroops)
       prepared.sign(envelopeKP)
 
       let txToSubmit: Transaction | FeeBumpTransaction = prepared
@@ -653,22 +690,14 @@ export function channel(parameters: channel.Parameters) {
         })
       }
 
-      // Enforce fee budget before broadcast (fail-safe: charge BEFORE broadcast)
-      await enforceFeeBudget()
-
-      broadcast = true
       const txHash = await broadcastAndPoll(txToSubmit, 'Close')
 
       logger.debug(`${LOG_PREFIX} Channel closed, marking in store`)
-      await store.put(`${STORE_PREFIX}:closed:${channelAddress}`, {
+      await store.put(closedStoreKey(channelAddress), {
         closedAt: new Date().toISOString(),
         txHash,
         amount: commitmentAmount.toString(),
       })
-
-      // Clear settling marker — it is now redundant because the closed marker blocks everything.
-      // This is done for cleanliness after a successful settlement.
-      await store.delete(settlingKey)
 
       await store.put(challengeStoreKey, { state: 'used', usedAt: new Date().toISOString() })
 
@@ -681,17 +710,10 @@ export function channel(parameters: channel.Parameters) {
       })
     } catch (error) {
       // mppx does not log payment errors, so surface settlement failures
-      // (which may need reconciliation) through the configured logger.
+      // through the configured logger. The channel stays closing; the close is
+      // completed later by closeWithLatestCommitment.
       if (error instanceof SettlementError) {
         logger.error(error.message, error.details)
-      }
-      // A failure before broadcast means the close never reached the chain, so
-      // roll back the settling markers and let the channel keep serving instead
-      // of bricking it. After broadcast the outcome is ambiguous, so the markers
-      // remain set and recovery requires reconciliation.
-      if (!broadcast) {
-        await store.put(cumulativeKey, { amount: commitmentAmount.toString() })
-        await store.delete(settlingKey)
       }
       throw error
     }
@@ -737,75 +759,88 @@ export function channel(parameters: channel.Parameters) {
   }
 
   /**
-   * Enforces per-funder fee budget before settlement broadcast.
+   * Shared fee-payer budget for close settlements.
    *
-   * If `feeBudget` is configured, checks whether the funder key has exceeded
-   * the maximum stroops within the rolling window. The conservative per-settlement
-   * charge is `maxFeeBumpStroops` (the configured ceiling on network fees).
+   * If `feeBudget` is configured, one pool per server paying key (`feeBumpSigner`
+   * else `envelopeSigner`) tracks stroops within a rolling window, shared by
+   * every close settlement that key pays for across channels and funders.
+   * The conservative per-settlement charge is `maxFeeBumpStroops`
+   * (the configured ceiling on network fees).
    *
-   * Charge is recorded BEFORE broadcast (fail-safe: admitted-but-reverting txs
-   * still cost fees, so we must not under-count).
-   *
-   * @throws {ChannelVerificationError} If the budget is exceeded.
+   * The charge is taken in {@link doPrepare}, before the closing latch is
+   * written and before any transaction is built or broadcast. A close the
+   * budget refuses therefore never latches the channel, and a close that is
+   * admitted but fails later has still been counted: admitted-but-reverting
+   * transactions cost fees, so over-counting is the safe direction.
    */
   type FeeBudgetRecord = { windowStartMs: number; spentStroops: number }
 
+  /** Key of the fee-payer's budget record (the key that actually pays the fee). */
+  function feeBudgetStoreKey(): string {
+    const funderKey = feeBumpKP?.publicKey() ?? envelopeKP?.publicKey() ?? ''
+    return `${STORE_PREFIX}:feebudget:${funderKey}`
+  }
+
+  /**
+   * Pure transition: returns the budget record after charging one settlement,
+   * or throws if the charge would exceed the budget.
+   *
+   * @throws {ChannelVerificationError} If the budget is exceeded.
+   */
+  function chargeFeeBudget(current: FeeBudgetRecord | null): FeeBudgetRecord {
+    const budget = feeBudget!
+    const charge = maxFeeBumpStroops
+    const now = Date.now()
+    const inWindow = current !== null && now - current.windowStartMs < budget.windowMs
+    const windowStartMs = inWindow ? current.windowStartMs : now
+    const spentStroops = inWindow ? current.spentStroops : 0
+
+    if (spentStroops + charge > budget.maxStroops) {
+      const funderKey = feeBumpKP?.publicKey() ?? envelopeKP?.publicKey()
+      const details = {
+        funderKey,
+        spentStroops,
+        charge,
+        budgetStroops: budget.maxStroops,
+        windowMs: budget.windowMs,
+      }
+      // The error message reaches the client, so the fee-payer key and budget
+      // configuration go only to the server log.
+      logger.warn(
+        `${LOG_PREFIX} Fee budget exceeded for fee-payer key ${funderKey}: spent ${spentStroops} stroops + charge ${charge} stroops exceeds budget ${budget.maxStroops} stroops within ${budget.windowMs} ms window.`,
+        details,
+      )
+      throw new ChannelVerificationError(
+        `${LOG_PREFIX} Fee budget exceeded: this settlement would exceed the server's fee budget for the current window. Retry later.`,
+        details,
+      )
+    }
+
+    return { windowStartMs, spentStroops: spentStroops + charge }
+  }
+
+  /**
+   * Charges one settlement against the fee budget.
+   *
+   * @throws {ChannelVerificationError} If the budget is exceeded.
+   */
   async function enforceFeeBudget(): Promise<void> {
     if (!feeBudget) {
       // No budget configured — backward compatible behavior.
       return
     }
 
-    // Funder key is the public key that actually pays the network fee.
-    // Settlement only runs when an envelope signer is configured, so this is
-    // always defined here; the early return is purely defensive.
-    const funderKey = feeBumpKP?.publicKey() ?? envelopeKP?.publicKey()
-    if (!funderKey) {
+    // Settlement only runs when an envelope signer is configured, so the
+    // fee-payer key is always defined here; the early return is purely defensive.
+    if (!feeBumpKP && !envelopeKP) {
       return
-    }
-
-    const budgetKey = `${STORE_PREFIX}:feebudget:${funderKey}`
-    // Conservative per-settlement charge: the configured ceiling on the network
-    // fee the server may pay for one settlement.
-    const charge = maxFeeBumpStroops
-
-    // Pure transition: returns the updated record or throws if the charge would
-    // exceed the budget. Recording the charge BEFORE broadcast is intentional —
-    // an admitted-but-reverting tx still costs fees, so we must not under-count.
-    const applyCharge = (current: FeeBudgetRecord | null): FeeBudgetRecord => {
-      const now = Date.now()
-      const inWindow = current !== null && now - current.windowStartMs < feeBudget.windowMs
-      const windowStartMs = inWindow ? current.windowStartMs : now
-      const spentStroops = inWindow ? current.spentStroops : 0
-
-      if (spentStroops + charge > feeBudget.maxStroops) {
-        const details = {
-          funderKey,
-          spentStroops,
-          charge,
-          budgetStroops: feeBudget.maxStroops,
-          windowMs: feeBudget.windowMs,
-        }
-        // The error message reaches the client, so the funder key and budget
-        // configuration go only to the server log.
-        logger.warn(
-          `${LOG_PREFIX} Fee budget exceeded for funder ${funderKey}: spent ${spentStroops} stroops + charge ${charge} stroops exceeds budget ${feeBudget.maxStroops} stroops within ${feeBudget.windowMs} ms window.`,
-          details,
-        )
-        throw new ChannelVerificationError(
-          `${LOG_PREFIX} Fee budget exceeded: this settlement would exceed the server's fee budget for the current window. Retry later.`,
-          details,
-        )
-      }
-
-      return { windowStartMs, spentStroops: spentStroops + charge }
     }
 
     // Atomic read-modify-write so the budget holds under concurrent settlements
     // (which run outside the cumulative lock).
-    await store.update(budgetKey, (current): Store.Change<FeeBudgetRecord, void> => ({
+    await store.update(feeBudgetStoreKey(), (current): Store.Change<FeeBudgetRecord, void> => ({
       op: 'set',
-      value: applyCharge(current as FeeBudgetRecord | null),
+      value: chargeFeeBudget(current as FeeBudgetRecord | null),
       result: undefined,
     }))
   }
@@ -842,7 +877,8 @@ export function channel(parameters: channel.Parameters) {
     }
 
     // pollTransaction only returns on SUCCESS; FAILED, timeouts, and semaphore
-    // exhaustion all throw, and the transaction may still land in the latter cases.
+    // exhaustion all throw. Whatever happened, the channel stays closing and
+    // closeWithLatestCommitment completes the close from the chain state.
     try {
       await pollTransaction(rpcServer, sendResult.hash, {
         maxAttempts: pollMaxAttempts,
@@ -851,8 +887,14 @@ export function channel(parameters: channel.Parameters) {
         semaphore: pollSemaphore,
       })
     } catch (error) {
+      if (error instanceof TransactionFailedError) {
+        throw new SettlementError(`${LOG_PREFIX} ${label} transaction failed on-chain.`, {
+          hash: sendResult.hash,
+          details: error.message,
+        })
+      }
       throw new SettlementError(
-        `${LOG_PREFIX} ${label} settlement did not confirm — channel left settling pending reconciliation.`,
+        `${LOG_PREFIX} ${label} settlement did not confirm — the channel stays closing; closeWithLatestCommitment completes the close.`,
         {
           hash: sendResult.hash,
           details: error instanceof Error ? error.message : String(error),
@@ -865,12 +907,12 @@ export function channel(parameters: channel.Parameters) {
 
   /**
    * Lazily checks on-chain channel state to detect disputes and enforce
-   * balance limits. Called once per voucher/close verify when
+   * deposit limits. Called once per voucher/close verify when
    * `checkOnChainState` is enabled.
    *
-   * @param commitmentAmount - The cumulative commitment to validate against the on-chain balance.
-   * @throws {ChannelVerificationError} If the channel is closed on-chain, the
-   *   commitment exceeds the balance, or the RPC call fails.
+   * @param commitmentAmount - The cumulative commitment to validate against the on-chain deposit.
+   * @throws {ChannelVerificationError} If a close has started on-chain, the
+   *   commitment exceeds the deposit, or the RPC call fails.
    */
   async function verifyOnChainState(commitmentAmount: bigint): Promise<void> {
     let state: ChannelState
@@ -912,44 +954,49 @@ export function channel(parameters: channel.Parameters) {
 
     logger.debug(`${LOG_PREFIX} On-chain state check`, {
       balance: state.balance.toString(),
+      withdrawn: state.withdrawn.toString(),
       closeAt: state.closeEffectiveAtLedger,
     })
 
     await store.put(`${STORE_PREFIX}:state:${channelAddress}`, {
       balance: state.balance.toString(),
+      withdrawn: state.withdrawn.toString(),
       closeEffectiveAtLedger: state.closeEffectiveAtLedger,
       currentLedger: state.currentLedger,
       queriedAt: new Date().toISOString(),
     })
 
+    // A close that has started on-chain cannot be cancelled, so the channel is
+    // ending: reject the credential and let the operator's dispute handler
+    // close with the stored commitment before the waiting period ends.
     if (state.closeEffectiveAtLedger != null) {
       onDisputeDetected?.(state)
 
-      if (state.currentLedger >= state.closeEffectiveAtLedger) {
-        logger.warn(`${LOG_PREFIX} Channel is closed — effective ledger reached`, {
-          closeEffectiveAtLedger: state.closeEffectiveAtLedger,
-          currentLedger: state.currentLedger,
-        })
-        throw new ChannelVerificationError(
-          `${LOG_PREFIX} Channel is closed: close effective ledger has been reached.`,
-          {
-            closeEffectiveAtLedger: String(state.closeEffectiveAtLedger),
-            currentLedger: String(state.currentLedger),
-          },
-        )
-      }
-    }
-
-    if (commitmentAmount > state.balance) {
-      logger.warn(`${LOG_PREFIX} Commitment exceeds channel balance`, {
-        commitmentAmount: commitmentAmount.toString(),
-        balance: state.balance.toString(),
+      logger.warn(`${LOG_PREFIX} Channel is closing on-chain — rejecting credential`, {
+        closeEffectiveAtLedger: state.closeEffectiveAtLedger,
+        closeStatusLedger: state.closeStatusLedger,
       })
       throw new ChannelVerificationError(
-        `${LOG_PREFIX} Commitment ${commitmentAmount} exceeds channel balance ${state.balance}.`,
+        `${LOG_PREFIX} Channel is closing on-chain: a close has started.`,
+        {
+          closeEffectiveAtLedger: String(state.closeEffectiveAtLedger),
+          closeStatusLedger: String(state.closeStatusLedger),
+        },
+      )
+    }
+
+    // The commitment is cumulative, so compare it with everything ever
+    // deposited (balance plus amounts already withdrawn), not the balance alone.
+    if (commitmentAmount > state.deposited) {
+      logger.warn(`${LOG_PREFIX} Commitment exceeds channel deposit`, {
+        commitmentAmount: commitmentAmount.toString(),
+        deposited: state.deposited.toString(),
+      })
+      throw new ChannelVerificationError(
+        `${LOG_PREFIX} Commitment ${commitmentAmount} exceeds channel deposit ${state.deposited}.`,
         {
           commitmentAmount: commitmentAmount.toString(),
-          balance: state.balance.toString(),
+          deposited: state.deposited.toString(),
         },
       )
     }
@@ -959,13 +1006,14 @@ export function channel(parameters: channel.Parameters) {
 /**
  * Inspect a `prepareTransaction`-built close transaction before it is signed.
  *
- * `prepareTransaction` runs the channel contract in recording-mode simulation and
- * inlines whatever authorization the contract requested. Because the channel
- * contract is deployed out-of-band, a malicious one could request authorization
- * for an injected sub-invocation (e.g. a token transfer out of the signer's own
- * account) that the envelope signature would then implicitly authorize. Confirm
- * the transaction is exactly a `close` call on the expected channel and that no
- * authorization entry carries sub-invocations before signing it.
+ * `prepareTransaction` returns RPC-supplied authorization from recording-mode
+ * simulation. The envelope signature authorizes source-account entries, so each
+ * must be restricted to the expected channel's `close` invocation with exactly
+ * the operation's arguments and no sub-invocations. Refuse other credential
+ * types and root functions before signing.
+ *
+ * @throws {ChannelVerificationError} If the prepared close or its authorization
+ *   entries do not match these restrictions.
  */
 function assertPreparedCloseIsSafe(preparedTx: Transaction, channelAddress: string): void {
   const { contractAddress, invokeArgs, authEntries } = verifyInvokeContractOp(
@@ -985,8 +1033,47 @@ function assertPreparedCloseIsSafe(preparedTx: Transaction, channelAddress: stri
       { functionName },
     )
   }
+  const closeArgs = invokeArgs.args()
   for (const entry of authEntries) {
-    if (entry.rootInvocation().subInvocations().length > 0) {
+    if (
+      entry.credentials().switch().value !==
+      xdr.SorobanCredentialsType.sorobanCredentialsSourceAccount().value
+    ) {
+      throw new ChannelVerificationError(
+        `${LOG_PREFIX} Prepared close authorization must use source-account credentials.`,
+      )
+    }
+    const rootInvocation = entry.rootInvocation()
+    const authorizedFunction = rootInvocation.function()
+    if (
+      authorizedFunction.switch().value !==
+      xdr.SorobanAuthorizedFunctionType.sorobanAuthorizedFunctionTypeContractFn().value
+    ) {
+      throw new ChannelVerificationError(
+        `${LOG_PREFIX} Prepared close authorization must invoke a contract function.`,
+      )
+    }
+    const rootArgs = authorizedFunction.contractFn()
+    if (Address.fromScAddress(rootArgs.contractAddress()).toString() !== channelAddress) {
+      throw new ChannelVerificationError(
+        `${LOG_PREFIX} Prepared close authorization targets an unexpected contract.`,
+      )
+    }
+    if (rootArgs.functionName().toString() !== 'close') {
+      throw new ChannelVerificationError(
+        `${LOG_PREFIX} Prepared close authorization invokes an unexpected function.`,
+      )
+    }
+    const args = rootArgs.args()
+    if (
+      args.length !== closeArgs.length ||
+      args.some((arg, index) => arg.toXDR('base64') !== closeArgs[index].toXDR('base64'))
+    ) {
+      throw new ChannelVerificationError(
+        `${LOG_PREFIX} Prepared close authorization arguments do not match the close operation.`,
+      )
+    }
+    if (rootInvocation.subInvocations().length > 0) {
       throw new ChannelVerificationError(
         `${LOG_PREFIX} Prepared close authorization carries unexpected sub-invocations.`,
         {},
@@ -996,50 +1083,299 @@ function assertPreparedCloseIsSafe(preparedTx: Transaction, channelAddress: stri
 }
 
 /**
+ * Refuses a prepared close whose total fee exceeds the configured ceiling.
+ *
+ * The server signs the transaction and pays the fee that RPC simulation
+ * returns, so the ceiling is checked before signing. The same ceiling caps the
+ * FeeBump wrapper, so both sign paths stay within it.
+ *
+ * @throws {ChannelVerificationError} If the fee exceeds `maxFeeBumpStroops`.
+ */
+function assertCloseFeeWithinCeiling(preparedTx: Transaction, maxFeeBumpStroops: number): void {
+  if (Number(preparedTx.fee) > maxFeeBumpStroops) {
+    throw new ChannelVerificationError(`${LOG_PREFIX} Close fee exceeds the configured maximum.`, {
+      fee: preparedTx.fee,
+      maxFeeBumpStroops,
+    })
+  }
+}
+
+/**
+ * Returns the latest verified commitment amount and signature from the channel
+ * server's store, or null when no signature is stored (including records written
+ * by earlier versions).
+ *
+ * This is a read only. Use {@link closeWithLatestCommitment} to stop voucher
+ * acceptance and close with the stored commitment.
+ *
+ * @throws {ChannelVerificationError} If the stored record is malformed.
+ */
+export async function getLatestCommitment(parameters: {
+  /** Store passed to the channel server method. */
+  store: Store.Store
+  /** On-chain channel contract address (C...). */
+  channel: string
+}): Promise<{ amount: bigint; signature: Uint8Array } | null> {
+  const { store, channel: channelAddress } = parameters
+  const record = (await store.get(cumulativeStoreKey(channelAddress))) as CumulativeRecord | null
+  if (!record || record.signature === undefined) return null
+
+  return parseStoredCommitment(record, channelAddress)
+}
+
+function parseStoredCommitment(record: CumulativeRecord, channelAddress: string) {
+  try {
+    if (typeof record.signature !== 'string') throw new Error('Invalid signature')
+    validateHexSignature(record.signature)
+    if (typeof record.amount !== 'string') throw new Error('Invalid amount')
+    validateAmount(record.amount)
+    return {
+      amount: BigInt(record.amount),
+      signature: Buffer.from(record.signature, 'hex'),
+    }
+  } catch {
+    throw new ChannelVerificationError(`${LOG_PREFIX} Stored commitment record is malformed.`, {
+      channel: channelAddress,
+    })
+  }
+}
+
+/**
+ * Close the channel with the latest verified commitment in the server's store.
+ *
+ * Stops voucher acceptance and reads the commitment in one atomic store update,
+ * so every voucher is either covered by the close or rejected. The latch is
+ * permanent: closing is final, and the channel never accepts credentials again.
+ * An empty channel is latched with amount zero without querying the chain or
+ * sending a transaction. A legacy unsigned record is latched before reporting
+ * that its commitment is missing.
+ *
+ * Completion is judged from the chain, not from a transaction's outcome. The
+ * helper first reads the channel state and returns `null` without sending
+ * anything when a close has started on-chain and `withdrawn` already covers
+ * the stored amount. Otherwise it
+ * sends `close(amount, signature)` and polls for confirmation. The contract
+ * pays only the amount not yet withdrawn, so the helper is safe to call again
+ * after any failure or unknown outcome: a rejected send, an on-chain failure,
+ * a poll timeout or a lost response all mean "call again later". Sends are
+ * counted per channel in the store and capped at `maxCloseSends` to bound fee
+ * spend on a close that keeps failing; past the cap, the call throws without
+ * sending and the operator reconciles.
+ *
+ * Call this before the refund waiting period ends, when `watchChannel` reports a
+ * `close` event with a future `effectiveAtLedger`. `watchChannel` starts at the
+ * latest ledger, so on startup read the latest ledger, then call
+ * `getChannelState`, call this when `closeEffectiveAtLedger` is set and later
+ * than `closeStatusLedger`, and watch from the ledger read first (`startLedger`).
+ * It is also safe to start inside `onDisputeDetected`; the callback does not
+ * await it, so attach a `.catch(...)` rejection handler.
+ *
+ * The store must provide atomic `update()` semantics across all server
+ * instances. Like {@link close}, this helper does not apply the channel
+ * server's `feeBudget`. RPC and store errors propagate unchanged.
+ *
+ * @returns The close transaction hash, or `null` when a confirmed close is
+ *   already recorded, there is no stored commitment and nothing is owed (including
+ *   an existing empty-channel latch), or the chain already showed a started close
+ *   with the stored amount withdrawn, so nothing was sent.
+ * @throws {ChannelVerificationError} If a legacy record has no signature (after
+ *   latching it), the stored commitment is malformed, the store has no atomic
+ *   `update()`, the send cap is reached, or the broadcast returns a
+ *   non-`PENDING` status.
+ * @throws {TransactionFailedError} If the close transaction fails on-chain.
+ * @throws {PollTimeoutError} If polling exceeds the configured timeout.
+ * @throws {PollMaxAttemptsError} If polling exhausts the configured attempts.
+ */
+export async function closeWithLatestCommitment(
+  parameters: Omit<close.Parameters, 'amount' | 'signature'> & {
+    /** Atomic store passed to the channel server method. */
+    store: Store.AtomicStore
+    /**
+     * Maximum close transactions sent for this channel across all calls and
+     * instances. Must be a positive safe integer. @default 10
+     */
+    maxCloseSends?: number
+  },
+): Promise<string | null> {
+  const { store, maxCloseSends = DEFAULT_MAX_CLOSE_SENDS, ...rest } = parameters
+  validatePositiveSafeInteger('maxCloseSends', maxCloseSends)
+  validateCloseBounds(rest)
+  const { channel: channelAddress, network = STELLAR_TESTNET, rpcUrl, logger = noopLogger } = rest
+  const cumulativeKey = cumulativeStoreKey(channelAddress)
+  const closedKey = closedStoreKey(channelAddress)
+
+  // A confirmed close is cached; nothing is left to send.
+  if (await store.get(closedKey)) {
+    logger.info(`${LOG_PREFIX} Channel close already confirmed; nothing to send.`, {
+      channel: channelAddress,
+    })
+    return null
+  }
+  if (typeof store.update !== 'function') {
+    throw new ChannelVerificationError(
+      `${LOG_PREFIX} An atomic store providing compare-and-set semantics via update() is required for closing with the stored commitment.`,
+      { channel: channelAddress },
+    )
+  }
+
+  // Latch and select in one atomic update. A record that is already closing
+  // keeps its pair: the close is simply sent (again) for it.
+  type Selection =
+    | { success: true; pair: { amount: bigint; signature: Uint8Array } | null }
+    | { success: false; error: ChannelVerificationError }
+  const selection = await store.update(
+    cumulativeKey,
+    (current): Store.Change<CumulativeRecord, Selection> => {
+      const record = current as CumulativeRecord | null
+      if (!record) {
+        return {
+          op: 'set',
+          value: { amount: '0', closing: true },
+          result: { success: true, pair: null },
+        }
+      }
+      if (record.signature === undefined) {
+        // An empty-channel latch needs no commitment and no further writes.
+        if (record.amount === '0' && isClosing(record)) {
+          return { op: 'noop', result: { success: true, pair: null } }
+        }
+        const result: Selection = {
+          success: false,
+          error: new ChannelVerificationError(`${LOG_PREFIX} No stored commitment to close with`, {
+            channel: channelAddress,
+          }),
+        }
+        // Preserve an unsigned legacy amount, but stop accepting vouchers even
+        // though the operator must recover its missing commitment signature.
+        return isClosing(record)
+          ? { op: 'noop', result }
+          : { op: 'set', value: { ...record, closing: true }, result }
+      }
+      let pair: { amount: bigint; signature: Uint8Array }
+      try {
+        pair = parseStoredCommitment(record, channelAddress)
+      } catch (error) {
+        return { op: 'noop', result: { success: false, error: error as ChannelVerificationError } }
+      }
+      if (isClosing(record)) {
+        return { op: 'noop', result: { success: true, pair } }
+      }
+      return {
+        op: 'set',
+        value: { amount: record.amount, signature: record.signature, closing: true },
+        result: { success: true, pair },
+      }
+    },
+  )
+  if (!selection.success) throw selection.error
+  if (selection.pair === null) {
+    logger.info(
+      `${LOG_PREFIX} No stored commitment; nothing is owed and the channel stays closing.`,
+      {
+        channel: channelAddress,
+      },
+    )
+    return null
+  }
+  const { amount, signature } = selection.pair
+
+  // The chain decides whether the close is already done. A close that landed
+  // after an unknown outcome shows up here, and nothing is sent. `settle` also
+  // advances `withdrawn` without closing, so the close must have started too.
+  const state = await getChannelState({
+    channel: channelAddress,
+    network,
+    rpcUrl,
+    simulationTimeoutMs: rest.simulationTimeoutMs,
+  })
+  if (state.closeEffectiveAtLedger != null && state.withdrawn >= amount) {
+    logger.info(`${LOG_PREFIX} Stored commitment already withdrawn on-chain; nothing to send.`, {
+      channel: channelAddress,
+      amount: amount.toString(),
+      withdrawn: state.withdrawn.toString(),
+    })
+    await store.put(closedKey, { closedAt: new Date().toISOString(), amount: amount.toString() })
+    return null
+  }
+
+  // Build and sign before counting, so a close that never reaches the network
+  // (RPC down, simulation failure) does not use up the send cap.
+  const prepared = await buildClose({ ...rest, amount, signature })
+
+  // Bound the fees a close that keeps failing can cost: count sends across
+  // calls and instances, and stop past the cap.
+  const sends = await store.update(
+    closeSendsStoreKey(channelAddress),
+    (current): Store.Change<{ count: number }, number> => {
+      const count = ((current as { count?: number } | null)?.count ?? 0) + 1
+      if (count > maxCloseSends) return { op: 'noop', result: count }
+      return { op: 'set', value: { count }, result: count }
+    },
+  )
+  if (sends > maxCloseSends) {
+    throw new ChannelVerificationError(
+      `${LOG_PREFIX} Close send limit reached: ${maxCloseSends} close transactions were already sent for this channel. Reconcile against the chain before sending more.`,
+      { channel: channelAddress, maxCloseSends: String(maxCloseSends) },
+    )
+  }
+
+  const txHash = await sendClose(prepared, rest)
+  await store.put(closedKey, {
+    closedAt: new Date().toISOString(),
+    txHash,
+    amount: amount.toString(),
+  })
+  return txHash
+}
+
+/**
  * Close the channel contract on-chain using a signed commitment.
  * Transfers the committed amount to the recipient and auto-refunds
  * the remaining balance to the funder. This is a server-side
  * administrative operation.
  *
+ * The contract pays only the amount not yet withdrawn, so repeating a close
+ * with the same or a higher commitment is safe.
+ *
  * Note: this standalone helper is not routed through `verify()`, so any
- * `feeBudget` configured on the channel server does not apply here.
+ * `feeBudget` configured on the channel server does not apply here, and it
+ * does not stop the channel server from accepting vouchers. Use
+ * {@link closeWithLatestCommitment} while the server is running.
  */
-export async function close(parameters: {
-  /** Channel contract address. */
-  channel: string
-  /** Commitment amount to close with. */
-  amount: bigint
-  /** Ed25519 signature for the commitment. */
-  signature: Uint8Array
-  /**
-   * Fee payer configuration for the close transaction.
-   * `envelopeSigner` provides the source account and signs the envelope.
-   * `feeBumpSigner` optionally wraps the tx in a FeeBumpTransaction.
-   */
-  feePayer: {
-    envelopeSigner: Keypair | string
-    feeBumpSigner?: Keypair | string
-  }
-  /** Network identifier. */
-  network?: NetworkId
-  /**
-   * Soroban RPC endpoint URL.
-   *
-   * @defaultValue `"https://soroban-testnet.stellar.org"` (testnet) or
-   *   `"https://soroban-rpc.mainnet.stellar.gateway.fm"` (pubnet)
-   */
-  rpcUrl?: string
-  /** Maximum fee bump in stroops. */
-  maxFeeBumpStroops?: number
-  /** Maximum poll attempts. */
-  pollMaxAttempts?: number
-  /** Poll delay in ms. */
-  pollDelayMs?: number
-  /** Poll timeout in ms. */
-  pollTimeoutMs?: number
-  /** Logger instance. */
-  logger?: Logger
-}): Promise<string> {
+export async function close(parameters: close.Parameters): Promise<string> {
+  validateCloseBounds(parameters)
+  return sendClose(await buildClose(parameters), parameters)
+}
+
+type PreparedClose = { server: rpc.Server; tx: Transaction | FeeBumpTransaction }
+
+/** Rejects malformed numeric close options before anything is read, written or sent. */
+function validateCloseBounds(
+  parameters: Pick<
+    close.Parameters,
+    | 'maxFeeBumpStroops'
+    | 'pollMaxAttempts'
+    | 'pollDelayMs'
+    | 'pollTimeoutMs'
+    | 'simulationTimeoutMs'
+  >,
+): void {
+  const {
+    maxFeeBumpStroops = DEFAULT_MAX_FEE_BUMP_STROOPS,
+    pollMaxAttempts = DEFAULT_POLL_MAX_ATTEMPTS,
+    pollDelayMs = DEFAULT_POLL_DELAY_MS,
+    pollTimeoutMs = DEFAULT_POLL_TIMEOUT_MS,
+    simulationTimeoutMs = DEFAULT_SIMULATION_TIMEOUT_MS,
+  } = parameters
+  validatePositiveSafeInteger('maxFeeBumpStroops', maxFeeBumpStroops)
+  validatePositiveSafeInteger('pollMaxAttempts', pollMaxAttempts)
+  validateNonNegativeSafeInteger('pollDelayMs', pollDelayMs)
+  validatePositiveSafeInteger('pollTimeoutMs', pollTimeoutMs)
+  validatePositiveSafeInteger('simulationTimeoutMs', simulationTimeoutMs)
+}
+
+/** Builds, simulates, checks and signs a `close(amount, signature)` transaction. */
+async function buildClose(parameters: close.Parameters): Promise<PreparedClose> {
   const {
     channel: channelAddress,
     amount,
@@ -1048,10 +1384,6 @@ export async function close(parameters: {
     network = STELLAR_TESTNET,
     rpcUrl,
     maxFeeBumpStroops = DEFAULT_MAX_FEE_BUMP_STROOPS,
-    pollMaxAttempts = DEFAULT_POLL_MAX_ATTEMPTS,
-    pollDelayMs = DEFAULT_POLL_DELAY_MS,
-    pollTimeoutMs = DEFAULT_POLL_TIMEOUT_MS,
-    logger: log = noopLogger,
   } = parameters
 
   const resolvedRpcUrl = rpcUrl ?? SOROBAN_RPC_URLS[network]
@@ -1077,6 +1409,7 @@ export async function close(parameters: {
 
   const prepared = await server.prepareTransaction(tx)
   assertPreparedCloseIsSafe(prepared, channelAddress)
+  assertCloseFeeWithinCeiling(prepared, maxFeeBumpStroops)
   prepared.sign(signer)
 
   let txToSubmit: Transaction | FeeBumpTransaction = prepared
@@ -1086,9 +1419,27 @@ export async function close(parameters: {
       maxFeeStroops: maxFeeBumpStroops,
     })
   }
+  return { server, tx: txToSubmit }
+}
+
+/** Sends a built close and polls until it confirms; returns its hash. */
+async function sendClose(
+  prepared: PreparedClose,
+  parameters: Pick<
+    close.Parameters,
+    'pollMaxAttempts' | 'pollDelayMs' | 'pollTimeoutMs' | 'logger'
+  >,
+): Promise<string> {
+  const {
+    pollMaxAttempts = DEFAULT_POLL_MAX_ATTEMPTS,
+    pollDelayMs = DEFAULT_POLL_DELAY_MS,
+    pollTimeoutMs = DEFAULT_POLL_TIMEOUT_MS,
+    logger: log = noopLogger,
+  } = parameters
+  const { server, tx } = prepared
 
   log.debug(`${LOG_PREFIX} Broadcasting close tx...`)
-  const result = await server.sendTransaction(txToSubmit)
+  const result = await server.sendTransaction(tx)
 
   if (result.status !== 'PENDING') {
     throw new ChannelVerificationError(
@@ -1097,21 +1448,11 @@ export async function close(parameters: {
     )
   }
 
-  const txResult = await pollTransaction(server, result.hash, {
+  await pollTransaction(server, result.hash, {
     maxAttempts: pollMaxAttempts,
     delayMs: pollDelayMs,
     timeoutMs: pollTimeoutMs,
   })
-
-  if (txResult.status !== 'SUCCESS') {
-    throw new ChannelVerificationError(
-      `${LOG_PREFIX} Close transaction failed: ${txResult.status}`,
-      {
-        hash: result.hash,
-        status: txResult.status,
-      },
-    )
-  }
 
   return result.hash
 }
@@ -1119,6 +1460,53 @@ export async function close(parameters: {
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
+
+export declare namespace close {
+  type Parameters = {
+    /** Channel contract address. */
+    channel: string
+    /** Commitment amount to close with. */
+    amount: bigint
+    /** Ed25519 signature for the commitment. */
+    signature: Uint8Array
+    /**
+     * Fee payer configuration for the close transaction.
+     * `envelopeSigner` provides the source account and signs the envelope.
+     * `feeBumpSigner` optionally wraps the tx in a FeeBumpTransaction.
+     */
+    feePayer: {
+      envelopeSigner: Keypair | string
+      feeBumpSigner?: Keypair | string
+    }
+    /** Network identifier. */
+    network?: NetworkId
+    /**
+     * Soroban RPC endpoint URL.
+     *
+     * @defaultValue `"https://soroban-testnet.stellar.org"` (testnet) or
+     *   `"https://soroban-rpc.mainnet.stellar.gateway.fm"` (pubnet)
+     */
+    rpcUrl?: string
+    /**
+     * Ceiling in stroops on the total fee the server signs for a close, with or
+     * without a FeeBump. A close simulated above this is refused before signing.
+     * Must be a positive safe integer.
+     *
+     * @default 10_000_000
+     */
+    maxFeeBumpStroops?: number
+    /** Maximum poll attempts. Must be a positive safe integer. */
+    pollMaxAttempts?: number
+    /** Poll delay in ms. Must be a non-negative safe integer. */
+    pollDelayMs?: number
+    /** Poll timeout in ms. Must be a positive safe integer. */
+    pollTimeoutMs?: number
+    /** Per-RPC timeout for the on-chain state read in milliseconds. Must be a positive safe integer. @default 10000 */
+    simulationTimeoutMs?: number
+    /** Logger instance. */
+    logger?: Logger
+  }
+}
 
 export declare namespace channel {
   type Parameters = {
@@ -1146,15 +1534,27 @@ export declare namespace channel {
      * Accepts a Stellar public key string (G...) or a Keypair instance.
      */
     commitmentKey: string | Keypair
-    /** Number of decimal places for amount conversion. @default 7 */
+    /** Number of decimal places for amount conversion. Must be a non-negative safe integer. @default 7 */
     decimals?: number
-    /** Maximum fee bump in stroops. @default 10_000_000 */
+    /**
+     * Ceiling in stroops on the total fee the server signs for a close, with or
+     * without a FeeBump. A close simulated above this is refused before signing.
+     * Must be a positive safe integer.
+     *
+     * @default 10_000_000
+     */
     maxFeeBumpStroops?: number
     /** Stellar network. @default 'stellar:testnet' */
     network?: NetworkId
     /**
-     * Called when a dispute is detected on-chain (close_start has been called).
-     * Use this to trigger a close response before the waiting period elapses.
+     * Called when a close has started on-chain (`close_start`, or a close that
+     * already took effect). The credential being verified is rejected right
+     * after this callback, since the channel is ending. Use it to call
+     * `closeWithLatestCommitment`, which closes with the stored commitment
+     * before the waiting period elapses and is safe to call repeatedly. This
+     * runs only while credentials are verified, so also call it from
+     * `watchChannel` `close` events and a startup `getChannelState` check.
+     * The callback does not await the close; attach a `.catch(...)` rejection handler.
      */
     onDisputeDetected?: (state: ChannelState) => void
     /**
@@ -1178,13 +1578,13 @@ export declare namespace channel {
      * the token is not verified and a startup warning is logged.
      */
     currency?: string
-    /** Maximum poll attempts when waiting for transaction confirmation. @default 20 */
+    /** Maximum poll attempts when waiting for transaction confirmation. Must be a positive safe integer. @default 20 */
     pollMaxAttempts?: number
-    /** Maximum concurrent polling operations for this server instance. @default 10 */
+    /** Maximum concurrent polling operations for this server instance. Must be a positive safe integer. @default 10 */
     pollMaxConcurrent?: number
-    /** Poll delay between attempts in milliseconds. @default 1000 */
+    /** Poll delay between attempts in milliseconds. Must be a non-negative safe integer. @default 1000 */
     pollDelayMs?: number
-    /** Poll timeout in milliseconds. @default 20_000 */
+    /** Poll timeout in milliseconds. Must be a positive safe integer. @default 20_000 */
     pollTimeoutMs?: number
     /**
      * Custom Soroban RPC URL.
@@ -1207,14 +1607,16 @@ export declare namespace channel {
      * Commitment signatures are verified against a locally-built message, so
      * they never touch RPC and are not covered by this limit.
      *
+     * Must be a positive safe integer.
+     *
      * @default 10
      */
     verifyMaxConcurrent?: number
-    /** Simulation timeout in milliseconds. @default 10_000 */
+    /** Simulation timeout in milliseconds. Must be a positive safe integer. @default 10_000 */
     simulationTimeoutMs?: number
     /**
      * Persistent atomic store for replay protection, cumulative amount tracking,
-     * and channel lifecycle state (settling/closed).
+     * and channel lifecycle state (closing/closed).
      *
      * Required — channel state coordination depends on this store. Without it,
      * duplicate processing, non-monotonic commitments, and post-close voucher
@@ -1238,29 +1640,31 @@ export declare namespace channel {
      */
     store: Store.AtomicStore
     /**
-     * Optional fee budget to limit server spending on per-funder settlement transactions.
-     * When set, the server tracks the total fees paid per fee-payer key within a rolling
-     * time window. Each close settlement is conservatively charged the
-     * `maxFeeBumpStroops` amount against the budget.
+     * Optional fee budget to limit server spending on close settlement transactions.
+     * One pool per server paying key is shared by every close settlement that key
+     * pays for across channels and funders within a rolling time window. Each close
+     * settlement is conservatively charged `maxFeeBumpStroops` against the pool.
      *
      * When unset (default), there is no budget enforcement and behavior is unchanged
      * (backward compatible).
      *
-     * The fee payer (funder key) is determined as:
+     * The server paying key is determined as:
      * - `feeBumpSigner.publicKey()` if `feeBumpSigner` is set
      * - Otherwise, `envelopeSigner.publicKey()`
      *
-     * Budget enforcement runs BEFORE broadcast in `doVerifyClose`.
+     * The charge is taken before a close credential latches the channel, so a
+     * close the budget refuses never stops the channel.
      * A settlement rejected for budget exhaustion throws `ChannelVerificationError` with
-     * clear context (funder key, spent, cap, window).
+     * clear context (fee-payer key, spent, cap, window).
      *
-     * The fee budget is NOT applied to the standalone exported `close()` function
-     * (operator-initiated admin actions).
+     * The fee budget is NOT applied to the standalone exported `close()` and
+     * `closeWithLatestCommitment()` functions (operator-initiated actions);
+     * the latter bounds its sends with `maxCloseSends` instead.
      */
     feeBudget?: {
-      /** Maximum total stroops the server will spend per funder key within the window. */
+      /** Maximum total stroops per server paying key, shared across its close settlements within the window. Must be a positive safe integer. */
       maxStroops: number
-      /** Rolling time window in milliseconds. */
+      /** Rolling time window in milliseconds. Must be a positive safe integer. */
       windowMs: number
     }
     /** Logger for debug/warn messages. @default noopLogger */

@@ -44,6 +44,10 @@ import {
 } from '../../shared/defaults.js'
 import { Semaphore } from '../../shared/semaphore.js'
 import { getAddressCredentials } from '../../shared/getAddressCredentials.js'
+import {
+  validateNonNegativeSafeInteger,
+  validatePositiveSafeInteger,
+} from '../../shared/validation.js'
 
 type ChargePayload = z.output<(typeof Methods.charge)['schema']['credential']['payload']>
 type ChargeRequest = z.output<(typeof Methods.charge)['schema']['request']>
@@ -109,6 +113,15 @@ export function charge(parameters: charge.Parameters) {
     simulationTimeoutMs = DEFAULT_SIMULATION_TIMEOUT_MS,
     store,
   } = parameters
+  validateNonNegativeSafeInteger('decimals', decimals)
+  validatePositiveSafeInteger('maxFeeBumpStroops', maxFeeBumpStroops)
+  validatePositiveSafeInteger('pollMaxAttempts', pollMaxAttempts)
+  validatePositiveSafeInteger('pollMaxConcurrent', pollMaxConcurrent)
+  validateNonNegativeSafeInteger('pollDelayMs', pollDelayMs)
+  validatePositiveSafeInteger('pollTimeoutMs', pollTimeoutMs)
+  validatePositiveSafeInteger('simulationTimeoutMs', simulationTimeoutMs)
+  validatePositiveSafeInteger('maxPushPaymentAgeSeconds', maxPushPaymentAgeSeconds)
+  validatePositiveSafeInteger('challengeLifetimeSeconds', challengeLifetimeSeconds)
 
   const resolvedRpcUrl = rpcUrl ?? SOROBAN_RPC_URLS[network]
   const networkPassphrase = NETWORK_PASSPHRASE[network]
@@ -1376,7 +1389,7 @@ export declare namespace charge {
      * on testnet.
      */
     currency: string
-    /** Number of decimal places for amount conversion. @defaultValue `7` */
+    /** Number of decimal places for amount conversion. Must be a non-negative safe integer. @defaultValue `7` */
     decimals?: number
     /** CAIP-2 network identifier. @defaultValue `"stellar:testnet"` */
     network?: NetworkId
@@ -1425,17 +1438,17 @@ export declare namespace charge {
      *   sufficient.
      */
     store: Store.AtomicStore
-    /** Maximum fee in stroops for the inner transaction and fee bump. @defaultValue `10_000_000` (1 XLM) */
+    /** Maximum fee in stroops for the inner transaction and fee bump. Must be a positive safe integer. @defaultValue `10_000_000` (1 XLM) */
     maxFeeBumpStroops?: number
-    /** Maximum number of polling attempts when waiting for tx confirmation. @defaultValue `20` */
+    /** Maximum number of polling attempts when waiting for tx confirmation. Must be a positive safe integer. @defaultValue `20` */
     pollMaxAttempts?: number
-    /** Maximum concurrent polling operations for this server instance. @defaultValue `10` */
+    /** Maximum concurrent polling operations for this server instance. Must be a positive safe integer. @defaultValue `10` */
     pollMaxConcurrent?: number
-    /** Base delay between polling attempts in milliseconds. @defaultValue `1_000` */
+    /** Base delay between polling attempts in milliseconds. Must be a non-negative safe integer. @defaultValue `1_000` */
     pollDelayMs?: number
-    /** Overall timeout for transaction polling in milliseconds. @defaultValue `20_000` */
+    /** Overall timeout for transaction polling in milliseconds. Must be a positive safe integer. @defaultValue `20_000` */
     pollTimeoutMs?: number
-    /** Timeout for Soroban RPC simulation calls in milliseconds. @defaultValue `10_000` */
+    /** Timeout for Soroban RPC simulation calls in milliseconds. Must be a positive safe integer. @defaultValue `10_000` */
     simulationTimeoutMs?: number
     /**
      * Whether to accept legacy unsigned push-mode credentials (type="hash").
@@ -1458,6 +1471,8 @@ export declare namespace charge {
      * far in the past a confirmed transfer may have been included, so a payment
      * made before the challenge cannot be presented as its settlement.
      *
+     * Must be a positive safe integer.
+     *
      * @defaultValue `900`
      */
     maxPushPaymentAgeSeconds?: number
@@ -1467,6 +1482,8 @@ export declare namespace charge {
      * `expires` field and reject any on-chain payment confirmed before then, so a
      * transfer made before the challenge cannot be presented as its settlement.
      * Set this to match the expiry configured on the server's challenge issuer.
+     *
+     * Must be a positive safe integer.
      *
      * @defaultValue `300`
      */
