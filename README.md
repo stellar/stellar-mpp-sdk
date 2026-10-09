@@ -245,7 +245,7 @@ stellar.charge({
     feeBumpSigner?: Keypair | string,   // wraps sponsored tx in FeeBumpTransaction
   },
   store?: Store.Store,            // replay protection
-  maxFeeBumpStroops?: number,     // max fee bump in stroops (default: 10,000,000)
+  maxFeeBumpStroops?: number,     // ceiling on the total fee the server signs, with or without FeeBump (default: 10,000,000)
   pollMaxAttempts?: number,       // max polling attempts (default: 20)
   pollDelayMs?: number,           // delay between poll attempts in ms (default: 1,000)
   pollTimeoutMs?: number,         // overall poll timeout in ms (default: 20,000)
@@ -294,7 +294,7 @@ stellar.channel({
   },
   checkOnChainState?: boolean,    // detect on-chain disputes (default: true)
   onDisputeDetected?: (state) => void, // callback when close_start detected
-  maxFeeBumpStroops?: number,     // max fee bump in stroops (default: 10,000,000)
+  maxFeeBumpStroops?: number,     // ceiling on the total fee the server signs, with or without FeeBump (default: 10,000,000)
   pollMaxAttempts?: number,       // max polling attempts (default: 20)
   pollDelayMs?: number,           // delay between poll attempts in ms (default: 1,000)
   pollTimeoutMs?: number,         // overall poll timeout in ms (default: 20,000)
@@ -469,12 +469,13 @@ const txHash = await closeWithLatestCommitment({
   feePayer: { envelopeSigner: recipientKeypair },
   network: 'stellar:testnet',
 })
-// string: close sent and confirmed; null: a close was already confirmed, or the chain showed a started close with the amount withdrawn
+// string: close sent and confirmed; null: nothing to send (a close already confirmed, the chain showed a started close with the amount withdrawn, or no commitment was ever stored)
 ```
 
 - The server stores the latest verified commitment amount and signature together. Records written by earlier versions have no signature until the next accepted voucher; `getLatestCommitment()` returns `null` when no signature is stored.
 - `closeWithLatestCommitment()` marks the channel closing and reads the latest commitment in one atomic store update, so every voucher is either covered by the close or rejected. It then reads the chain: if a close has started and `withdrawn` already covers the stored amount it returns `null` without sending; otherwise it sends the close and polls for confirmation.
 - It is safe to call repeatedly and from several instances. Any failure (`ChannelVerificationError` for a non-`PENDING` send, `TransactionFailedError`, `PollTimeoutError`, `PollMaxAttemptsError`) leaves the channel closing; call it again after a delay. Sends are counted per channel in the store and capped at `maxCloseSends` (default 10); past the cap it throws "Close send limit reached" and an operator has to reconcile. Reads that send nothing are not counted.
+- Every close the server signs is checked first: the simulated fee must not exceed `maxFeeBumpStroops`, and every authorization entry must be a source-account entry for `close` on the configured channel with the operation's own arguments. A close refused for its fee leaves the channel closing; raise the ceiling or wait for fees to drop, then call the helper again.
 - Call it before the refund waiting period ends, when `watchChannel` reports a `close` event with a future `effectiveAtLedger`. `watchChannel` starts at the latest ledger, so on startup read the latest ledger, call `getChannelState()`, call it when `closeEffectiveAtLedger` is set and later than `closeStatusLedger`, and pass the ledger read first as the watcher's `startLedger`. This needs a store that persists across restarts. `examples/channel-server.ts` wires all of this and retries every 15 s until the chain shows the waiting period ended. `onDisputeDetected` can also start it, but only fires while credentials are verified, so don't rely on it alone. The callback does not await the close, so attach a rejection handler.
 
   ```ts
