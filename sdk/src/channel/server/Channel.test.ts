@@ -12,7 +12,7 @@ import { STELLAR_TESTNET } from '../../constants.js'
 import { buildCommitmentMessage } from '../commitment.js'
 import { Challenge, Credential, Store } from 'mppx'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ChannelVerificationError, SettlementError } from '../../shared/errors.js'
+import { ChannelVerificationError, SettlementError, StellarMppError } from '../../shared/errors.js'
 import { PollMaxAttemptsError, TransactionFailedError } from '../../shared/poll.js'
 
 // Hoisted mock stubs — accessible inside the vi.mock factory
@@ -396,6 +396,64 @@ describe('stellar server channel', () => {
     })
 
     expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('feeBudget'))
+  })
+})
+
+describe('stellar server channel bound validation', () => {
+  const validOptions = {
+    channel: CHANNEL_ADDRESS,
+    checkOnChainState: false,
+    commitmentKey: COMMITMENT_KEY.publicKey(),
+  }
+
+  it.each([
+    'maxFeeBumpStroops',
+    'pollMaxAttempts',
+    'pollMaxConcurrent',
+    'pollTimeoutMs',
+    'verifyMaxConcurrent',
+    'simulationTimeoutMs',
+  ])('rejects NaN %s at construction', (option) => {
+    expect(() => channel({ ...validOptions, store: Store.memory(), [option]: NaN } as any)).toThrow(
+      `\`${option}\` must be a positive safe integer.`,
+    )
+  })
+
+  it.each(['decimals', 'pollDelayMs'])('rejects NaN %s at construction', (option) => {
+    expect(() => channel({ ...validOptions, store: Store.memory(), [option]: NaN } as any)).toThrow(
+      `\`${option}\` must be a non-negative safe integer.`,
+    )
+  })
+
+  it('rejects a NaN feeBudget.maxStroops at construction', () => {
+    expect(() =>
+      channel({
+        ...validOptions,
+        store: Store.memory(),
+        feeBudget: { maxStroops: NaN, windowMs: 1000 },
+      }),
+    ).toThrow('`feeBudget.maxStroops` must be a positive safe integer.')
+  })
+
+  it('rejects an Infinity feeBudget.windowMs at construction', () => {
+    expect(() =>
+      channel({
+        ...validOptions,
+        store: Store.memory(),
+        feeBudget: { maxStroops: 1000, windowMs: Infinity },
+      }),
+    ).toThrow('`feeBudget.windowMs` must be a positive safe integer.')
+  })
+
+  it('accepts decimals 0 and pollDelayMs 0', () => {
+    const method = channel({
+      ...validOptions,
+      store: Store.memory(),
+      decimals: 0,
+      pollDelayMs: 0,
+    })
+    expect(method.name).toBe('stellar')
+    expect(method.intent).toBe('channel')
   })
 })
 
@@ -1818,6 +1876,26 @@ describe('closeWithLatestCommitment', () => {
     vi.useRealTimers()
     vi.restoreAllMocks()
     mockSimulateTransaction.mockReset()
+  })
+
+  it('rejects a NaN maxCloseSends before reading or latching the store', async () => {
+    const store = Store.memory()
+    const get = vi.spyOn(store, 'get')
+    const update = vi.spyOn(store, 'update')
+    const parameters = {
+      store,
+      channel: CHANNEL_ADDRESS,
+      feePayer: { envelopeSigner: Keypair.random() },
+    }
+
+    const error = await closeWithLatestCommitment({ ...parameters, maxCloseSends: NaN }).catch(
+      (e: unknown) => e,
+    )
+
+    expect(error).toBeInstanceOf(StellarMppError)
+    expect((error as Error).message).toContain('`maxCloseSends` must be a positive safe integer.')
+    expect(get).not.toHaveBeenCalled()
+    expect(update).not.toHaveBeenCalled()
   })
 
   function deferred<T>() {

@@ -83,6 +83,48 @@ describe('stellar server charge', () => {
     ).toThrow('A store is required for charge mode')
   })
 
+  it.each([
+    'maxFeeBumpStroops',
+    'pollMaxAttempts',
+    'pollMaxConcurrent',
+    'pollTimeoutMs',
+    'simulationTimeoutMs',
+    'maxPushPaymentAgeSeconds',
+    'challengeLifetimeSeconds',
+  ])('rejects NaN %s at construction', (option) => {
+    expect(() =>
+      charge({
+        recipient: RECIPIENT,
+        currency: USDC_SAC_TESTNET,
+        store: Store.memory(),
+        [option]: NaN,
+      } as any),
+    ).toThrow(`\`${option}\` must be a positive safe integer.`)
+  })
+
+  it('rejects NaN decimals at construction', () => {
+    expect(() =>
+      charge({
+        recipient: RECIPIENT,
+        currency: USDC_SAC_TESTNET,
+        store: Store.memory(),
+        decimals: NaN,
+      }),
+    ).toThrow('`decimals` must be a non-negative safe integer.')
+  })
+
+  it('accepts decimals 0 and pollDelayMs 0', () => {
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store: Store.memory(),
+      decimals: 0,
+      pollDelayMs: 0,
+    })
+    expect(method.name).toBe('stellar')
+    expect(method.intent).toBe('charge')
+  })
+
   it('accepts custom network', () => {
     const method = charge({
       recipient: RECIPIENT,
