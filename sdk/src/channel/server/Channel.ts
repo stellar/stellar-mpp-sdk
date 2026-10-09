@@ -1199,6 +1199,7 @@ export async function closeWithLatestCommitment(
 ): Promise<string | null> {
   const { store, maxCloseSends = DEFAULT_MAX_CLOSE_SENDS, ...rest } = parameters
   validatePositiveSafeInteger('maxCloseSends', maxCloseSends)
+  validateCloseBounds(rest)
   const { channel: channelAddress, network = STELLAR_TESTNET, rpcUrl, logger = noopLogger } = rest
   const cumulativeKey = cumulativeStoreKey(channelAddress)
   const closedKey = closedStoreKey(channelAddress)
@@ -1342,10 +1343,36 @@ export async function closeWithLatestCommitment(
  * {@link closeWithLatestCommitment} while the server is running.
  */
 export async function close(parameters: close.Parameters): Promise<string> {
+  validateCloseBounds(parameters)
   return sendClose(await buildClose(parameters), parameters)
 }
 
 type PreparedClose = { server: rpc.Server; tx: Transaction | FeeBumpTransaction }
+
+/** Rejects malformed numeric close options before anything is read, written or sent. */
+function validateCloseBounds(
+  parameters: Pick<
+    close.Parameters,
+    | 'maxFeeBumpStroops'
+    | 'pollMaxAttempts'
+    | 'pollDelayMs'
+    | 'pollTimeoutMs'
+    | 'simulationTimeoutMs'
+  >,
+): void {
+  const {
+    maxFeeBumpStroops = DEFAULT_MAX_FEE_BUMP_STROOPS,
+    pollMaxAttempts = DEFAULT_POLL_MAX_ATTEMPTS,
+    pollDelayMs = DEFAULT_POLL_DELAY_MS,
+    pollTimeoutMs = DEFAULT_POLL_TIMEOUT_MS,
+    simulationTimeoutMs = DEFAULT_SIMULATION_TIMEOUT_MS,
+  } = parameters
+  validatePositiveSafeInteger('maxFeeBumpStroops', maxFeeBumpStroops)
+  validatePositiveSafeInteger('pollMaxAttempts', pollMaxAttempts)
+  validateNonNegativeSafeInteger('pollDelayMs', pollDelayMs)
+  validatePositiveSafeInteger('pollTimeoutMs', pollTimeoutMs)
+  validatePositiveSafeInteger('simulationTimeoutMs', simulationTimeoutMs)
+}
 
 /** Builds, simulates, checks and signs a `close(amount, signature)` transaction. */
 async function buildClose(parameters: close.Parameters): Promise<PreparedClose> {
@@ -1358,7 +1385,6 @@ async function buildClose(parameters: close.Parameters): Promise<PreparedClose> 
     rpcUrl,
     maxFeeBumpStroops = DEFAULT_MAX_FEE_BUMP_STROOPS,
   } = parameters
-  validatePositiveSafeInteger('maxFeeBumpStroops', maxFeeBumpStroops)
 
   const resolvedRpcUrl = rpcUrl ?? SOROBAN_RPC_URLS[network]
   const networkPassphrase = NETWORK_PASSPHRASE[network]
