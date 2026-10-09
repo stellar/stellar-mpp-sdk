@@ -9,8 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Keep the latest accepted channel commitment on the server and add helpers to close the channel with it
+- Keep the latest accepted channel commitment on the server and add helpers to close the channel with it [#92](https://github.com/stellar/stellar-mpp-sdk/pull/92)
   - The commitment signature is stored next to the cumulative amount; `getLatestCommitment()` reads the pair. Records written by earlier versions have no signature until the next accepted voucher
+  - `closeWithLatestCommitment()` stops voucher acceptance and selects the pair in one atomic store update, so every voucher is either covered by the close or rejected. It reads `withdrawn` on-chain first and returns `null` without sending when the stored amount is already withdrawn, so it is safe to call repeatedly and from several instances after any failure
+  - Sends per channel are counted in the store and capped at `maxCloseSends` (default 10); past the cap the helper throws and the channel stays closing for operator reconciliation
+  - `ChannelState` gains `withdrawn` and `deposited`, plus `closeStatusLedger`, the ledger the close status was read at
+  - `TransactionFailedError`, `PollTimeoutError` and `PollMaxAttemptsError` are exported from `@stellar/mpp`
+  - `examples/channel-server.ts` closes with the latest commitment when a close starts on-chain, from a startup `getChannelState()` check and `watchChannel` events from the ledger read before it, retrying until the chain shows the waiting period ended
+  - Changed: a channel close is final. A close credential or `closeWithLatestCommitment()` call that fails leaves the channel closing instead of reopening it; vouchers are rejected as soon as the chain shows a close has started, not only once it takes effect; commitments are checked against `deposited` (balance plus withdrawn) rather than `balance`
 
 ### Changed
 

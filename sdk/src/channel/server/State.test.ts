@@ -60,6 +60,7 @@ function setupSimulations(opts: {
   token: string
   from: string
   to: string
+  withdrawn?: bigint
 }) {
   const calls: xdr.ScVal[] = [
     makeI128ScVal(opts.balance),
@@ -67,6 +68,7 @@ function setupSimulations(opts: {
     makeAddressScVal(opts.token),
     makeAddressScVal(opts.from),
     makeAddressScVal(opts.to),
+    makeI128ScVal(opts.withdrawn ?? 0n),
   ]
 
   let callIndex = 0
@@ -130,8 +132,12 @@ describe('getChannelState', () => {
       token: TOKEN_ADDRESS,
       from: FUNDER_ADDRESS,
       to: RECIPIENT_ADDRESS,
+      withdrawn: 2_500_000n,
     })
-    mockGetLedgerEntries.mockResolvedValueOnce(makeLedgerEntryWithoutCloseEffective())
+    mockGetLedgerEntries.mockResolvedValueOnce({
+      ...makeLedgerEntryWithoutCloseEffective(),
+      latestLedger: 5001,
+    })
     mockGetLatestLedger.mockResolvedValueOnce({ sequence: 5000 })
 
     const state = await getChannelState({
@@ -139,12 +145,19 @@ describe('getChannelState', () => {
     })
 
     expect(state.balance).toBe(10_000_000n)
+    expect(state.withdrawn).toBe(2_500_000n)
+    expect(state.deposited).toBe(12_500_000n)
     expect(state.refundWaitingPeriod).toBe(1000)
     expect(state.token).toBe(TOKEN_ADDRESS)
     expect(state.from).toBe(FUNDER_ADDRESS)
     expect(state.to).toBe(RECIPIENT_ADDRESS)
     expect(state.closeEffectiveAtLedger).toBeNull()
+    expect(state.closeStatusLedger).toBe(5001)
     expect(state.currentLedger).toBe(5000)
+    // The close status is read after the latest ledger, so it covers it.
+    expect(mockGetLatestLedger.mock.invocationCallOrder.at(-1)).toBeLessThan(
+      mockGetLedgerEntries.mock.invocationCallOrder.at(-1)!,
+    )
   })
 
   it('detects close_start via CloseEffectiveAtLedger in instance storage', async () => {
@@ -155,7 +168,10 @@ describe('getChannelState', () => {
       from: FUNDER_ADDRESS,
       to: RECIPIENT_ADDRESS,
     })
-    mockGetLedgerEntries.mockResolvedValueOnce(makeLedgerEntryWithCloseEffective(6000))
+    mockGetLedgerEntries.mockResolvedValueOnce({
+      ...makeLedgerEntryWithCloseEffective(6000),
+      latestLedger: 5500,
+    })
     mockGetLatestLedger.mockResolvedValueOnce({ sequence: 5500 })
 
     const state = await getChannelState({
@@ -163,7 +179,11 @@ describe('getChannelState', () => {
     })
 
     expect(state.closeEffectiveAtLedger).toBe(6000)
+    expect(state.closeStatusLedger).toBe(5500)
     expect(state.currentLedger).toBe(5500)
+    // Nothing withdrawn yet: the whole deposit is still in the channel.
+    expect(state.withdrawn).toBe(0n)
+    expect(state.deposited).toBe(5_000_000n)
   })
 
   it('returns null closeEffectiveAtLedger when no entries', async () => {
@@ -174,7 +194,7 @@ describe('getChannelState', () => {
       from: FUNDER_ADDRESS,
       to: RECIPIENT_ADDRESS,
     })
-    mockGetLedgerEntries.mockResolvedValueOnce({ entries: [] })
+    mockGetLedgerEntries.mockResolvedValueOnce({ entries: [], latestLedger: 1000 })
     mockGetLatestLedger.mockResolvedValueOnce({ sequence: 1000 })
 
     const state = await getChannelState({
@@ -182,6 +202,7 @@ describe('getChannelState', () => {
     })
 
     expect(state.closeEffectiveAtLedger).toBeNull()
+    expect(state.closeStatusLedger).toBe(1000)
   })
 
   it('throws on simulation failure', async () => {

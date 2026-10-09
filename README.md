@@ -220,16 +220,16 @@ const data = await response.json()
 
 ### Exports
 
-| Path                          | Exports                                                                                                                                                                                                                                                                          |
-| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@stellar/mpp`                | `ChargeMethods`, `ChannelMethods`, constants (`USDC_SAC_TESTNET`, `XLM_SAC_MAINNET`, etc.), `toBaseUnits`, `fromBaseUnits`, `resolveKeypair`, `Env`, `Logger` (type), error types (`StellarMppError`, `PaymentVerificationError`, `ChannelVerificationError`, `SettlementError`) |
-| `@stellar/mpp/charge`         | `charge` (method schema)                                                                                                                                                                                                                                                         |
-| `@stellar/mpp/charge/client`  | `stellar`, `charge`, `Mppx`                                                                                                                                                                                                                                                      |
-| `@stellar/mpp/charge/server`  | `stellar`, `charge`, `Mppx`, `Store`, `Expires`, `resolveKeypair`                                                                                                                                                                                                                |
-| `@stellar/mpp/channel`        | `channel` (method schema)                                                                                                                                                                                                                                                        |
-| `@stellar/mpp/channel/client` | `stellar`, `channel`, `Mppx`                                                                                                                                                                                                                                                     |
-| `@stellar/mpp/channel/server` | `stellar`, `channel`, `close`, `getLatestCommitment`, `getChannelState`, `watchChannel`, `resolveKeypair`, `Mppx`, `Store`, `Expires`, `ChannelState` (type), `ChannelEvent` (type)                                                                                              |
-| `@stellar/mpp/env`            | `parseRequired`, `parseOptional`, `parsePort`, `parseStellarPublicKey`, `parseStellarSecretKey`, `parseContractAddress`, `parseHexKey`, `parseCommaSeparatedList`, `parseNumber`                                                                                                 |
+| Path                          | Exports                                                                                                                                                                                                                                                                                                                                                |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `@stellar/mpp`                | `ChargeMethods`, `ChannelMethods`, constants (`USDC_SAC_TESTNET`, `XLM_SAC_MAINNET`, etc.), `toBaseUnits`, `fromBaseUnits`, `resolveKeypair`, `Env`, `Logger` (type), error types (`StellarMppError`, `PaymentVerificationError`, `ChannelVerificationError`, `SettlementError`, `TransactionFailedError`, `PollTimeoutError`, `PollMaxAttemptsError`) |
+| `@stellar/mpp/charge`         | `charge` (method schema)                                                                                                                                                                                                                                                                                                                               |
+| `@stellar/mpp/charge/client`  | `stellar`, `charge`, `Mppx`                                                                                                                                                                                                                                                                                                                            |
+| `@stellar/mpp/charge/server`  | `stellar`, `charge`, `Mppx`, `Store`, `Expires`, `resolveKeypair`                                                                                                                                                                                                                                                                                      |
+| `@stellar/mpp/channel`        | `channel` (method schema)                                                                                                                                                                                                                                                                                                                              |
+| `@stellar/mpp/channel/client` | `stellar`, `channel`, `Mppx`                                                                                                                                                                                                                                                                                                                           |
+| `@stellar/mpp/channel/server` | `stellar`, `channel`, `close`, `closeWithLatestCommitment`, `getLatestCommitment`, `getChannelState`, `watchChannel`, `resolveKeypair`, `Mppx`, `Store`, `Expires`, `ChannelState` (type), `ChannelEvent` (type)                                                                                                                                       |
+| `@stellar/mpp/env`            | `parseRequired`, `parseOptional`, `parsePort`, `parseStellarPublicKey`, `parseStellarSecretKey`, `parseContractAddress`, `parseHexKey`, `parseCommaSeparatedList`, `parseNumber`                                                                                                                                                                       |
 
 ### Server options (charge)
 
@@ -453,28 +453,43 @@ The channel server's monotonic-amount and lifecycle guarantees depend on `store.
 - **Single process:** `Store.memory()` is a correct reference implementation.
 - **Multi-process (multiple pods behind a load balancer):** use a backend whose `update()` maps to a genuine atomic CAS — e.g. a Redis Lua script, or a PostgreSQL conditional `UPDATE … WHERE`. A plain get-then-put against a shared cache is **not** sufficient.
 
-During an on-chain close the channel enters a fail-closed `settling` state and stops accepting credentials. If settlement throws (including an ambiguous timeout where the close may still have landed), the state is intentionally left in place rather than reopened — operators should monitor for stale `settling` markers and reconcile against on-chain state before clearing them.
+**Channel close is final.** Once a close is accepted, from a funder's close credential or from `closeWithLatestCommitment()`, the channel stops accepting vouchers for good. Completion is read from the chain, not from the result of a transaction: the contract's `close(amount, sig)` pays only `amount - withdrawn`, so it can be sent again at any time without over-paying.
+
+- Vouchers are rejected as soon as the on-chain state shows a close has started (`closeEffectiveAtLedger` set), not only once it takes effect. Commitments are checked against `deposited` (balance plus withdrawn).
+- A close credential that fails (network rejection, on-chain failure, timeout) answers with an error, and the channel stays closing. `closeWithLatestCommitment()` completes it later.
 
 **On-chain close (server-side):**
 
 ```ts
-import { close, getLatestCommitment } from '@stellar/mpp/channel/server'
+import { closeWithLatestCommitment } from '@stellar/mpp/channel/server'
 
-const channel = 'CABC...' // channel contract address
-const latest = await getLatestCommitment({ store, channel }) // same store as the channel server
-if (latest) {
-  await close({
-    channel,
-    amount: latest.amount,
-    signature: latest.signature,
-    feePayer: { envelopeSigner: recipientKeypair },
-    network: 'stellar:testnet',
-  })
-}
+const txHash = await closeWithLatestCommitment({
+  store, // same atomic store as the channel server
+  channel: 'CABC...', // channel contract address
+  feePayer: { envelopeSigner: recipientKeypair },
+  network: 'stellar:testnet',
+})
+// string: close sent and confirmed; null: a close was already confirmed or the chain showed the amount withdrawn
 ```
 
-- The server stores the latest verified commitment amount and signature together so the recipient can close the channel with them. Records written by earlier versions have no signature until the next accepted voucher; `getLatestCommitment()` returns `null` when no signature is stored.
-- When `watchChannel` reports a `close` event with a future `effectiveAtLedger`, or `onDisputeDetected` fires, read the latest pair and call `close()` with it before the refund waiting period ends.
+- The server stores the latest verified commitment amount and signature together. Records written by earlier versions have no signature until the next accepted voucher; `getLatestCommitment()` returns `null` when no signature is stored.
+- `closeWithLatestCommitment()` marks the channel closing and reads the latest commitment in one atomic store update, so every voucher is either covered by the close or rejected. It then reads `withdrawn` on-chain: if it already covers the stored amount it returns `null` without sending; otherwise it sends the close and polls for confirmation.
+- It is safe to call repeatedly and from several instances. Any failure (`ChannelVerificationError` for a non-`PENDING` send, `TransactionFailedError`, `PollTimeoutError`, `PollMaxAttemptsError`) leaves the channel closing; call it again after a delay. Sends are counted per channel in the store and capped at `maxCloseSends` (default 10); past the cap it throws "Close send limit reached" and an operator has to reconcile. Reads that send nothing are not counted.
+- Call it before the refund waiting period ends, when `watchChannel` reports a `close` event with a future `effectiveAtLedger`. `watchChannel` starts at the latest ledger, so on startup read the latest ledger, call `getChannelState()`, call it when `closeEffectiveAtLedger` is set and later than `closeStatusLedger`, and pass the ledger read first as the watcher's `startLedger`. This needs a store that persists across restarts. `examples/channel-server.ts` wires all of this and retries every 15 s until the chain shows the waiting period ended. `onDisputeDetected` can also start it, but only fires while credentials are verified, so don't rely on it alone. The callback does not await the close, so attach a rejection handler.
+
+  ```ts
+  onDisputeDetected: () => {
+    closeWithLatestCommitment({
+      store,
+      channel: 'CABC...',
+      feePayer: { envelopeSigner: recipientKeypair },
+      network: 'stellar:testnet',
+      logger,
+    }).catch((error) => logger.error('Dispute close did not complete', { error }))
+  }
+  ```
+
+- Standalone `close()` takes an explicit amount and signature and does not stop voucher acceptance, so use `closeWithLatestCommitment()` while the channel server is running. Neither standalone close helper applies the channel server's `feeBudget`.
 
 ## Constants
 
