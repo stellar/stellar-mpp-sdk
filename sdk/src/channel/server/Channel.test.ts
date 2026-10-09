@@ -1898,6 +1898,51 @@ describe('closeWithLatestCommitment', () => {
     expect(update).not.toHaveBeenCalled()
   })
 
+  it.each([
+    ['maxFeeBumpStroops', '`maxFeeBumpStroops` must be a positive safe integer.'],
+    ['pollMaxAttempts', '`pollMaxAttempts` must be a positive safe integer.'],
+    ['pollTimeoutMs', '`pollTimeoutMs` must be a positive safe integer.'],
+    ['simulationTimeoutMs', '`simulationTimeoutMs` must be a positive safe integer.'],
+  ])('rejects a NaN %s before reading or latching the store', async (option, message) => {
+    const store = Store.memory()
+    const get = vi.spyOn(store, 'get')
+    const update = vi.spyOn(store, 'update')
+    const parameters = {
+      store,
+      channel: CHANNEL_ADDRESS,
+      feePayer: { envelopeSigner: Keypair.random() },
+    }
+
+    const error = await closeWithLatestCommitment({ ...parameters, [option]: NaN }).catch(
+      (e: unknown) => e,
+    )
+
+    expect(error).toBeInstanceOf(StellarMppError)
+    expect((error as Error).message).toContain(message)
+    expect(get).not.toHaveBeenCalled()
+    expect(update).not.toHaveBeenCalled()
+  })
+
+  it('rejects a NaN pollDelayMs before reading or latching the store', async () => {
+    const store = Store.memory()
+    const get = vi.spyOn(store, 'get')
+    const update = vi.spyOn(store, 'update')
+    const parameters = {
+      store,
+      channel: CHANNEL_ADDRESS,
+      feePayer: { envelopeSigner: Keypair.random() },
+    }
+
+    const error = await closeWithLatestCommitment({ ...parameters, pollDelayMs: NaN }).catch(
+      (e: unknown) => e,
+    )
+
+    expect(error).toBeInstanceOf(StellarMppError)
+    expect((error as Error).message).toContain('`pollDelayMs` must be a non-negative safe integer.')
+    expect(get).not.toHaveBeenCalled()
+    expect(update).not.toHaveBeenCalled()
+  })
+
   function deferred<T>() {
     let resolve!: (value: T) => void
     const promise = new Promise<T>((r) => {
@@ -2606,6 +2651,25 @@ describe('close()', () => {
     const mod = await import('./Channel.js')
     closeFn = mod.close
     expect(typeof closeFn).toBe('function')
+  })
+
+  it('rejects a NaN pollMaxAttempts before building or sending the close', async () => {
+    const signer = Keypair.random()
+
+    const error = await close({
+      channel: CHANNEL_ADDRESS,
+      amount: 5000000n,
+      signature: new Uint8Array(64).fill(5),
+      feePayer: { envelopeSigner: signer },
+      network: 'stellar:testnet',
+      pollMaxAttempts: NaN,
+    }).catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(StellarMppError)
+    expect((error as Error).message).toContain('`pollMaxAttempts` must be a positive safe integer.')
+    expect(mockGetAccount).not.toHaveBeenCalled()
+    expect(mockPrepareTransaction).not.toHaveBeenCalled()
+    expect(mockSendTransaction).not.toHaveBeenCalled()
   })
 
   it('refuses a close whose prepared fee exceeds maxFeeBumpStroops before sending', async () => {

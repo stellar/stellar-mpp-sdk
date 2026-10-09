@@ -124,4 +124,37 @@ describe('wrapFeeBump', () => {
 
     expect(wrapFeeBump(feeBump, signer, { networkPassphrase: NETWORK })).toBe(feeBump)
   })
+
+  it('refuses an already-wrapped FeeBumpTransaction whose outer fee exceeds the cap', () => {
+    const feeBump = TransactionBuilder.buildFeeBumpTransaction(
+      Keypair.random(),
+      '1000',
+      buildInner({}),
+      NETWORK,
+    )
+    expect(feeBump.fee).toBe('2000')
+
+    expect(() =>
+      wrapFeeBump(feeBump, Keypair.random(), { networkPassphrase: NETWORK, maxFeeStroops: 1999 }),
+    ).toThrow(PaymentVerificationError)
+    expect(() =>
+      wrapFeeBump(feeBump, Keypair.random(), { networkPassphrase: NETWORK, maxFeeStroops: 1999 }),
+    ).toThrow('Fee bump exceeds the configured maximum: the outer fee is above the cap.')
+  })
+
+  it('returns an already-wrapped FeeBumpTransaction at the cap unchanged', () => {
+    const feeBump = TransactionBuilder.buildFeeBumpTransaction(
+      Keypair.random(),
+      '1000',
+      buildInner({}),
+      NETWORK,
+    )
+
+    const result = wrapFeeBump(feeBump, Keypair.random(), {
+      networkPassphrase: NETWORK,
+      maxFeeStroops: 2000,
+    })
+
+    expect(result).toBe(feeBump)
+  })
 })

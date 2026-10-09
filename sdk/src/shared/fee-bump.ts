@@ -30,10 +30,12 @@ function resourceFeeOf(tx: Transaction): number {
  * sized to keep that total at or below `maxFeeStroops`: the base is at most
  * 10x the inner inclusion fee, and never above what the cap allows.
  *
- * Already-wrapped `FeeBumpTransaction` instances are returned unchanged.
+ * Already-wrapped `FeeBumpTransaction` instances are returned unchanged once
+ * their outer fee is within the cap.
  *
  * @throws {PaymentVerificationError} If `maxFeeStroops` cannot cover the inner
- *   inclusion fee at the per-operation minimum, so no valid base fee exists.
+ *   inclusion fee at the per-operation minimum, so no valid base fee exists, or
+ *   if an already-wrapped transaction's outer fee is above `maxFeeStroops`.
  */
 export function wrapFeeBump(
   tx: Transaction | FeeBumpTransaction,
@@ -43,11 +45,17 @@ export function wrapFeeBump(
     maxFeeStroops?: number
   },
 ): Transaction | FeeBumpTransaction {
+  const { networkPassphrase, maxFeeStroops = DEFAULT_MAX_FEE_BUMP_STROOPS } = opts
   if (tx instanceof FeeBumpTransaction) {
+    if (Number(tx.fee) > maxFeeStroops) {
+      throw new PaymentVerificationError(
+        'Fee bump exceeds the configured maximum: the outer fee is above the cap.',
+        { fee: tx.fee, maxFeeStroops },
+      )
+    }
     return tx
   }
 
-  const { networkPassphrase, maxFeeStroops = DEFAULT_MAX_FEE_BUMP_STROOPS } = opts
   const innerOps = tx.operations.length
   const resourceFee = resourceFeeOf(tx)
   const inclusionFee = Number(tx.fee) - resourceFee
