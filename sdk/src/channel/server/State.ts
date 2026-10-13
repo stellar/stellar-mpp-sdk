@@ -8,7 +8,7 @@ import {
   type NetworkId,
 } from '../../constants.js'
 import { DEFAULT_SIM_TIMEOUT_SECS, DEFAULT_SIMULATION_TIMEOUT_MS } from '../../shared/defaults.js'
-import { StellarMppError } from '../../shared/errors.js'
+import { ChannelVerificationError, StellarMppError } from '../../shared/errors.js'
 import { scValToBigInt } from '../../shared/scval.js'
 import { withTimeout } from '../../shared/timeout.js'
 
@@ -19,6 +19,13 @@ import { withTimeout } from '../../shared/timeout.js'
 export type ChannelState = {
   /** Current token balance held in the channel contract. */
   balance: bigint
+  /**
+   * Total amount the recipient has already withdrawn via `settle` or `close`.
+   * A close with a stored commitment is complete once this reaches its amount.
+   */
+  withdrawn: bigint
+  /** Total amount deposited into the channel: `balance + withdrawn`. */
+  deposited: bigint
   /** The refund waiting period in ledgers. */
   refundWaitingPeriod: number
   /** Token contract address. */
@@ -33,7 +40,12 @@ export type ChannelState = {
    * If the current ledger is past this value, the funder can call `refund`.
    */
   closeEffectiveAtLedger: number | null
-  /** Current ledger sequence at the time of the query. */
+  /** Ledger sequence `closeEffectiveAtLedger` was read at. */
+  closeStatusLedger: number
+  /**
+   * Latest ledger sequence, read before the close status, so
+   * `closeStatusLedger` is normally at or after it.
+   */
   currentLedger: number
 }
 
@@ -46,6 +58,9 @@ export type ChannelState = {
  *
  * This calls the contract's public getter functions via simulation
  * (no transaction fees) and reads instance storage for dispute status.
+ * Getter simulation failures propagate before the instance-storage read.
+ *
+ * @throws {ChannelVerificationError} If the instance entry is missing when read.
  *
  * @example
  * ```ts
@@ -102,15 +117,17 @@ export async function getChannelState(
   }
 
   // Run getter simulations in parallel
-  const [balanceVal, waitingPeriodVal, tokenVal, fromVal, toVal] = await Promise.all([
+  const [balanceVal, waitingPeriodVal, tokenVal, fromVal, toVal, withdrawnVal] = await Promise.all([
     simulateGetter('balance'),
     simulateGetter('refund_waiting_period'),
     simulateGetter('token'),
     simulateGetter('from'),
     simulateGetter('to'),
+    simulateGetter('withdrawn'),
   ])
 
   const balance = scValToBigInt(balanceVal!)
+  const withdrawn = scValToBigInt(withdrawnVal!)
   if (!waitingPeriodVal) {
     throw new StellarMppError(
       `Failed to simulate refund_waiting_period on channel ${channelAddress}: missing return value`,
@@ -121,28 +138,33 @@ export async function getChannelState(
   const from = Address.fromScVal(fromVal!).toString()
   const to = Address.fromScVal(toVal!).toString()
 
-  // Read CloseEffectiveAtLedger from contract instance storage.
-  // The contract uses DataKey::CloseEffectiveAtLedger (enum variant index 5)
-  // stored in instance storage.
-  const closeEffectiveAtLedger = await readCloseEffectiveAtLedger(
-    server,
-    channelAddress,
-    simulationTimeoutMs,
-  )
-
+  // Read the latest ledger before the close status, so the status covers it
+  // even when a ledger closes between the two reads.
   const latestLedger = await withTimeout(
     server.getLatestLedger(),
     simulationTimeoutMs,
     `getLatestLedger for channel ${channelAddress}`,
   )
 
+  // Read CloseEffectiveAtLedger from contract instance storage.
+  // The contract uses DataKey::CloseEffectiveAtLedger (enum variant index 5)
+  // stored in instance storage.
+  const { closeEffectiveAtLedger, closeStatusLedger } = await readCloseEffectiveAtLedger(
+    server,
+    channelAddress,
+    simulationTimeoutMs,
+  )
+
   return {
     balance,
+    withdrawn,
+    deposited: balance + withdrawn,
     refundWaitingPeriod,
     token,
     from,
     to,
     closeEffectiveAtLedger,
+    closeStatusLedger,
     currentLedger: latestLedger.sequence,
   }
 }
@@ -179,12 +201,16 @@ export declare namespace getChannelState {
  * for enum variants without data.
  *
  * We look for the `CloseEffectiveAtLedger` key in the contract's instance storage.
+ * An existing instance without that key is open; a missing instance cannot be
+ * treated as open because it may be archived or the address may be wrong.
+ *
+ * @throws {ChannelVerificationError} If the channel instance entry is missing.
  */
 async function readCloseEffectiveAtLedger(
   server: rpc.Server,
   channelAddress: string,
   simulationTimeoutMs: number,
-): Promise<number | null> {
+): Promise<{ closeEffectiveAtLedger: number | null; closeStatusLedger: number }> {
   // Build the LedgerKey for the contract's instance entry
   const contractId = Address.fromString(channelAddress)
   const instanceKey = xdr.LedgerKey.contractData(
@@ -200,19 +226,23 @@ async function readCloseEffectiveAtLedger(
     simulationTimeoutMs,
     `getLedgerEntries for channel ${channelAddress}`,
   )
+  const unset = { closeEffectiveAtLedger: null, closeStatusLedger: response.latestLedger }
   if (!response.entries || response.entries.length === 0) {
-    return null
+    throw new ChannelVerificationError(
+      '[stellar:channel] Channel instance entry not found on-chain (archived or wrong address).',
+      { channel: channelAddress },
+    )
   }
 
   const entry = response.entries[0]
   const ledgerData = entry.val
   const contractData = ledgerData?.contractData?.()
-  if (!contractData) return null
+  if (!contractData) return unset
   const instance = contractData.val?.()?.instance?.()
-  if (!instance) return null
+  if (!instance) return unset
   const storage = instance.storage()
 
-  if (!storage) return null
+  if (!storage) return unset
 
   // Search for the CloseEffectiveAtLedger key in the instance storage map.
   // Soroban encodes simple enum variants as ScVal::Vec([ScVal::Symbol(name)])
@@ -221,11 +251,11 @@ async function readCloseEffectiveAtLedger(
     // Check if this key matches DataKey::CloseEffectiveAtLedger
     if (isEnumVariant(key, 'CloseEffectiveAtLedger')) {
       const val = entry.val()
-      return val.u32()
+      return { closeEffectiveAtLedger: val.u32(), closeStatusLedger: response.latestLedger }
     }
   }
 
-  return null
+  return unset
 }
 
 /** Check if an ScVal is a Soroban enum variant with the given name. */

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Keep the latest accepted channel commitment on the server and add helpers to close the channel with it [#92](https://github.com/stellar/stellar-mpp-sdk/pull/92)
+  - The commitment signature is stored next to the cumulative amount; `getLatestCommitment()` reads the pair. Records written by earlier versions have no signature until the next accepted voucher
+  - `closeWithLatestCommitment()` stops voucher acceptance and selects the pair in one atomic store update, so every voucher is either covered by the close or rejected. It reads the chain first and returns `null` without sending when a close has started and the stored amount is already withdrawn, so it is safe to call repeatedly and from several instances after any failure
+  - Sends per channel are counted in the store and capped at `maxCloseSends` (default 10); past the cap the helper throws and the channel stays closing for operator reconciliation
+  - `closeWithLatestCommitment()` latches the channel even when no commitment is stored, so vouchers stop as soon as a pending close is handled; a channel whose instance entry is missing on-chain is reported as an error instead of an open channel
+  - The server refuses to sign a close whose simulated fee exceeds `maxFeeBumpStroops`, with or without FeeBump, and the FeeBump wrapper keeps the outer fee within that cap on every path that uses it, charge flow 6 included
+  - Every authorization entry of a prepared close must be a source-account entry whose root is `close` on the configured channel with the operation's own arguments and no sub-invocations
+  - `ChannelState` gains `withdrawn` and `deposited`, plus `closeStatusLedger`, the ledger the close status was read at
+  - `TransactionFailedError`, `PollTimeoutError` and `PollMaxAttemptsError` are exported from `@stellar/mpp`
+  - `examples/channel-server.ts` closes with the latest commitment when a close starts on-chain, from a startup `getChannelState()` check and `watchChannel` events from the ledger read before it, retrying until the chain shows the waiting period ended
+  - Changed: a channel close is final. A close credential or `closeWithLatestCommitment()` call that fails leaves the channel closing instead of reopening it; vouchers are rejected as soon as the chain shows a close has started, not only once it takes effect; commitments are checked against `deposited` (balance plus withdrawn) rather than `balance`
+  - Fail fast on numeric options that are not positive safe integers (`maxFeeBumpStroops`, `maxCloseSends`, `feeBudget`, poll and timeout settings) at server construction and before a close latches the channel, refuse a close helper call whose `feePayer` has no `envelopeSigner` before the latch, and refuse an already-wrapped FeeBump whose outer fee is above the cap, so a malformed bound cannot disable a fee cap and a call that could never sign cannot latch a close
+
 ### Changed
 
 - **BREAKING:** Base each channel commitment on the lower of two values: the highest cumulative that the client signed, and the cumulative in the server challenge. The client does not use a server value above the local value [#91](https://github.com/stellar/stellar-mpp-sdk/pull/91)

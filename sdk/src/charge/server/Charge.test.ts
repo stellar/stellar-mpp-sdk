@@ -20,6 +20,7 @@ import { Challenge, Credential, Store } from 'mppx'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ALL_ZEROS, USDC_SAC_TESTNET } from '../../constants.js'
 import { DEFAULT_POLL_MAX_ATTEMPTS } from '../../shared/defaults.js'
+import { PaymentVerificationError } from '../../shared/errors.js'
 
 const mockGetTransaction = vi.fn()
 const mockGetAccount = vi.fn()
@@ -80,6 +81,48 @@ describe('stellar server charge', () => {
         currency: USDC_SAC_TESTNET,
       } as any),
     ).toThrow('A store is required for charge mode')
+  })
+
+  it.each([
+    'maxFeeBumpStroops',
+    'pollMaxAttempts',
+    'pollMaxConcurrent',
+    'pollTimeoutMs',
+    'simulationTimeoutMs',
+    'maxPushPaymentAgeSeconds',
+    'challengeLifetimeSeconds',
+  ])('rejects NaN %s at construction', (option) => {
+    expect(() =>
+      charge({
+        recipient: RECIPIENT,
+        currency: USDC_SAC_TESTNET,
+        store: Store.memory(),
+        [option]: NaN,
+      } as any),
+    ).toThrow(`\`${option}\` must be a positive safe integer.`)
+  })
+
+  it('rejects NaN decimals at construction', () => {
+    expect(() =>
+      charge({
+        recipient: RECIPIENT,
+        currency: USDC_SAC_TESTNET,
+        store: Store.memory(),
+        decimals: NaN,
+      }),
+    ).toThrow('`decimals` must be a non-negative safe integer.')
+  })
+
+  it('accepts decimals 0 and pollDelayMs 0', () => {
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store: Store.memory(),
+      decimals: 0,
+      pollDelayMs: 0,
+    })
+    expect(method.name).toBe('stellar')
+    expect(method.intent).toBe('charge')
   })
 
   it('accepts custom network', () => {
@@ -3415,6 +3458,114 @@ describe('charge sponsored path fee cap', () => {
 
     const sentTx = mockSendTransaction.mock.calls[0][0]
     expect(Number(sentTx.fee)).toBeLessThanOrEqual(10_000_000)
+  })
+
+  // Flow 6 (sponsored, FeeBump): the simulated resource fee is added to the
+  // rebuilt transaction's fee, and the FeeBump base must leave room for it.
+  it('keeps the FeeBump outer fee within maxFeeBumpStroops when the resource fee is large', async () => {
+    const signerKp = Keypair.random()
+    const feeBumpKp = Keypair.random()
+    const envelope = await buildSponsoredEnvelopeWithValidAuth()
+
+    mockGetAccount.mockResolvedValueOnce(new Account(signerKp.publicKey(), '100'))
+    mockGetLatestLedger.mockResolvedValueOnce({ sequence: 1000 })
+    mockSimulateTransaction.mockResolvedValueOnce({
+      result: { retval: null },
+      events: [defaultMockEvent()],
+      transactionData: new SorobanDataBuilder().setResourceFee(5_000_000),
+    })
+    mockSendTransaction.mockResolvedValueOnce({ hash: 'fee-bump-cap-hash', status: 'PENDING' })
+    mockGetTransaction.mockResolvedValueOnce({ status: 'SUCCESS' })
+
+    const challenge = Challenge.from({
+      id: `test-${crypto.randomUUID()}`,
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      request: {
+        amount: '10000000',
+        currency: USDC_SAC_TESTNET,
+        recipient: RECIPIENT,
+        methodDetails: { network: 'stellar:testnet', feePayer: true },
+      },
+    })
+    const cred = Object.assign(
+      Credential.from({
+        challenge,
+        payload: { type: 'transaction', transaction: envelope.toXDR('base64') },
+      }),
+      { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
+    )
+
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      feePayer: { envelopeSigner: signerKp, feeBumpSigner: feeBumpKp },
+      maxFeeBumpStroops: 10_000_000,
+      store: Store.memory(),
+    })
+
+    await method.verify({ credential: cred as any, request: cred.challenge.request })
+
+    const sentTx = mockSendTransaction.mock.calls[0][0]
+    expect(sentTx).toBeInstanceOf(FeeBumpTransaction)
+    // inclusion = 100; base = min(10 * 100, (10_000_000 - 5_000_000) / 2) = 1000;
+    // outer = 1000 * (1 + 1) + 5_000_000
+    expect(sentTx.fee).toBe('5002000')
+  })
+
+  it('refuses before broadcast when the FeeBump cap cannot cover the inner inclusion fee', async () => {
+    const signerKp = Keypair.random()
+    const feeBumpKp = Keypair.random()
+    const envelope = await buildSponsoredEnvelopeWithValidAuth()
+
+    mockGetAccount.mockResolvedValueOnce(new Account(signerKp.publicKey(), '100'))
+    mockGetLatestLedger.mockResolvedValueOnce({ sequence: 1000 })
+    mockSimulateTransaction.mockResolvedValueOnce({
+      result: { retval: null },
+      events: [defaultMockEvent()],
+      transactionData: new SorobanDataBuilder().setResourceFee(5_000_000),
+    })
+
+    const challenge = Challenge.from({
+      id: `test-${crypto.randomUUID()}`,
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      request: {
+        amount: '10000000',
+        currency: USDC_SAC_TESTNET,
+        recipient: RECIPIENT,
+        methodDetails: { network: 'stellar:testnet', feePayer: true },
+      },
+    })
+    const cred = Object.assign(
+      Credential.from({
+        challenge,
+        payload: { type: 'transaction', transaction: envelope.toXDR('base64') },
+      }),
+      { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
+    )
+
+    // The rebuilt fee is 5_000_100, so the fee ceiling itself passes; the
+    // FeeBump base then has only 50 stroops per operation to work with.
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      feePayer: { envelopeSigner: signerKp, feeBumpSigner: feeBumpKp },
+      maxFeeBumpStroops: 5_000_100,
+      store: Store.memory(),
+    })
+
+    const error = await method
+      .verify({ credential: cred as any, request: cred.challenge.request })
+      .catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(PaymentVerificationError)
+    expect((error as Error).message).toBe(
+      'Fee bump exceeds the configured maximum: the cap cannot cover the inner transaction fee.',
+    )
+    expect(mockSendTransaction).not.toHaveBeenCalled()
   })
 })
 
