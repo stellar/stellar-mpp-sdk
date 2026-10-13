@@ -1943,6 +1943,49 @@ describe('closeWithLatestCommitment', () => {
     expect(update).not.toHaveBeenCalled()
   })
 
+  it('rejects a fee payer without an envelopeSigner before reading or latching the store', async () => {
+    const store = Store.memory()
+    const get = vi.spyOn(store, 'get')
+    const update = vi.spyOn(store, 'update')
+
+    const error = await closeWithLatestCommitment({
+      store,
+      channel: CHANNEL_ADDRESS,
+      feePayer: {} as { envelopeSigner: Keypair },
+    }).catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(ChannelVerificationError)
+    expect((error as ChannelVerificationError).message).toBe(
+      '[stellar:channel] Closing requires a feePayer.envelopeSigner (transaction source and envelope signer).',
+    )
+    expect((error as ChannelVerificationError).details).toEqual({ channel: CHANNEL_ADDRESS })
+    expect(get).not.toHaveBeenCalled()
+    expect(update).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['envelopeSigner', { envelopeSigner: 'not-a-secret' }],
+    ['feeBumpSigner', { envelopeSigner: Keypair.random(), feeBumpSigner: 'not-a-secret' }],
+  ])(
+    'rejects an invalid %s secret before reading or latching the store',
+    async (_name, feePayer) => {
+      const store = Store.memory()
+      const get = vi.spyOn(store, 'get')
+      const update = vi.spyOn(store, 'update')
+
+      const error = await closeWithLatestCommitment({
+        store,
+        channel: CHANNEL_ADDRESS,
+        feePayer,
+      }).catch((e: unknown) => e)
+
+      expect(error).toBeInstanceOf(Error)
+      expect((error as Error).message).toBe('invalid encoded string')
+      expect(get).not.toHaveBeenCalled()
+      expect(update).not.toHaveBeenCalled()
+    },
+  )
+
   function deferred<T>() {
     let resolve!: (value: T) => void
     const promise = new Promise<T>((r) => {
@@ -2667,6 +2710,24 @@ describe('close()', () => {
 
     expect(error).toBeInstanceOf(StellarMppError)
     expect((error as Error).message).toContain('`pollMaxAttempts` must be a positive safe integer.')
+    expect(mockGetAccount).not.toHaveBeenCalled()
+    expect(mockPrepareTransaction).not.toHaveBeenCalled()
+    expect(mockSendTransaction).not.toHaveBeenCalled()
+  })
+
+  it('rejects a fee payer without an envelopeSigner before building or sending the close', async () => {
+    const error = await close({
+      channel: CHANNEL_ADDRESS,
+      amount: 5000000n,
+      signature: new Uint8Array(64).fill(5),
+      feePayer: {} as { envelopeSigner: Keypair },
+      network: 'stellar:testnet',
+    }).catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(ChannelVerificationError)
+    expect((error as ChannelVerificationError).message).toBe(
+      '[stellar:channel] Closing requires a feePayer.envelopeSigner (transaction source and envelope signer).',
+    )
     expect(mockGetAccount).not.toHaveBeenCalled()
     expect(mockPrepareTransaction).not.toHaveBeenCalled()
     expect(mockSendTransaction).not.toHaveBeenCalled()

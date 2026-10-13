@@ -1178,9 +1178,10 @@ function parseStoredCommitment(record: CumulativeRecord, channelAddress: string)
  *   already recorded, there is no stored commitment and nothing is owed (including
  *   an existing empty-channel latch), or the chain already showed a started close
  *   with the stored amount withdrawn, so nothing was sent.
- * @throws {ChannelVerificationError} If a legacy record has no signature (after
- *   latching it), the stored commitment is malformed, the store has no atomic
- *   `update()`, the send cap is reached, or the broadcast returns a
+ * @throws {ChannelVerificationError} If `feePayer` has no `envelopeSigner`
+ *   (before anything is read or latched), a legacy record has no signature
+ *   (after latching it), the stored commitment is malformed, the store has no
+ *   atomic `update()`, the send cap is reached, or the broadcast returns a
  *   non-`PENDING` status.
  * @throws {TransactionFailedError} If the close transaction fails on-chain.
  * @throws {PollTimeoutError} If polling exceeds the configured timeout.
@@ -1199,7 +1200,7 @@ export async function closeWithLatestCommitment(
 ): Promise<string | null> {
   const { store, maxCloseSends = DEFAULT_MAX_CLOSE_SENDS, ...rest } = parameters
   validatePositiveSafeInteger('maxCloseSends', maxCloseSends)
-  validateCloseBounds(rest)
+  validateCloseOptions(rest)
   const { channel: channelAddress, network = STELLAR_TESTNET, rpcUrl, logger = noopLogger } = rest
   const cumulativeKey = cumulativeStoreKey(channelAddress)
   const closedKey = closedStoreKey(channelAddress)
@@ -1343,16 +1344,22 @@ export async function closeWithLatestCommitment(
  * {@link closeWithLatestCommitment} while the server is running.
  */
 export async function close(parameters: close.Parameters): Promise<string> {
-  validateCloseBounds(parameters)
+  validateCloseOptions(parameters)
   return sendClose(await buildClose(parameters), parameters)
 }
 
 type PreparedClose = { server: rpc.Server; tx: Transaction | FeeBumpTransaction }
 
-/** Rejects malformed numeric close options before anything is read, written or sent. */
-function validateCloseBounds(
+/**
+ * Rejects malformed numeric close options and a fee payer that cannot sign
+ * before anything is read, written or sent, so a call that could never build
+ * a close does not latch the channel.
+ */
+function validateCloseOptions(
   parameters: Pick<
     close.Parameters,
+    | 'channel'
+    | 'feePayer'
     | 'maxFeeBumpStroops'
     | 'pollMaxAttempts'
     | 'pollDelayMs'
@@ -1361,12 +1368,24 @@ function validateCloseBounds(
   >,
 ): void {
   const {
+    channel: channelAddress,
+    feePayer,
     maxFeeBumpStroops = DEFAULT_MAX_FEE_BUMP_STROOPS,
     pollMaxAttempts = DEFAULT_POLL_MAX_ATTEMPTS,
     pollDelayMs = DEFAULT_POLL_DELAY_MS,
     pollTimeoutMs = DEFAULT_POLL_TIMEOUT_MS,
     simulationTimeoutMs = DEFAULT_SIMULATION_TIMEOUT_MS,
   } = parameters
+  if (!feePayer?.envelopeSigner) {
+    throw new ChannelVerificationError(
+      `${LOG_PREFIX} Closing requires a feePayer.envelopeSigner (transaction source and envelope signer).`,
+      { channel: channelAddress },
+    )
+  }
+  resolveKeypair(feePayer.envelopeSigner)
+  if (feePayer.feeBumpSigner) {
+    resolveKeypair(feePayer.feeBumpSigner)
+  }
   validatePositiveSafeInteger('maxFeeBumpStroops', maxFeeBumpStroops)
   validatePositiveSafeInteger('pollMaxAttempts', pollMaxAttempts)
   validateNonNegativeSafeInteger('pollDelayMs', pollDelayMs)
