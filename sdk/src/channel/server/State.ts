@@ -11,7 +11,7 @@ import { DEFAULT_SIM_TIMEOUT_SECS, DEFAULT_SIMULATION_TIMEOUT_MS } from '../../s
 import { StellarMppError } from '../../shared/errors.js'
 import { scValToBigInt } from '../../shared/scval.js'
 import { withTimeout } from '../../shared/timeout.js'
-import { getStorageKey } from '../../shared/getStorageKey.js'
+import { getInstanceStorageValue } from '../../shared/getInstanceStorageValue.js'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -123,9 +123,8 @@ export async function getChannelState(
   const to = Address.fromScVal(toVal!).toString()
 
   // Read CloseEffectiveAtLedger from contract instance storage.
-  // The contract uses DataKey::CloseEffectiveAtLedger (enum variant index 5)
-  // stored in instance storage.
-  const closeEntry = await getStorageKey(
+  // The contract uses DataKey::CloseEffectiveAtLedger stored in instance storage.
+  const closeEntry = await getInstanceStorageValue(
     server,
     channelAddress,
     simulationTimeoutMs,

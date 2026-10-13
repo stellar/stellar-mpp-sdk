@@ -5,6 +5,8 @@ import { Challenge, Credential, Store } from 'mppx'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SettlementError } from '../../shared/errors.js'
 
+import { DEFAULT_SIMULATION_TIMEOUT_MS } from '../../shared/defaults.js'
+
 // Hoisted mock stubs — accessible inside the vi.mock factory
 const mockGetAccount = vi.fn()
 const mockSimulateTransaction = vi.fn()
@@ -14,7 +16,7 @@ const mockGetTransaction = vi.fn()
 const mockPrepareTransaction = vi.fn()
 const mockFromXDR = vi.fn()
 const mockWrapFeeBump = vi.fn()
-const mockGetStorageKey = vi.fn()
+const mockGetInstanceStorageValue = vi.fn()
 
 vi.mock('@stellar/stellar-sdk', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@stellar/stellar-sdk')>()
@@ -51,8 +53,8 @@ vi.mock('../../shared/fee-bump.js', () => ({
   wrapFeeBump: (...args: unknown[]) => mockWrapFeeBump(...args),
 }))
 
-vi.mock('../../shared/getStorageKey.js', () => ({
-  getStorageKey: (...args: unknown[]) => mockGetStorageKey(...args),
+vi.mock('../../shared/getInstanceStorageValue.js', () => ({
+  getInstanceStorageValue: (...args: unknown[]) => mockGetInstanceStorageValue(...args),
 }))
 
 // Re-import after mock is set up
@@ -89,7 +91,7 @@ const CHANNEL_ADDRESS = 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC52
 // this from contract instance storage and verifies vouchers against it; tests
 // asserting a mismatch override with `mockResolvedValueOnce`.
 const onChainCommitmentKey = (kp: Keypair) => xdr.ScVal.scvBytes(kp.rawPublicKey())
-mockGetStorageKey.mockResolvedValue(onChainCommitmentKey(COMMITMENT_KEY))
+mockGetInstanceStorageValue.mockResolvedValue(onChainCommitmentKey(COMMITMENT_KEY))
 
 /**
  * Build a fake credential for testing verify().
@@ -3175,15 +3177,15 @@ describe('channel server commitment key pinning (on-chain CommitmentKey validati
 
   beforeEach(() => {
     mockSimulateTransaction.mockReset()
-    mockGetStorageKey.mockReset()
-    mockGetStorageKey.mockResolvedValue(onChainCommitmentKey(COMMITMENT_KEY))
+    mockGetInstanceStorageValue.mockReset()
+    mockGetInstanceStorageValue.mockResolvedValue(onChainCommitmentKey(COMMITMENT_KEY))
   })
 
   it('rejects vouchers when the configured commitmentKey differs from the on-chain CommitmentKey', async () => {
     // Attack shape: on-chain key is A (attacker-held), operator was told B
     // (also attacker-held), voucher is signed with B. Pre-fix this was accepted.
     const onChainKey = Keypair.random()
-    mockGetStorageKey.mockResolvedValue(onChainCommitmentKey(onChainKey))
+    mockGetInstanceStorageValue.mockResolvedValue(onChainCommitmentKey(onChainKey))
 
     const commitmentBytes = Buffer.from('unenforceable-voucher')
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
@@ -3284,11 +3286,17 @@ describe('channel server commitment key pinning (on-chain CommitmentKey validati
     })
     await method.verify({ credential: cred2 as any, request: cred2.challenge.request })
 
-    expect(mockGetStorageKey).toHaveBeenCalledTimes(1)
+    expect(mockGetInstanceStorageValue).toHaveBeenCalledTimes(1)
+    expect(mockGetInstanceStorageValue).toHaveBeenCalledWith(
+      expect.anything(),
+      CHANNEL_ADDRESS,
+      DEFAULT_SIMULATION_TIMEOUT_MS,
+      'CommitmentKey',
+    )
   })
 
   it('does not cache a failed on-chain key read; the next voucher retries', async () => {
-    mockGetStorageKey.mockRejectedValueOnce(new Error('rpc down'))
+    mockGetInstanceStorageValue.mockRejectedValueOnce(new Error('rpc down'))
 
     const store = Store.memory()
     const method = channel({
@@ -3322,11 +3330,23 @@ describe('channel server commitment key pinning (on-chain CommitmentKey validati
       request: cred2.challenge.request,
     })
     expect(receipt.status).toBe('success')
-    expect(mockGetStorageKey).toHaveBeenCalledTimes(2)
+    expect(mockGetInstanceStorageValue).toHaveBeenCalledTimes(2)
+  })
+
+  it('throws at construction when the configured commitmentKey is malformed', () => {
+    expect(() =>
+      channel({
+        channel: CHANNEL_ADDRESS,
+        checkOnChainState: false,
+        commitmentKey: 'not-a-key',
+        store: Store.memory(),
+      }),
+    ).toThrow()
+    expect(mockGetInstanceStorageValue).not.toHaveBeenCalled()
   })
 
   it('rejects when the contract has no CommitmentKey in instance storage', async () => {
-    mockGetStorageKey.mockResolvedValueOnce(null)
+    mockGetInstanceStorageValue.mockResolvedValueOnce(null)
 
     const commitmentBytes = Buffer.from('no-key')
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
@@ -3349,7 +3369,7 @@ describe('channel server commitment key pinning (on-chain CommitmentKey validati
   })
 
   it('rejects an on-chain CommitmentKey that is not 32 bytes', async () => {
-    mockGetStorageKey.mockResolvedValueOnce(xdr.ScVal.scvBytes(Buffer.alloc(31, 1)))
+    mockGetInstanceStorageValue.mockResolvedValueOnce(xdr.ScVal.scvBytes(Buffer.alloc(31, 1)))
 
     const commitmentBytes = Buffer.from('short-key')
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
@@ -3372,7 +3392,7 @@ describe('channel server commitment key pinning (on-chain CommitmentKey validati
   })
 
   it('rejects an on-chain CommitmentKey entry that is not a byte array', async () => {
-    mockGetStorageKey.mockResolvedValueOnce(xdr.ScVal.scvU32(7))
+    mockGetInstanceStorageValue.mockResolvedValueOnce(xdr.ScVal.scvU32(7))
 
     const commitmentBytes = Buffer.from('wrong-type')
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))

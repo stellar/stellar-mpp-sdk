@@ -43,7 +43,7 @@ import { verifyInvokeContractOp } from '../../shared/verify-invoke.js'
 import { buildCommitmentMessage } from '../commitment.js'
 import { channel as ChannelMethod } from '../Methods.js'
 import { getChannelState, type ChannelState } from './State.js'
-import { getStorageKey } from '../../shared/getStorageKey.js'
+import { getInstanceStorageValue } from '../../shared/getInstanceStorageValue.js'
 
 type ChannelCredential = Parameters<Method.VerifyFn<typeof ChannelMethod>>[0]['credential']
 type CumulativeRecord = {
@@ -170,6 +170,13 @@ export function channel(parameters: channel.Parameters) {
   // semaphore is the only limit on concurrent RPC calls.
   const verifySemaphore = new Semaphore(verifyMaxConcurrent)
 
+  // Parse the configured commitment public key up front so a malformed key
+  // fails at construction. Accepts a G... public key string or a Keypair.
+  const configuredCommitmentKP =
+    typeof commitmentKeyParam === 'string'
+      ? Keypair.fromPublicKey(commitmentKeyParam)
+      : commitmentKeyParam
+
   const envelopeKP = feePayer ? resolveKeypair(feePayer.envelopeSigner) : undefined
   const feeBumpKP = feePayer?.feeBumpSigner ? resolveKeypair(feePayer.feeBumpSigner) : undefined
 
@@ -221,7 +228,7 @@ export function channel(parameters: channel.Parameters) {
   function resolveCommitmentKey(): Promise<Buffer> {
     if (commitmentKeyPromise === undefined || commitmentKeyPromise === null) {
       commitmentKeyPromise = (async () => {
-        const entry = await getStorageKey(
+        const entry = await getInstanceStorageValue(
           rpcServer,
           channelAddress,
           simulationTimeoutMs,
@@ -761,16 +768,13 @@ export function channel(parameters: channel.Parameters) {
     logger.debug(`${LOG_PREFIX} Verifying commitment signature...`)
 
     const rawCommitmentKey = await resolveCommitmentKey()
-    const commitmentKP = Keypair.fromPublicKey(StrKey.encodeEd25519PublicKey(rawCommitmentKey))
-
-    const configured =
-      typeof commitmentKeyParam === 'string'
-        ? Keypair.fromPublicKey(commitmentKeyParam)
-        : commitmentKeyParam
-    if (!configured.rawPublicKey().equals(rawCommitmentKey)) {
+    if (!configuredCommitmentKP.rawPublicKey().equals(rawCommitmentKey)) {
       throw new ChannelVerificationError(
         `${LOG_PREFIX} Configured commitmentKey does not match the channel's on-chain CommitmentKey.`,
-        { expected: commitmentKP.publicKey(), actual: configured.publicKey() },
+        {
+          expected: StrKey.encodeEd25519PublicKey(rawCommitmentKey),
+          actual: configuredCommitmentKP.publicKey(),
+        },
       )
     }
 
@@ -779,7 +783,8 @@ export function channel(parameters: channel.Parameters) {
       amount: commitmentAmount,
       network,
     })
-    const valid = commitmentKP.verify(commitmentBytes, signatureBytes)
+    // Equal to the on-chain CommitmentKey, checked above.
+    const valid = configuredCommitmentKP.verify(commitmentBytes, signatureBytes)
 
     if (!valid) {
       throw new ChannelVerificationError(

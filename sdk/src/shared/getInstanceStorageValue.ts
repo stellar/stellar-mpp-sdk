@@ -12,7 +12,7 @@ import { withTimeout } from './timeout.js'
  * @returns ScVal or null if not found.
  */
 
-export async function getStorageKey(
+export async function getInstanceStorageValue(
   server: rpc.Server,
   channelAddress: string,
   simulationTimeoutMs: number,
@@ -42,13 +42,13 @@ export async function getStorageKey(
   if (!contractData) return null
   const instance = contractData.val?.()?.instance?.()
   if (!instance) return null
-  const storage = instance.storage()
+  const instanceStorage = instance.storage()
 
-  if (!storage) return null
+  if (!instanceStorage) return null
 
   // Search for the requested DataKey variant in the instance storage map.
   // Soroban encodes simple enum variants as ScVal::Vec([ScVal::Symbol(name)])
-  for (const entry of storage) {
+  for (const entry of instanceStorage) {
     const entryKey = entry.key()
     if (isEnumVariant(entryKey, key)) {
       const val = entry.val()
@@ -59,6 +59,17 @@ export async function getStorageKey(
   return null
 }
 
+/**
+ * Checks whether an ScVal encodes the named simple enum variant.
+ *
+ * Soroban encodes a simple enum variant as a vector containing one symbol,
+ * such as `Vec([Symbol("KeyName")])`. Returns false for other shapes or if
+ * decoding the ScVal fails.
+ *
+ * @param scVal - The ScVal to inspect.
+ * @param name - The expected enum variant name.
+ * @returns Whether the ScVal encodes the named variant.
+ */
 function isEnumVariant(scVal: xdr.ScVal, name: string): boolean {
   try {
     if (scVal.switch().value === xdr.ScValType.scvVec().value) {
