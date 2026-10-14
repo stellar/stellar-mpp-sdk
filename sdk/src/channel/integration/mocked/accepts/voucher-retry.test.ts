@@ -12,12 +12,11 @@ const PAYMENT_STROOPS = '200000000' // 20 XLM
 
 const mockGetInstanceStorageValue = vi.fn()
 
-const { channel: serverChannel } = await import('../../../server/Channel.js')
-
 vi.mock('../../../../shared/getInstanceStorageValue.js', () => ({
   getInstanceStorageValue: (...args: unknown[]) => mockGetInstanceStorageValue(...args),
 }))
 
+const { channel: serverChannel } = await import('../../../server/Channel.js')
 const { channel: clientChannel } = await import('../../../client/Channel.js')
 
 // On-chain CommitmentKey matches the test signer.

@@ -3,7 +3,7 @@ import { STELLAR_TESTNET } from '../../constants.js'
 import { buildCommitmentMessage } from '../commitment.js'
 import { Challenge, Credential, Store } from 'mppx'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { SettlementError } from '../../shared/errors.js'
+import { SettlementError, ChannelVerificationError } from '../../shared/errors.js'
 
 import { DEFAULT_SIMULATION_TIMEOUT_MS } from '../../shared/defaults.js'
 
@@ -3300,7 +3300,7 @@ describe('channel server commitment key pinning (on-chain CommitmentKey validati
     })
     await expect(
       method.verify({ credential: cred1 as any, request: cred1.challenge.request }),
-    ).rejects.toThrow('rpc down')
+    ).rejects.toThrow(ChannelVerificationError)
 
     const cred2 = makeSignedCredential({
       cumulativeAmount: 1000000n,

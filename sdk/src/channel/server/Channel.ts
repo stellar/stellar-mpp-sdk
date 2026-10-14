@@ -256,11 +256,15 @@ export function channel(parameters: channel.Parameters) {
           )
         }
         return raw
-      })().catch((error) => {
+      })().catch((err) => {
         // Never cache a failure. A transient RPC error would otherwise brick the
         // server permanently, since nothing would ever retry the read.
         commitmentKeyPromise = undefined
-        throw error
+        if (err instanceof ChannelVerificationError) throw err
+        throw new ChannelVerificationError(
+          `${LOG_PREFIX} There was an error resolving the CommitmentKey`,
+          { error: err instanceof Error ? err.message : String(err) },
+        )
       })
     }
     return commitmentKeyPromise
