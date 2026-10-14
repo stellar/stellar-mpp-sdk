@@ -5456,13 +5456,13 @@ describe('charge push-mode challenge claim release', () => {
     )
   })
 
-  it('does not let a stranger burn a challenge slot with a bogus hash', async () => {
+  it('releases the challenge slot for a credential whose transaction does not exist', async () => {
     const store = Store.memory()
     const method = charge({ recipient: RECIPIENT, currency: USDC_SAC_TESTNET, store })
     const challenge = pushChallenge()
 
-    // A different user with no funds sends a credential for a transaction that
-    // does not exist. Before the correction, this claimed the slot permanently.
+    // A credential for a transaction that does not exist fails verification
+    // and must leave no claim behind.
     const stranger = Keypair.random()
     const bogusHash = testHash('never-broadcast')
     const bogus = Object.assign(
