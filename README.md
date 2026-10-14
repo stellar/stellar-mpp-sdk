@@ -322,7 +322,7 @@ stellar.channel({
 
 ### Progress events
 
-The `onProgress` callback receives events at each stage:
+The `onProgress` callback receives events at each stage. The SDK calls it synchronously and does not catch its errors, so a callback that throws aborts the payment. Use this to apply your own policy before funds move. For example, reject a `challenge` for an unexpected `currency` or `amount`, or reject a `signed` transaction whose fee is too high (see [Fee limits](#fee-limits)). In charge flows, the signed transaction is not broadcast (push) or sent to the server (pull) until the `signed` callback returns.
 
 **Charge events:**
 
@@ -388,6 +388,38 @@ stellar.charge({
 stellar.charge({
   recipient: 'G...',
   currency: USDC_SAC_TESTNET,
+})
+```
+
+### Fee limits
+
+A network fee is a property of the transaction, not of the token or channel contract. A contract cannot cap the fee of the transaction that calls it. Only the party that signs and pays the fee can enforce a limit, and the SDK puts that limit on the paying side:
+
+| Configuration                   | Who pays the fee | How to cap it                                                         |
+| ------------------------------- | ---------------- | --------------------------------------------------------------------- |
+| Charge, sponsored / fee bump    | Server           | `maxFeeBumpStroops` (default `10_000_000`, 1 XLM)                     |
+| Channel, `feePayer` / fee bump  | Server           | `maxFeeBumpStroops` per transaction, plus `feeBudget` per funder      |
+| Charge, unsponsored (push/pull) | Client           | Inspect the `signed` event in `onProgress` and throw to abort payment |
+
+**Servers.** `maxFeeBumpStroops` caps the total fee the server signs: the inclusion fee plus the simulated resource fee, and the outer fee when fee bumping. Size it from a simulated transfer of each token you accept, with headroom for surge pricing. The 1 XLM default is loose for a plain SEP-41 transfer. Channel servers that sponsor fees should also set `feeBudget`, so a single funder cannot repeatedly spend up to the per-transaction cap.
+
+**Clients.** In unsponsored mode the client signs a fee that the RPC simulation produces, and the merchant's `currency` contract influences that simulation. The signed envelope is not released until `onProgress` returns. If the callback throws on the `signed` event, the payment aborts before the client broadcasts (push) or sends the credential (pull):
+
+```ts
+import { Networks, TransactionBuilder } from '@stellar/stellar-sdk'
+import { stellar } from '@stellar/mpp/charge/client'
+
+const MAX_FEE_STROOPS = 1_000_000 // 0.1 XLM
+
+stellar.charge({
+  keypair,
+  onProgress(event) {
+    if (event.type !== 'signed') return
+    const tx = TransactionBuilder.fromXDR(event.transaction, Networks.TESTNET)
+    if (Number(tx.fee) > MAX_FEE_STROOPS) {
+      throw new Error(`Refusing to pay: fee ${tx.fee} exceeds ${MAX_FEE_STROOPS} stroops`)
+    }
+  },
 })
 ```
 
