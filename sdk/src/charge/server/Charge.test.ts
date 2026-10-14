@@ -5233,6 +5233,9 @@ describe('charge challenge id uniqueness', () => {
     const parsed = Challenge.deserialize(Challenge.serialize(challenge), { methods: [method] })
     expect(parsed.request.methodDetails?.reference).toBe(challenge.request.methodDetails?.reference)
     expect(parsed.id).toBe(challenge.id)
+    const schemaParsed = method.schema.request.parse(challenge.request)
+    expect(schemaParsed.methodDetails?.reference).toBe(challenge.request.methodDetails?.reference)
+    expect(schemaParsed.methodDetails?.issuedAt).toBe(challenge.request.methodDetails?.issuedAt)
   })
 
   // The HMAC must cover the nonce and the issuance stamp, so any change to
