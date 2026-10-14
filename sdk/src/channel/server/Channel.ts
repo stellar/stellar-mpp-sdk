@@ -226,7 +226,7 @@ export function channel(parameters: channel.Parameters) {
   let commitmentKeyPromise: Promise<Buffer> | undefined
 
   function resolveCommitmentKey(): Promise<Buffer> {
-    if (commitmentKeyPromise === undefined || commitmentKeyPromise === null) {
+    if (commitmentKeyPromise === undefined) {
       commitmentKeyPromise = (async () => {
         const entry = await getInstanceStorageValue(
           rpcServer,
