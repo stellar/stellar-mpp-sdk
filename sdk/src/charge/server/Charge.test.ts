@@ -17,6 +17,7 @@ import {
   xdr,
 } from '@stellar/stellar-sdk'
 import { Challenge, Credential, Store } from 'mppx'
+import { Mppx } from 'mppx/server'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ALL_ZEROS, USDC_SAC_TESTNET } from '../../constants.js'
 import { DEFAULT_POLL_MAX_ATTEMPTS } from '../../shared/defaults.js'
@@ -5221,6 +5222,63 @@ describe('charge challenge id uniqueness', () => {
     // binding stays correct.
     expect(Challenge.verify(first, { secretKey })).toBe(true)
     expect(Challenge.verify(second, { secretKey })).toBe(true)
+  })
+
+  // The full path through the real mppx handler: two customers get challenges with
+  // identical terms and a fixed expiry, then pay with separate push payments.
+  it('accepts two push payments on challenges with identical terms and a fixed expiry', async () => {
+    mockGetTransaction.mockReset()
+    const store = Store.memory()
+    const mppx = Mppx.create({
+      secretKey: 'charge-uniqueness-test-secret-key-min-32-bytes',
+      methods: [charge({ recipient: RECIPIENT, currency: USDC_SAC_TESTNET, store })],
+    })
+    const expires = new Date(Date.now() + 60_000).toISOString()
+    const handler = mppx.charge({ amount: '1', expires })
+    const url = 'http://localhost/resource'
+
+    async function pay(payer: Keypair, label: string) {
+      const first = await handler(new Request(url))
+      expect(first.status).toBe(402)
+      const challenge = Challenge.fromResponse(first.challenge!)
+
+      const tx = buildTransferTx({
+        source: payer.publicKey(),
+        from: payer.publicKey(),
+        to: RECIPIENT,
+        amount: 10000000n,
+        currency: USDC_SAC_TESTNET,
+      })
+      tx.sign(payer)
+      mockGetTransaction.mockResolvedValueOnce({
+        status: 'SUCCESS',
+        envelopeXdr: tx.toXDR(),
+        createdAt: Math.floor(Date.now() / 1000),
+      })
+
+      const hash = testHash(label)
+      const authorization = Credential.serialize({
+        challenge,
+        payload: {
+          type: 'signedHash',
+          hash,
+          sourceSignature: Buffer.from(payer.sign(Buffer.from(`${challenge.id}:${hash}`))).toString(
+            'hex',
+          ),
+        },
+        source: `did:pkh:stellar:testnet:${payer.publicKey()}`,
+      } as never)
+      const second = await handler(new Request(url, { headers: { Authorization: authorization } }))
+      return { challenge, second }
+    }
+
+    const a = await pay(Keypair.random(), 'customer-a')
+    const b = await pay(Keypair.random(), 'customer-b')
+
+    expect(a.challenge.expires).toBe(b.challenge.expires)
+    expect(a.challenge.id).not.toBe(b.challenge.id)
+    expect(a.second.status).toBe(200)
+    expect(b.second.status).toBe(200)
   })
 
   it('round-trips the nonce through the method schema', () => {
