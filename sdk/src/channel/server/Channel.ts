@@ -262,7 +262,7 @@ export function channel(parameters: channel.Parameters) {
         commitmentKeyPromise = undefined
         if (err instanceof ChannelVerificationError) throw err
         throw new ChannelVerificationError(
-          `${LOG_PREFIX} There was an error resolving the CommitmentKey`,
+          `${LOG_PREFIX} There was an error resolving the CommitmentKey.`,
           { error: err instanceof Error ? err.message : String(err) },
         )
       })
