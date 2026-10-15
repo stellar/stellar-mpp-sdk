@@ -312,6 +312,9 @@ export function charge(parameters: charge.Parameters) {
 
           // In push mode the network must confirm the transaction before the client
           // sends the hash. The server reads the transaction first.
+          // The client-presented hash can be the inner transaction hash or the outer
+          // fee-bump hash. The server deduplicates on the canonical inner hash, as pull
+          // mode does. Each on-chain payment then settles at most once.
           const result = await rpcServer.getTransaction(hash)
 
           if (result.status === 'FAILED') {
