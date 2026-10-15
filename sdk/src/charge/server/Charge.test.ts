@@ -5514,6 +5514,39 @@ describe('charge push-mode challenge claim release', () => {
       expect.objectContaining({ state: 'used' }),
     )
   })
+
+  // A replay is rejected at the initial claim, before the release wrapper
+  // exists. This case fails inside the wrapper after the tx-hash slot is
+  // consumed, so it covers the `pushHashClaimed` guard.
+  it('keeps the challenge slot when a failure follows the tx-hash claim', async () => {
+    const base = Store.memory()
+    const challenge = pushChallenge()
+    const challengeKey = `stellar:charge:challenge:${challenge.id}`
+    const hash = testHash('store-failure-after-claim')
+    const store = {
+      ...base,
+      put: vi.fn(async (key: string, value: unknown) => {
+        if (key === challengeKey) throw new Error('store unavailable')
+        return base.put(key, value as never)
+      }),
+    } as typeof base
+    const method = charge({ recipient: RECIPIENT, currency: USDC_SAC_TESTNET, store })
+    const cred = pushCredential(challenge, hash)
+
+    const transfer = confirmedTransfer()
+    mockGetTransaction.mockResolvedValueOnce(transfer)
+    await expect(
+      method.verify({ credential: cred as any, request: cred.challenge.request }),
+    ).rejects.toThrow('store unavailable')
+
+    // The payment's tx-hash slot is consumed, so the challenge slot stays claimed.
+    expect(await base.get(challengeKey)).toEqual(expect.objectContaining({ state: 'pending' }))
+    const other = pushCredential(pushChallenge(), hash)
+    mockGetTransaction.mockResolvedValueOnce(transfer)
+    await expect(
+      method.verify({ credential: other as any, request: other.challenge.request }),
+    ).rejects.toThrow('Transaction hash already used')
+  })
 })
 
 // ---------------------------------------------------------------------------
