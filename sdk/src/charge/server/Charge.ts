@@ -278,7 +278,12 @@ export function charge(parameters: charge.Parameters) {
         return await run()
       } catch (error) {
         if (!pushHashClaimed) {
-          await store.delete(challengeStoreKey)
+          await store.delete(challengeStoreKey).catch((deleteError: unknown) => {
+            logger.warn(`${LOG_PREFIX} Failed to release challenge claim`, {
+              challengeId: challenge.id,
+              error: deleteError instanceof Error ? deleteError.message : String(deleteError),
+            })
+          })
         }
         throw error
       }
@@ -756,7 +761,12 @@ export function charge(parameters: charge.Parameters) {
             // The transaction never reached the ledger, so release the claims
             // this call made. The payer can then retry the same challenge
             // instead of being permanently locked out by a failed settlement.
-            await store.delete(challengeStoreKey)
+            await store.delete(challengeStoreKey).catch((deleteError: unknown) => {
+              logger.warn(`${LOG_PREFIX} Failed to release challenge claim`, {
+                challengeId: challenge.id,
+                error: deleteError instanceof Error ? deleteError.message : String(deleteError),
+              })
+            })
             if (hashClaimedByUs && hashKey) {
               await store.delete(hashKey)
             }
