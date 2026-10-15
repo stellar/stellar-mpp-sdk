@@ -257,8 +257,8 @@ export function channel(parameters: channel.Parameters) {
         }
         return raw
       })().catch((err) => {
-        // Never cache a failure. A transient RPC error would otherwise brick the
-        // server permanently, since nothing would ever retry the read.
+        // Never cache a failure, so the next voucher retries the read after a
+        // transient RPC error.
         commitmentKeyPromise = undefined
         if (err instanceof ChannelVerificationError) throw err
         throw new ChannelVerificationError(
@@ -474,13 +474,12 @@ export function channel(parameters: channel.Parameters) {
     // Verify the commitment signature before the server writes channel state.
     // The message is built locally and the on-chain CommitmentKey is read once
     // and shared by all callers, so this runs outside the semaphore below. The
-    // server rejects a forged voucher before that voucher can occupy one of the
-    // limited RPC slots.
+    // signature check therefore does not use one of the limited RPC slots.
     await verifyCommitmentSignature(commitmentAmount, signatureBytes)
 
     // Read the on-chain state only after the signature check succeeds. The
     // state read costs several RPC calls. The cheap signature check runs first,
-    // so a forged voucher cannot cause the full state query.
+    // so only vouchers with a valid signature trigger the full state query.
     //
     // Limit the concurrency here. The cumulative lock previously serialised
     // validation, so it allowed only one read at a time. These reads now run

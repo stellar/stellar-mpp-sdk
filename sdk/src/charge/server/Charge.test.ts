@@ -5240,7 +5240,7 @@ describe('charge challenge id uniqueness', () => {
 
   // The HMAC must cover the nonce and the issuance stamp, so any change to
   // either one invalidates the challenge.
-  function tamperedRequest(
+  function withMethodDetails(
     challenge: ReturnType<typeof issue>,
     methodDetails: Record<string, unknown>,
   ) {
@@ -5253,8 +5253,8 @@ describe('charge challenge id uniqueness', () => {
     }
   }
 
-  it('verifies an unchanged challenge rebuilt the same way the tamper cases are', () => {
-    // This test protects the tamper tests below. If the rebuild of the request
+  it('verifies an unchanged challenge rebuilt the same way the modified-challenge cases are', () => {
+    // This test protects the modified-challenge tests below. If the rebuild of the request
     // object were sufficient to fail verification, all of those tests would pass
     // but show nothing about the nonce.
     const method = charge({
@@ -5263,7 +5263,7 @@ describe('charge challenge id uniqueness', () => {
       store: Store.memory(),
     })
     const challenge = issue(method, new Date(Date.now() + 60_000).toISOString())
-    const rebuilt = tamperedRequest(challenge, {})
+    const rebuilt = withMethodDetails(challenge, {})
     expect(Challenge.verify(rebuilt as any, { secretKey })).toBe(true)
   })
 
@@ -5278,10 +5278,10 @@ describe('charge challenge id uniqueness', () => {
     const second = issue(method, expires)
 
     // Keep the identifier of the first challenge, but use the nonce of the second.
-    const tampered = tamperedRequest(first, {
+    const modified = withMethodDetails(first, {
       reference: second.request.methodDetails?.reference,
     })
-    expect(Challenge.verify(tampered as any, { secretKey })).toBe(false)
+    expect(Challenge.verify(modified as any, { secretKey })).toBe(false)
   })
 
   it('rejects a challenge whose nonce was stripped', () => {
@@ -5295,11 +5295,11 @@ describe('charge challenge id uniqueness', () => {
       string,
       unknown
     >
-    const tampered = {
+    const modified = {
       ...challenge,
       request: { ...challenge.request, methodDetails: withoutNonce },
     }
-    expect(Challenge.verify(tampered as any, { secretKey })).toBe(false)
+    expect(Challenge.verify(modified as any, { secretKey })).toBe(false)
   })
 
   it('rejects a challenge whose issuance stamp was backdated', () => {
@@ -5310,10 +5310,10 @@ describe('charge challenge id uniqueness', () => {
     })
     const challenge = issue(method, new Date(Date.now() + 60_000).toISOString())
     // An earlier time of issue would increase the push-mode freshness window.
-    const tampered = tamperedRequest(challenge, {
+    const modified = withMethodDetails(challenge, {
       issuedAt: new Date(Date.now() - 3_600_000).toISOString(),
     })
-    expect(Challenge.verify(tampered as any, { secretKey })).toBe(false)
+    expect(Challenge.verify(modified as any, { secretKey })).toBe(false)
   })
 
   it('still rejects altered payment terms', () => {
@@ -5323,8 +5323,8 @@ describe('charge challenge id uniqueness', () => {
       store: Store.memory(),
     })
     const challenge = issue(method, new Date(Date.now() + 60_000).toISOString())
-    const tampered = { ...challenge, request: { ...challenge.request, amount: '2' } }
-    expect(Challenge.verify(tampered as any, { secretKey })).toBe(false)
+    const modified = { ...challenge, request: { ...challenge.request, amount: '2' } }
+    expect(Challenge.verify(modified as any, { secretKey })).toBe(false)
   })
 })
 
@@ -5466,7 +5466,7 @@ describe('charge push-mode challenge claim release', () => {
 
     // A credential for a transaction that does not exist fails verification
     // and must leave no claim behind.
-    const stranger = Keypair.random()
+    const otherSigner = Keypair.random()
     const bogusHash = testHash('never-broadcast')
     const bogus = Object.assign(
       Credential.from({
@@ -5475,11 +5475,11 @@ describe('charge push-mode challenge claim release', () => {
           type: 'signedHash',
           hash: bogusHash,
           sourceSignature: Buffer.from(
-            stranger.sign(Buffer.from(`${challenge.id}:${bogusHash}`)),
+            otherSigner.sign(Buffer.from(`${challenge.id}:${bogusHash}`)),
           ).toString('hex'),
         },
       }),
-      { source: `did:pkh:stellar:testnet:${stranger.publicKey()}` },
+      { source: `did:pkh:stellar:testnet:${otherSigner.publicKey()}` },
     )
     mockGetTransaction.mockResolvedValueOnce({ status: 'NOT_FOUND' })
     await expect(

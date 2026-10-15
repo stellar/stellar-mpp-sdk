@@ -371,9 +371,8 @@ export function charge(parameters: charge.Parameters) {
           // To do this, the server uses an atomic compare-and-set operation on the
           // canonical inner hash. The operation prevents duplicate transactions.
           // The server records the hash only after it verifies the payment. Because
-          // of this, a failed check does not use the duplicate-check slot. If a failed
-          // check used that slot, a different user could prevent a correct settlement
-          // by the payer.
+          // of this, a failed check does not use the duplicate-check slot, and the
+          // payer can still settle after a failed attempt.
           await claimTxHash(store, logger, canonicalHash, {
             state: 'used',
             usedAt: new Date().toISOString(),
@@ -469,7 +468,7 @@ export function charge(parameters: charge.Parameters) {
           })
 
           // Tx hash dedup via atomic compare-and-set on the canonical inner hash,
-          // after verification so a failed check never burns the payment's dedup slot.
+          // after verification so a failed check leaves the payment's dedup slot free.
           await claimTxHash(store, logger, canonicalHash, {
             state: 'used',
             usedAt: new Date().toISOString(),
