@@ -1,6 +1,6 @@
-import { Keypair } from '@stellar/stellar-sdk'
+import { Keypair, xdr } from '@stellar/stellar-sdk'
 import { Credential, Store } from 'mppx'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 // Runs the real mppx client retry loop against the real channel server. When
 // the server does not accept a voucher, it sends a new 402 challenge. The
@@ -10,8 +10,17 @@ const COMMITMENT_KEY = Keypair.random()
 const CHANNEL_ADDRESS = 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526'
 const PAYMENT_STROOPS = '200000000' // 20 XLM
 
+const mockGetInstanceStorageValue = vi.fn()
+
+vi.mock('../../../../shared/getInstanceStorageValue.js', () => ({
+  getInstanceStorageValue: (...args: unknown[]) => mockGetInstanceStorageValue(...args),
+}))
+
 const { channel: serverChannel } = await import('../../../server/Channel.js')
 const { channel: clientChannel } = await import('../../../client/Channel.js')
+
+// On-chain CommitmentKey matches the test signer.
+mockGetInstanceStorageValue.mockResolvedValue(xdr.ScVal.scvBytes(COMMITMENT_KEY.rawPublicKey()))
 
 /**
  * Returns a client store that delays the write of `delayedAmount`, so that
