@@ -769,7 +769,13 @@ export function charge(parameters: charge.Parameters) {
               })
             })
             if (hashClaimedByUs && hashKey) {
-              await store.delete(hashKey)
+              await store.delete(hashKey).catch((deleteError: unknown) => {
+                logger.warn(`${LOG_PREFIX} Failed to release hash claim`, {
+                  challengeId: challenge.id,
+                  hashKey,
+                  error: deleteError instanceof Error ? deleteError.message : String(deleteError),
+                })
+              })
             }
           }
           throw error
