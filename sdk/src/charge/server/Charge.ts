@@ -267,11 +267,9 @@ export function charge(parameters: charge.Parameters) {
     const payload = credential.payload
 
     // In push mode the payer settles on-chain before the payer sends the
-    // credential. A failed check must not keep the challenge slot.
-    // Nothing settles against this challenge until the server claims the
-    // transaction-hash slot. The server releases the challenge slot so that the
-    // payer can try again. If the server kept the slot, the payer would lose a
-    // confirmed payment.
+    // credential. Nothing settles against this challenge until the server claims
+    // the transaction-hash slot, so a check that fails before then releases the
+    // challenge slot and the payer can retry.
     let pushHashClaimed = false
     const releasePushClaimOnFailure = async <T>(run: () => Promise<T>): Promise<T> => {
       try {
