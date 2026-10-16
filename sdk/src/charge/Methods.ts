@@ -83,6 +83,25 @@ export const charge = Method.from({
           feePayer: z.optional(z.boolean()),
           /** Credential payload types the server accepts, in order of server preference. */
           credentialTypes: z.optional(z.array(z.string())),
+          /**
+           * A nonce that the server generates for each issue (UUID).
+           *
+           * The challenge identifier is an HMAC over the challenge contents, so
+           * this value gives every issued challenge its own identifier.
+           *
+           * The server's `request()` hook sets this value automatically.
+           */
+          reference: z.optional(z.string()),
+          /**
+           * The time when the server issued the challenge (ISO 8601).
+           *
+           * Push mode uses this time to reject an on-chain payment that is older
+           * than the challenge. The check does not use the configured `expires`
+           * value.
+           *
+           * The server's `request()` hook sets this value automatically.
+           */
+          issuedAt: z.optional(z.string()),
         }),
       ),
     }),

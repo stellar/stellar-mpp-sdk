@@ -3203,14 +3203,13 @@ describe('channel server commitment key pinning (on-chain CommitmentKey validati
   it('verifies against the on-chain key, not the configured one, when only the signer differs', async () => {
     // Operator config matches the chain (key A), but the voucher is signed by B.
     // The contract would reject this at close, so the server must too.
-    // The attacker signs the correct message, so only the key is wrong.
-    const attacker = Keypair.random()
+    const otherSigner = Keypair.random()
     const commitmentBytes = buildCommitmentMessage({
       channel: CHANNEL_ADDRESS,
       amount: 1000000n,
       network: STELLAR_TESTNET,
     })
-    const sigHex = Buffer.from(attacker.sign(commitmentBytes)).toString('hex')
+    const sigHex = Buffer.from(otherSigner.sign(commitmentBytes)).toString('hex')
     const credential = makeCredential({
       amount: '1000000',
       challengeAmount: '1000000',
