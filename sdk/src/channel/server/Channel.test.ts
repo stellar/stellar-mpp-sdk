@@ -1746,6 +1746,51 @@ describe('channel server keeps the latest commitment for recipient close', () =>
     ).toBeNull()
   })
 
+  it('returns null for an empty-channel latch', async () => {
+    const store = Store.memory()
+    await store.put(`stellar:channel:cumulative:${CHANNEL_ADDRESS}`, {
+      amount: '0',
+      closing: true,
+    })
+    expect(await getLatestCommitment({ store, channel: CHANNEL_ADDRESS })).toBeNull()
+  })
+
+  it.each([undefined, null, {}])('rejects a missing store (%o) before reading', async (store) => {
+    await expect(
+      getLatestCommitment({ store: store as unknown as Store.Store, channel: CHANNEL_ADDRESS }),
+    ).rejects.toEqual(
+      new ChannelVerificationError(
+        '[stellar:channel] A store is required to read the stored commitment.',
+        { channel: CHANNEL_ADDRESS },
+      ),
+    )
+  })
+
+  it.each([
+    '100',
+    100,
+    true,
+    ['100'],
+    {},
+    { signature: 'ab'.repeat(64) },
+    { amount: 100 },
+    { amount: 'not-a-number' },
+    { amount: '-1' },
+    { amount: '01', closing: true },
+    { amount: '170141183460469231731687303715884105728' },
+  ])(
+    'throws ChannelVerificationError for a malformed unsigned record %j instead of reading it as legacy',
+    async (record) => {
+      const store = Store.memory()
+      await store.put(`stellar:channel:cumulative:${CHANNEL_ADDRESS}`, record)
+      await expect(getLatestCommitment({ store, channel: CHANNEL_ADDRESS })).rejects.toEqual(
+        new ChannelVerificationError('[stellar:channel] Stored commitment record is malformed.', {
+          channel: CHANNEL_ADDRESS,
+        }),
+      )
+    },
+  )
+
   it('returns null for a legacy record until the next accepted voucher', async () => {
     const { store, method } = setup()
     await store.put(`stellar:channel:cumulative:${CHANNEL_ADDRESS}`, { amount: '100' })
@@ -2498,9 +2543,22 @@ describe('closeWithLatestCommitment', () => {
       record: { amount, signature: 'ab'.repeat(64) },
       message: 'Stored commitment record is malformed.',
     })),
+    // Unsigned shapes that must not pass as legacy records.
+    ...[
+      '100',
+      100,
+      ['100'],
+      {},
+      { signature: 'ab'.repeat(64) },
+      { amount: 100 },
+      { amount: 'not-a-number' },
+      { amount: '-1' },
+      { amount: '01', closing: true },
+      { amount: '170141183460469231731687303715884105728' },
+    ].map((record) => ({ record, message: 'Stored commitment record is malformed.' })),
   ])('leaves the record unchanged when selection fails: $record', async ({ record, message }) => {
     const { store, parameters } = setup()
-    if (record) await store.put(cumulativeKey, record)
+    await store.put(cumulativeKey, record)
     const put = vi.spyOn(store, 'put')
     const remove = vi.spyOn(store, 'delete')
     await expect(closeWithLatestCommitment(parameters)).rejects.toEqual(
@@ -2515,6 +2573,7 @@ describe('closeWithLatestCommitment', () => {
 
   it('rejects a store without atomic update before writing the latch', async () => {
     const { store, parameters } = setup()
+    const get = vi.spyOn(store, 'get')
     const put = vi.spyOn(store, 'put')
     await expect(
       closeWithLatestCommitment({
@@ -2528,7 +2587,22 @@ describe('closeWithLatestCommitment', () => {
         { channel: CHANNEL_ADDRESS },
       ),
     )
+    expect(get).toHaveBeenCalledTimes(0)
     expect(put).toHaveBeenCalledTimes(0)
+  })
+
+  it.each([undefined, null])('rejects a missing store (%o) with a typed error', async (store) => {
+    const { parameters } = setup()
+    await expect(
+      closeWithLatestCommitment({ ...parameters, store: store as unknown as Store.AtomicStore }),
+    ).rejects.toEqual(
+      new ChannelVerificationError(
+        '[stellar:channel] An atomic store providing compare-and-set semantics via update() is required for closing with the stored commitment.',
+        { channel: CHANNEL_ADDRESS },
+      ),
+    )
+    expect(mockGetChannelState).toHaveBeenCalledTimes(0)
+    expect(mockSendTransaction).toHaveBeenCalledTimes(0)
   })
 
   it('returns null for an already closed channel without any store writes', async () => {

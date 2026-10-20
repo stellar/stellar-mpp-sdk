@@ -43,6 +43,7 @@ import { pollTransaction, TransactionFailedError } from '../../shared/poll.js'
 import { withTimeout } from '../../shared/timeout.js'
 import { toBaseUnits } from '../../shared/units.js'
 import {
+  I128_MAX,
   validateAmount,
   validateContractAddress,
   validateHexSignature,
@@ -1164,7 +1165,9 @@ function assertCloseFeeWithinCeiling(preparedTx: Transaction, maxFeeBumpStroops:
  * This is a read only. Use {@link closeWithLatestCommitment} to stop voucher
  * acceptance and close with the stored commitment.
  *
- * @throws {ChannelVerificationError} If the stored record is malformed.
+ * @throws {ChannelVerificationError} If no store is given, or the stored record
+ *   is malformed: not an object, an amount that is not an integer string, or a
+ *   signature that is not 64 hex bytes.
  */
 export async function getLatestCommitment(parameters: {
   /** Store passed to the channel server method. */
@@ -1173,27 +1176,70 @@ export async function getLatestCommitment(parameters: {
   channel: string
 }): Promise<{ amount: bigint; signature: Uint8Array } | null> {
   const { store, channel: channelAddress } = parameters
-  const record = (await store.get(cumulativeStoreKey(channelAddress))) as CumulativeRecord | null
-  if (!record || record.signature === undefined) return null
-
-  return parseStoredCommitment(record, channelAddress)
+  if (!store || typeof store.get !== 'function') {
+    throw new ChannelVerificationError(
+      `${LOG_PREFIX} A store is required to read the stored commitment.`,
+      { channel: channelAddress },
+    )
+  }
+  const stored = classifyStoredRecord(await store.get(cumulativeStoreKey(channelAddress)))
+  if (stored.kind === 'malformed') throw malformedRecordError(channelAddress)
+  return stored.kind === 'signed' ? stored.pair : null
 }
 
-function parseStoredCommitment(record: CumulativeRecord, channelAddress: string) {
-  try {
-    if (typeof record.signature !== 'string') throw new Error('Invalid signature')
-    validateHexSignature(record.signature)
-    if (typeof record.amount !== 'string') throw new Error('Invalid amount')
-    validateAmount(record.amount)
-    return {
-      amount: BigInt(record.amount),
-      signature: Buffer.from(record.signature, 'hex'),
+/**
+ * A stored cumulative record sorted by shape, so every reader applies the same
+ * rules. `unsigned` covers empty-channel latches and records written by earlier
+ * versions, which hold an amount but no signature.
+ */
+type StoredRecord =
+  | { kind: 'absent' }
+  | { kind: 'malformed' }
+  | { kind: 'unsigned'; amount: string; closing: boolean }
+  | {
+      kind: 'signed'
+      amount: string
+      signature: string
+      closing: boolean
+      pair: { amount: bigint; signature: Uint8Array }
     }
-  } catch {
-    throw new ChannelVerificationError(`${LOG_PREFIX} Stored commitment record is malformed.`, {
-      channel: channelAddress,
-    })
+
+/** Non-negative integer string without leading zeros. */
+const UNSIGNED_AMOUNT_PATTERN = /^(0|[1-9]\d*)$/
+
+function classifyStoredRecord(current: unknown): StoredRecord {
+  if (current === null || current === undefined) return { kind: 'absent' }
+  if (typeof current !== 'object' || Array.isArray(current)) return { kind: 'malformed' }
+  const { amount, signature } = current as Record<string, unknown>
+  if (typeof amount !== 'string') return { kind: 'malformed' }
+  const closing = isClosing(current)
+  if (signature === undefined) {
+    // An unsigned record holds the latched amount, which may be zero.
+    if (!UNSIGNED_AMOUNT_PATTERN.test(amount) || BigInt(amount) > I128_MAX) {
+      return { kind: 'malformed' }
+    }
+    return { kind: 'unsigned', amount, closing }
   }
+  if (typeof signature !== 'string') return { kind: 'malformed' }
+  try {
+    validateHexSignature(signature)
+    validateAmount(amount)
+  } catch {
+    return { kind: 'malformed' }
+  }
+  return {
+    kind: 'signed',
+    amount,
+    signature,
+    closing,
+    pair: { amount: BigInt(amount), signature: Buffer.from(signature, 'hex') },
+  }
+}
+
+function malformedRecordError(channelAddress: string): ChannelVerificationError {
+  return new ChannelVerificationError(`${LOG_PREFIX} Stored commitment record is malformed.`, {
+    channel: channelAddress,
+  })
 }
 
 /**
@@ -1270,18 +1316,19 @@ export async function closeWithLatestCommitment(
   const cumulativeKey = cumulativeStoreKey(channelAddress)
   const closedKey = closedStoreKey(channelAddress)
 
+  if (!store || typeof store.update !== 'function') {
+    throw new ChannelVerificationError(
+      `${LOG_PREFIX} An atomic store providing compare-and-set semantics via update() is required for closing with the stored commitment.`,
+      { channel: channelAddress },
+    )
+  }
+
   // A confirmed close is cached; nothing is left to send.
   if (await store.get(closedKey)) {
     logger.info(`${LOG_PREFIX} Channel close already confirmed; nothing to send.`, {
       channel: channelAddress,
     })
     return null
-  }
-  if (typeof store.update !== 'function') {
-    throw new ChannelVerificationError(
-      `${LOG_PREFIX} An atomic store providing compare-and-set semantics via update() is required for closing with the stored commitment.`,
-      { channel: channelAddress },
-    )
   }
 
   // Latch and select in one atomic update. A record that is already closing
@@ -1292,51 +1339,53 @@ export async function closeWithLatestCommitment(
   const selection = await store.update(
     cumulativeKey,
     (current): Store.Change<CumulativeRecord, Selection> => {
-      const record = current as CumulativeRecord | null
-      if (!record) {
-        return {
-          op: 'set',
-          value: { amount: '0', closing: true },
-          result: { success: true, pair: null },
+      const stored = classifyStoredRecord(current)
+      switch (stored.kind) {
+        case 'absent':
+          return {
+            op: 'set',
+            value: { amount: '0', closing: true },
+            result: { success: true, pair: null },
+          }
+        case 'malformed':
+          // Corrupted state is reported and left exactly as found.
+          return {
+            op: 'noop',
+            result: { success: false, error: malformedRecordError(channelAddress) },
+          }
+        case 'unsigned': {
+          // An unsigned record with amount zero owes nothing: latch it if it is
+          // not latched yet and report the empty channel.
+          if (stored.amount === '0') {
+            return stored.closing
+              ? { op: 'noop', result: { success: true, pair: null } }
+              : {
+                  op: 'set',
+                  value: { amount: '0', closing: true },
+                  result: { success: true, pair: null },
+                }
+          }
+          const result: Selection = {
+            success: false,
+            error: new ChannelVerificationError(
+              `${LOG_PREFIX} No stored commitment to close with`,
+              { channel: channelAddress },
+            ),
+          }
+          // Preserve an unsigned legacy amount, but stop accepting vouchers even
+          // though the operator must recover its missing commitment signature.
+          return stored.closing
+            ? { op: 'noop', result }
+            : { op: 'set', value: { amount: stored.amount, closing: true }, result }
         }
-      }
-      if (record.signature === undefined) {
-        // An unsigned record with amount zero owes nothing: latch it if it is
-        // not latched yet and report the empty channel.
-        if (record.amount === '0') {
-          return isClosing(record)
-            ? { op: 'noop', result: { success: true, pair: null } }
+        case 'signed':
+          return stored.closing
+            ? { op: 'noop', result: { success: true, pair: stored.pair } }
             : {
                 op: 'set',
-                value: { amount: '0', closing: true },
-                result: { success: true, pair: null },
+                value: { amount: stored.amount, signature: stored.signature, closing: true },
+                result: { success: true, pair: stored.pair },
               }
-        }
-        const result: Selection = {
-          success: false,
-          error: new ChannelVerificationError(`${LOG_PREFIX} No stored commitment to close with`, {
-            channel: channelAddress,
-          }),
-        }
-        // Preserve an unsigned legacy amount, but stop accepting vouchers even
-        // though the operator must recover its missing commitment signature.
-        return isClosing(record)
-          ? { op: 'noop', result }
-          : { op: 'set', value: { ...record, closing: true }, result }
-      }
-      let pair: { amount: bigint; signature: Uint8Array }
-      try {
-        pair = parseStoredCommitment(record, channelAddress)
-      } catch (error) {
-        return { op: 'noop', result: { success: false, error: error as ChannelVerificationError } }
-      }
-      if (isClosing(record)) {
-        return { op: 'noop', result: { success: true, pair } }
-      }
-      return {
-        op: 'set',
-        value: { amount: record.amount, signature: record.signature, closing: true },
-        result: { success: true, pair },
       }
     },
   )
