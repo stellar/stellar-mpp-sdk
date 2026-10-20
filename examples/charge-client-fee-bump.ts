@@ -40,10 +40,12 @@ import { Env } from './config/charge-client-fee-bump.js'
 const keypair = Keypair.fromSecret(Env.stellarSecret)
 const feeBumpKP = Keypair.fromSecret(Env.feeBumpSecret)
 const mode = Env.chargeClientMode
+const pinnedNetwork = Env.network
 
 console.log(`Using Stellar account: ${keypair.publicKey()}`)
 console.log(`Using fee bump key:    ${feeBumpKP.publicKey()}`)
-console.log(`Mode: ${mode}+fee-bump\n`)
+console.log(`Mode: ${mode}+fee-bump`)
+console.log(`Pinned network: ${pinnedNetwork}\n`)
 
 Mppx.create({
   methods: [
@@ -53,6 +55,14 @@ Mppx.create({
         const { amount, currency, recipient } = request
 
         const network = resolveNetworkId(request.methodDetails?.network)
+
+        if (network !== pinnedNetwork) {
+          throw new Error(
+            `Network mismatch: server advertised "${network}" ` +
+              `but this client is pinned to "${pinnedNetwork}".`,
+          )
+        }
+
         const rpcUrl = SOROBAN_RPC_URLS[network]
         const networkPassphrase = NETWORK_PASSPHRASE[network]
         const server = new rpc.Server(rpcUrl)

@@ -19,12 +19,14 @@ import {
   DEFAULT_LEDGER_CLOSE_TIME,
   DEFAULT_TIMEOUT,
   NETWORK_PASSPHRASE,
+  type NetworkId,
   SOROBAN_RPC_URLS,
 } from '../../constants.js'
 import * as Methods from '../Methods.js'
 import { fromBaseUnits } from '../Methods.js'
 import { StellarMppError } from '../../shared/errors.js'
 import { resolveKeypair } from '../../shared/keypairs.js'
+import { assertRpcServesNetwork } from '../../shared/rpc-network.js'
 import { resolveNetworkId, validateAmount } from '../../shared/validation.js'
 import { scValToBigInt } from '../../shared/scval.js'
 import { pollTransaction } from '../../shared/poll.js'
@@ -62,7 +64,17 @@ import {
  * const response = await fetch('https://api.example.com/resource')
  * ```
  */
-type ExpectedTransfer = { currency: string; from: string; to: string; amount: bigint }
+type ExpectedTransfer = {
+  currency: string
+  from: string
+  to: string
+  amount: bigint
+  /**
+   * Passphrase of the network the transfer is meant for. Checked against the
+   * transaction's own passphrase before signing.
+   */
+  networkPassphrase: string
+}
 
 /**
  * Verifies that a Soroban authorization invocation authorizes only the intended
@@ -117,12 +129,24 @@ function assertInvocationIsExactTransfer(
 
 /**
  * Validates every Soroban authorization entry across a transaction's
- * invoke-host-function operations before the client signs it.
+ * invoke-host-function operations, and the network the transaction is bound
+ * to, before the client signs it.
  */
 function assertTransactionAuthorizesOnlyTransfer(
   tx: StellarXdr.Transaction,
+  signingPassphrase: string,
   expected: ExpectedTransfer,
 ): void {
+  // A keypair is valid on every Stellar network, and the authorization tree
+  // carries no network of its own: the passphrase enters only through the
+  // signature. Check it here, where the rest of the payment's terms are
+  // confirmed, so the chain is part of what the client signs off on.
+  if (signingPassphrase !== expected.networkPassphrase) {
+    throw new StellarMppError(
+      'Refusing to sign: the transaction is bound to a different network than the requested payment.',
+    )
+  }
+
   for (const op of tx.operations()) {
     const body = op.body()
     if (body.switch().value !== StellarXdr.OperationType.invokeHostFunction().value) {
@@ -160,13 +184,14 @@ export function charge(parameters: charge.Parameters) {
     decimals = DEFAULT_DECIMALS,
     keypair: keypairParam,
     mode: defaultMode = 'pull',
+    network: pinnedNetwork,
     onProgress,
     pollDelayMs = DEFAULT_POLL_DELAY_MS,
     pollMaxAttempts = DEFAULT_POLL_MAX_ATTEMPTS,
     pollTimeoutMs = DEFAULT_POLL_TIMEOUT_MS,
     rpcUrl,
     secretKey,
-    simulationTimeoutMs: _simulationTimeoutMs = DEFAULT_SIMULATION_TIMEOUT_MS,
+    simulationTimeoutMs = DEFAULT_SIMULATION_TIMEOUT_MS,
     timeout = DEFAULT_TIMEOUT,
     useUpgradedAuth = false,
   } = parameters
@@ -187,6 +212,15 @@ export function charge(parameters: charge.Parameters) {
 
       const network = resolveNetworkId(request.methodDetails?.network)
 
+      // A pinned client signs for one network only: a challenge advertising
+      // any other is rejected before any chain state is read.
+      if (pinnedNetwork && network !== pinnedNetwork) {
+        throw new StellarMppError(
+          `Network mismatch: server advertised "${network}" ` +
+            `but this client is pinned to "${pinnedNetwork}".`,
+        )
+      }
+
       onProgress?.({
         type: 'challenge',
         recipient,
@@ -197,6 +231,14 @@ export function charge(parameters: charge.Parameters) {
       const resolvedRpcUrl = rpcUrl ?? SOROBAN_RPC_URLS[network]
       const networkPassphrase = NETWORK_PASSPHRASE[network]
       const server = new rpc.Server(resolvedRpcUrl)
+
+      // A caller-supplied endpoint is confirmed to serve the resolved network
+      // before anything is simulated, so the resource footprint, fees and
+      // authorization validity window are read from the chain the transfer is
+      // signed for. A URL the SDK derived from the network is bound already.
+      if (rpcUrl) {
+        await assertRpcServesNetwork(server, rpcUrl, network, simulationTimeoutMs)
+      }
 
       // Validate the counterparty-supplied amount before converting it: an
       // out-of-range or malformed value would otherwise surface as an untyped
@@ -215,6 +257,9 @@ export function charge(parameters: charge.Parameters) {
         from: clientKP.publicKey(),
         to: recipient,
         amount: stellarAmount,
+        // Equal to `network` once the pin check above has passed; taking it
+        // from the pin keeps the signing guard independent of that check.
+        networkPassphrase: NETWORK_PASSPHRASE[pinnedNetwork ?? network],
       }
 
       const effectiveMode = context?.mode ?? defaultMode
@@ -298,16 +343,16 @@ export function charge(parameters: charge.Parameters) {
             latestLedger.sequence + Math.ceil(timeout / DEFAULT_LEDGER_CLOSE_TIME) + 10
         }
 
-        onProgress?.({ type: 'signing' })
-
         // Sign only the Soroban authorization entries — do NOT sign the
         // transaction envelope (the server will do that after rebuilding).
         const envelope = prepared.toEnvelope()
         const v1 = envelope.v1()
 
-        // Confirm the simulated auth tree is exactly the intended transfer
-        // before authorizing any entry.
-        assertTransactionAuthorizesOnlyTransfer(v1.tx(), expectedTransfer)
+        // Confirm the simulated auth tree is exactly the intended transfer, on
+        // the network the entries are signed for, before authorizing any entry.
+        assertTransactionAuthorizesOnlyTransfer(v1.tx(), networkPassphrase, expectedTransfer)
+
+        onProgress?.({ type: 'signing' })
 
         for (const op of v1.tx().operations()) {
           const body = op.body()
@@ -374,8 +419,13 @@ export function charge(parameters: charge.Parameters) {
       const prepared = await server.prepareTransaction(transaction)
 
       // The envelope signature authorizes the entire Soroban auth tree, so
-      // confirm it is exactly the intended transfer before signing.
-      assertTransactionAuthorizesOnlyTransfer(prepared.toEnvelope().v1().tx(), expectedTransfer)
+      // confirm it is exactly the intended transfer, on the intended network,
+      // before signing.
+      assertTransactionAuthorizesOnlyTransfer(
+        prepared.toEnvelope().v1().tx(),
+        prepared.networkPassphrase,
+        expectedTransfer,
+      )
 
       onProgress?.({ type: 'signing' })
       prepared.sign(clientKP)
@@ -446,7 +496,20 @@ export declare namespace charge {
     keypair?: Keypair
     /** Number of decimal places for the token. @default 7 */
     decimals?: number
-    /** Custom Soroban RPC URL. Defaults based on network. */
+    /**
+     * Network this client signs for (e.g. `'stellar:testnet'`).
+     *
+     * When set, a challenge advertising any other network is rejected before
+     * any chain state is read. When omitted, the network is taken from the
+     * challenge. Pin it whenever the key holds value on more than one network.
+     */
+    network?: NetworkId
+    /**
+     * Custom Soroban RPC URL. Defaults based on network.
+     *
+     * A URL supplied here is checked against the resolved network before any
+     * chain state is read from it, and rejected if it serves a different one.
+     */
     rpcUrl?: string
     /**
      * Controls how the charge transaction is submitted.
@@ -468,7 +531,10 @@ export declare namespace charge {
     pollDelayMs?: number
     /** Overall poll timeout in ms. @default 20_000 */
     pollTimeoutMs?: number
-    /** Simulation timeout in ms. @default 10_000 */
+    /**
+     * Timeout in ms for the check that a caller-supplied `rpcUrl` serves the
+     * expected network. @default 10_000
+     */
     simulationTimeoutMs?: number
     /**
      * Ask simulation to record CAP-71 `SOROBAN_CREDENTIALS_ADDRESS_V2`

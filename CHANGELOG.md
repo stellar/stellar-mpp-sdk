@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Pin the charge client to a network, and verify signatures with the network's own rules [#96](https://github.com/stellar/stellar-mpp-sdk/pull/96)
+  - Charge client: an optional `network` parameter rejects a challenge that advertises any other network before chain state is read, matching the pinning on the channel client; the signing guard also checks the network the prepared transaction is bound to, on both signing paths. Unpinned clients keep adopting the network the server advertises
+  - Charge client: a caller-supplied `rpcUrl` is confirmed to serve the resolved network before anything is simulated, and the check is bounded by `simulationTimeoutMs`. Default endpoints are derived from the network and need no check
+  - Add `parseNetworkId` to `@stellar/mpp/env`, reading `STELLAR_NETWORK` (default `stellar:testnet`); the charge, fee-bump and channel client examples pin it
+  - Changed: signature checks on channel vouchers, charge authorization entries and push-mode source signatures follow the Soroban host's verification rules, so the SDK's verdict matches the network's. `@noble/ed25519` and `@noble/hashes`, already in the tree through `@stellar/stellar-sdk`, become direct dependencies
 - Keep the latest accepted channel commitment on the server and add helpers to close the channel with it [#92](https://github.com/stellar/stellar-mpp-sdk/pull/92)
   - The commitment signature is stored next to the cumulative amount; `getLatestCommitment()` reads the pair. Records written by earlier versions have no signature until the next accepted voucher; closing such a record latches the channel and throws, and the operator supplies the signature to `close()` by hand
   - `closeWithLatestCommitment()` stops voucher acceptance and selects the pair in one atomic store update, so every voucher is either covered by the close or rejected. It reads the chain first and returns `null` without sending when a close has started and the stored amount is already withdrawn, so it is safe to call repeatedly and from several instances after any failure

@@ -20,6 +20,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   ALL_ZEROS,
   NETWORK_PASSPHRASE,
+  STELLAR_PUBNET,
   STELLAR_TESTNET,
   USDC_SAC_TESTNET,
 } from '../../constants.js'
@@ -32,6 +33,7 @@ const mockGetLatestLedger = vi.fn()
 const mockSendTransaction = vi.fn()
 const mockGetTransaction = vi.fn()
 const mockSimulateTransaction = vi.fn()
+const mockGetNetwork = vi.fn()
 
 vi.mock('@stellar/stellar-sdk', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@stellar/stellar-sdk')>()
@@ -46,6 +48,7 @@ vi.mock('@stellar/stellar-sdk', async (importOriginal) => {
         this.sendTransaction = mockSendTransaction
         this.getTransaction = mockGetTransaction
         this.simulateTransaction = mockSimulateTransaction
+        this.getNetwork = mockGetNetwork
       }),
     },
   }
@@ -84,19 +87,23 @@ function buildTransferOp() {
   )
 }
 
-/** Wraps an operation in a testnet transaction sourced from `source`. */
-function buildTx(source: string, op: xdr.Operation) {
+/** Wraps an operation in a transaction sourced from `source`, bound to testnet unless told otherwise. */
+function buildTx(
+  source: string,
+  op: xdr.Operation,
+  networkPassphrase: string = NETWORK_PASSPHRASE[STELLAR_TESTNET],
+) {
   return new TransactionBuilder(new Account(source, '0'), {
     fee: '100',
-    networkPassphrase: NETWORK_PASSPHRASE[STELLAR_TESTNET],
+    networkPassphrase,
   })
     .addOperation(op)
     .setTimeout(180)
     .build()
 }
 
-function buildMockPreparedTx() {
-  return buildTx(TEST_KEYPAIR.publicKey(), buildTransferOp())
+function buildMockPreparedTx(networkPassphrase?: string) {
+  return buildTx(TEST_KEYPAIR.publicKey(), buildTransferOp(), networkPassphrase)
 }
 
 function buildMockPrepareTxAuthEntry() {
@@ -915,7 +922,7 @@ describe('charge createCredential', () => {
   it('uses pubnet DID component for public network', async () => {
     const account = new Account(TEST_KEYPAIR.publicKey(), '0')
     mockGetAccount.mockResolvedValueOnce(account)
-    const mockTx = buildMockPreparedTx()
+    const mockTx = buildMockPreparedTx(NETWORK_PASSPHRASE[STELLAR_PUBNET])
     mockPrepareTransaction.mockResolvedValueOnce(await mockTx)
 
     const method = charge({ keypair: TEST_KEYPAIR })
@@ -974,6 +981,253 @@ describe('network validation', () => {
     await expect(
       method.createCredential({ challenge: challenge as any, context: {} as any }),
     ).rejects.toThrow('Unsupported Stellar network identifier: "testnet"')
+  })
+})
+
+describe('network pinning', () => {
+  it('rejects a challenge whose network differs from the pinned network', async () => {
+    mockGetAccount.mockClear()
+    mockPrepareTransaction.mockClear()
+
+    const method = charge({ keypair: TEST_KEYPAIR, network: STELLAR_TESTNET })
+    const challenge = mockChallenge({
+      methodDetails: { network: 'stellar:pubnet' },
+    })
+
+    await expect(
+      method.createCredential({ challenge: challenge as any, context: {} as any }),
+    ).rejects.toThrow(
+      'Network mismatch: server advertised "stellar:pubnet" but this client is pinned to "stellar:testnet".',
+    )
+
+    // Rejected before any chain state is read or anything is signed.
+    expect(mockGetAccount).not.toHaveBeenCalled()
+    expect(mockPrepareTransaction).not.toHaveBeenCalled()
+  })
+
+  it('rejects a challenge that omits the network when the client is pinned to pubnet', async () => {
+    const method = charge({ keypair: TEST_KEYPAIR, network: STELLAR_PUBNET })
+    const challenge = mockChallenge({ methodDetails: {} })
+
+    await expect(
+      method.createCredential({ challenge: challenge as any, context: {} as any }),
+    ).rejects.toThrow('Network mismatch')
+  })
+
+  it('signs when the advertised network matches the pinned network', async () => {
+    mockGetAccount.mockResolvedValueOnce(new Account(TEST_KEYPAIR.publicKey(), '0'))
+    mockPrepareTransaction.mockResolvedValueOnce(await buildMockPreparedTx())
+
+    const method = charge({ keypair: TEST_KEYPAIR, network: STELLAR_TESTNET })
+
+    const credential = await method.createCredential({
+      challenge: mockChallenge() as any,
+      context: {} as any,
+    })
+
+    expect(decodeCredential(credential).payload.type).toBe('transaction')
+  })
+
+  it('signs for pubnet when both the pin and the advertised network are pubnet', async () => {
+    mockGetAccount.mockResolvedValueOnce(new Account(TEST_KEYPAIR.publicKey(), '0'))
+    mockPrepareTransaction.mockResolvedValueOnce(
+      await buildMockPreparedTx(NETWORK_PASSPHRASE[STELLAR_PUBNET]),
+    )
+
+    const method = charge({ keypair: TEST_KEYPAIR, network: STELLAR_PUBNET })
+    const challenge = mockChallenge({ methodDetails: { network: 'stellar:pubnet' } })
+
+    const credential = await method.createCredential({
+      challenge: challenge as any,
+      context: {} as any,
+    })
+
+    expect(decodeCredential(credential).source).toBe(
+      `did:pkh:stellar:pubnet:${TEST_KEYPAIR.publicKey()}`,
+    )
+  })
+
+  it('refuses to sign a prepared transaction bound to another network', async () => {
+    mockGetAccount.mockResolvedValueOnce(new Account(TEST_KEYPAIR.publicKey(), '0'))
+    // The challenge and the pin both say testnet, but the prepared
+    // transaction is bound to pubnet.
+    mockPrepareTransaction.mockResolvedValueOnce(
+      await buildMockPreparedTx(NETWORK_PASSPHRASE[STELLAR_PUBNET]),
+    )
+
+    const method = charge({ keypair: TEST_KEYPAIR, network: STELLAR_TESTNET })
+
+    await expect(
+      method.createCredential({ challenge: mockChallenge() as any, context: {} as any }),
+    ).rejects.toThrow('bound to a different network')
+  })
+
+  it('does not broadcast in push mode when the prepared transaction is bound to another network', async () => {
+    mockSendTransaction.mockClear()
+    mockGetAccount.mockResolvedValueOnce(new Account(TEST_KEYPAIR.publicKey(), '0'))
+    mockPrepareTransaction.mockResolvedValueOnce(
+      await buildMockPreparedTx(NETWORK_PASSPHRASE[STELLAR_PUBNET]),
+    )
+
+    const method = charge({ keypair: TEST_KEYPAIR, network: STELLAR_TESTNET, mode: 'push' })
+    const challenge = mockChallenge({
+      methodDetails: { network: 'stellar:testnet', credentialTypes: ['signedHash'] },
+    })
+
+    await expect(
+      method.createCredential({ challenge: challenge as any, context: {} as any }),
+    ).rejects.toThrow('bound to a different network')
+    expect(mockSendTransaction).not.toHaveBeenCalled()
+  })
+
+  it('signs sponsored auth entries for the pinned network', async () => {
+    mockSponsoredPrepare('address')
+
+    const method = charge({ keypair: TEST_KEYPAIR, network: STELLAR_TESTNET })
+    const credential = await method.createCredential({
+      challenge: mockChallenge({
+        methodDetails: { network: 'stellar:testnet', feePayer: true },
+      }) as any,
+      context: {} as any,
+    })
+
+    const entry = soleAuthEntry(decodeCredentialTx(credential))
+    expectSignedByClient(entry, entry.credentials().address())
+  })
+
+  it('rejects a sponsored challenge whose network differs from the pin before simulating', async () => {
+    mockPrepareTransaction.mockClear()
+    mockSimulateTransaction.mockClear()
+
+    const method = charge({ keypair: TEST_KEYPAIR, network: STELLAR_TESTNET })
+
+    await expect(
+      method.createCredential({
+        challenge: mockChallenge({
+          methodDetails: { network: 'stellar:pubnet', feePayer: true },
+        }) as any,
+        context: {} as any,
+      }),
+    ).rejects.toThrow('Network mismatch')
+    expect(mockPrepareTransaction).not.toHaveBeenCalled()
+    expect(mockSimulateTransaction).not.toHaveBeenCalled()
+  })
+
+  it('refuses a custom rpcUrl that serves a different network on the sponsored path', async () => {
+    mockPrepareTransaction.mockClear()
+    mockGetLatestLedger.mockClear()
+    mockGetNetwork.mockResolvedValueOnce({
+      passphrase: NETWORK_PASSPHRASE[STELLAR_PUBNET],
+      protocolVersion: '22',
+    })
+
+    const method = charge({
+      keypair: TEST_KEYPAIR,
+      network: STELLAR_TESTNET,
+      rpcUrl: 'https://charge-sponsored-mismatch.example.com',
+    })
+
+    await expect(
+      method.createCredential({
+        challenge: mockChallenge({
+          methodDetails: { network: 'stellar:testnet', feePayer: true },
+        }) as any,
+        context: {} as any,
+      }),
+    ).rejects.toThrow('does not serve "stellar:testnet"')
+    expect(mockPrepareTransaction).not.toHaveBeenCalled()
+    expect(mockGetLatestLedger).not.toHaveBeenCalled()
+  })
+
+  it('refuses a custom rpcUrl that serves a different network', async () => {
+    mockGetAccount.mockClear()
+    mockPrepareTransaction.mockClear()
+    mockGetNetwork.mockResolvedValueOnce({
+      passphrase: NETWORK_PASSPHRASE[STELLAR_PUBNET],
+      protocolVersion: '22',
+    })
+
+    const method = charge({
+      keypair: TEST_KEYPAIR,
+      network: STELLAR_TESTNET,
+      rpcUrl: 'https://charge-mismatch.example.com',
+    })
+
+    await expect(
+      method.createCredential({ challenge: mockChallenge() as any, context: {} as any }),
+    ).rejects.toThrow('does not serve "stellar:testnet"')
+
+    // Rejected before any chain state is read from that endpoint.
+    expect(mockGetAccount).not.toHaveBeenCalled()
+    expect(mockPrepareTransaction).not.toHaveBeenCalled()
+  })
+
+  it('checks a custom rpcUrl against the advertised network even without a pin', async () => {
+    mockGetAccount.mockClear()
+    mockGetNetwork.mockResolvedValueOnce({
+      passphrase: NETWORK_PASSPHRASE[STELLAR_PUBNET],
+      protocolVersion: '22',
+    })
+
+    const method = charge({
+      keypair: TEST_KEYPAIR,
+      rpcUrl: 'https://charge-unpinned-mismatch.example.com',
+    })
+
+    await expect(
+      method.createCredential({ challenge: mockChallenge() as any, context: {} as any }),
+    ).rejects.toThrow('does not serve "stellar:testnet"')
+    expect(mockGetAccount).not.toHaveBeenCalled()
+  })
+
+  it('accepts a custom rpcUrl that serves the expected network', async () => {
+    mockGetNetwork.mockResolvedValueOnce({
+      passphrase: NETWORK_PASSPHRASE[STELLAR_TESTNET],
+      protocolVersion: '22',
+    })
+    mockGetAccount.mockResolvedValueOnce(new Account(TEST_KEYPAIR.publicKey(), '0'))
+    mockPrepareTransaction.mockResolvedValueOnce(await buildMockPreparedTx())
+
+    const method = charge({
+      keypair: TEST_KEYPAIR,
+      network: STELLAR_TESTNET,
+      rpcUrl: 'https://charge-match.example.com',
+    })
+
+    const credential = await method.createCredential({
+      challenge: mockChallenge() as any,
+      context: {} as any,
+    })
+
+    expect(decodeCredential(credential).payload.type).toBe('transaction')
+  })
+
+  it('does not query the endpoint when rpcUrl is left to the default', async () => {
+    mockGetNetwork.mockClear()
+    mockGetAccount.mockResolvedValueOnce(new Account(TEST_KEYPAIR.publicKey(), '0'))
+    mockPrepareTransaction.mockResolvedValueOnce(await buildMockPreparedTx())
+
+    const method = charge({ keypair: TEST_KEYPAIR, network: STELLAR_TESTNET })
+
+    await method.createCredential({ challenge: mockChallenge() as any, context: {} as any })
+
+    // A default URL is derived from the resolved network, so it needs no check.
+    expect(mockGetNetwork).not.toHaveBeenCalled()
+  })
+
+  it('bounds the endpoint check by simulationTimeoutMs', async () => {
+    mockGetNetwork.mockReturnValueOnce(new Promise(() => {}))
+
+    const method = charge({
+      keypair: TEST_KEYPAIR,
+      network: STELLAR_TESTNET,
+      rpcUrl: 'https://charge-hangs.example.com',
+      simulationTimeoutMs: 10,
+    })
+
+    await expect(
+      method.createCredential({ challenge: mockChallenge() as any, context: {} as any }),
+    ).rejects.toThrow('RPC network identification timed out')
   })
 })
 

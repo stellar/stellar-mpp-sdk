@@ -1,12 +1,12 @@
 import {
   Address,
-  Keypair,
   StrKey,
   buildAuthorizationEntryPreimage,
   hash,
   scValToNative,
   xdr,
 } from '@stellar/stellar-sdk'
+import { verifyStrict } from './ed25519.js'
 import { StellarMppError } from './errors.js'
 import { getAddressCredentials } from './getAddressCredentials.js'
 
@@ -20,8 +20,9 @@ import { getAddressCredentials } from './getAddressCredentials.js'
  * guarantee independent of the RPC's auth-mode semantics, fails fast before the
  * rebuild-and-simulate round trip, and surfaces a precise error instead of a
  * generic simulation failure. It reconstructs the same preimage `authorizeEntry`
- * signs and the network validates, so an entry that passes here will not be
- * rejected on-chain for a bad authorization signature.
+ * signs and the network validates, and checks the signature with the network's
+ * own verification rules, so an entry that passes here will not be rejected
+ * on-chain for a bad authorization signature.
  *
  * Only stellar-account (ed25519) authorizers are supported, matching the
  * credentials the charge client emits. Source-account and contract (custom
@@ -77,7 +78,7 @@ export function verifyAuthEntrySignature(
         { authorizer: authorizerPublicKey, signer: publicKey },
       )
     }
-    if (!Keypair.fromPublicKey(publicKey).verify(payload, signature)) {
+    if (!verifyStrict(payload, signature, StrKey.decodeEd25519PublicKey(publicKey))) {
       throw new StellarMppError('Auth entry signature does not match the authorization payload.', {
         authorizer: authorizerPublicKey,
       })

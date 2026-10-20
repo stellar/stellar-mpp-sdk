@@ -4,6 +4,7 @@ import {
   BASE_FEE,
   FeeBumpTransaction,
   Keypair,
+  StrKey,
   Transaction,
   TransactionBuilder,
   rpc,
@@ -25,6 +26,7 @@ import {
 import * as Methods from '../Methods.js'
 import { toBaseUnits } from '../Methods.js'
 import { scValToBigInt } from '../../shared/scval.js'
+import { verifyStrict } from '../../shared/ed25519.js'
 import { resolveKeypair } from '../../shared/keypairs.js'
 import { pollTransaction } from '../../shared/poll.js'
 import { wrapFeeBump } from '../../shared/fee-bump.js'
@@ -367,9 +369,10 @@ export function charge(parameters: charge.Parameters) {
           // submitted tx hash, so the claimed source must control the payer account.
           const bindingMessage = Buffer.from(`${challenge.id}:${hash}`)
           try {
-            const isValid = Keypair.fromPublicKey(expectedFrom).verify(
+            const isValid = verifyStrict(
               bindingMessage,
               Buffer.from(payload.sourceSignature, 'hex'),
+              StrKey.decodeEd25519PublicKey(expectedFrom),
             )
             if (!isValid) {
               throw new PaymentVerificationError(

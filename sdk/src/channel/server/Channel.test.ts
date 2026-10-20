@@ -9,6 +9,7 @@ import {
   xdr,
 } from '@stellar/stellar-sdk'
 import { STELLAR_TESTNET } from '../../constants.js'
+import { signWithTorsionedNonce } from '../../shared/ed25519.test-helpers.js'
 import { buildCommitmentMessage } from '../commitment.js'
 import { Challenge, Credential, Store } from 'mppx'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -691,6 +692,39 @@ describe('stellar server channel verification', () => {
         request: credential.challenge.request,
       }),
     ).rejects.toThrow('Commitment signature verification failed')
+  })
+
+  it('rejects a voucher signature the channel contract would not accept', async () => {
+    // The nonce point has a small-order component, which the strict verifier
+    // the channel contract runs rejects. The server applies the same rule, so
+    // it never accepts a voucher the channel cannot settle.
+    const signature = signWithTorsionedNonce(
+      COMMITMENT_KEY,
+      buildCommitmentMessage({
+        channel: CHANNEL_ADDRESS,
+        amount: 1_000_000n,
+        network: STELLAR_TESTNET,
+      }),
+    )
+    const credential = makeCredential({
+      amount: '1000000',
+      challengeAmount: '1000000',
+      signature: signature.toString('hex'),
+    })
+
+    const method = channel({
+      channel: CHANNEL_ADDRESS,
+      checkOnChainState: false,
+      commitmentKey: COMMITMENT_KEY,
+      store: Store.memory(),
+    })
+
+    await expect(
+      method.verify({
+        credential: credential as any,
+        request: credential.challenge.request,
+      }),
+    ).rejects.toThrow(ChannelVerificationError)
   })
 
   it('verifies the commitment signature before querying on-chain state', async () => {

@@ -229,7 +229,7 @@ const data = await response.json()
 | `@stellar/mpp/channel`        | `channel` (method schema)                                                                                                                                                                                                                                                                                                                                                     |
 | `@stellar/mpp/channel/client` | `stellar`, `channel`, `Mppx`                                                                                                                                                                                                                                                                                                                                                  |
 | `@stellar/mpp/channel/server` | `stellar`, `channel`, `close`, `closeWithLatestCommitment`, `getLatestCommitment`, `getChannelState`, `watchChannel`, `resolveKeypair`, `Mppx`, `Store`, `Expires`, `ChannelState` (type), `ChannelEvent` (type)                                                                                                                                                              |
-| `@stellar/mpp/env`            | `parseRequired`, `parseOptional`, `parsePort`, `parseStellarPublicKey`, `parseStellarSecretKey`, `parseContractAddress`, `parseHexKey`, `parseCommaSeparatedList`, `parseNumber`                                                                                                                                                                                              |
+| `@stellar/mpp/env`            | `parseRequired`, `parseOptional`, `parsePort`, `parseStellarPublicKey`, `parseStellarSecretKey`, `parseContractAddress`, `parseHexKey`, `parseNetworkId`, `parseCommaSeparatedList`, `parseNumber`                                                                                                                                                                            |
 
 ### Server options (charge)
 
@@ -261,13 +261,14 @@ stellar.charge({
   keypair?: Keypair,              // Stellar Keypair (or use secretKey)
   secretKey?: string,             // Stellar secret key (S...)
   mode?: 'push' | 'pull',        // default: 'pull'
+  network?: 'stellar:testnet' | 'stellar:pubnet', // pin the network (default: the network the server advertises)
   timeout?: number,               // tx timeout in seconds (default: 180)
   decimals?: number,              // default: 7
-  rpcUrl?: string,                // custom Soroban RPC URL
+  rpcUrl?: string,                // custom Soroban RPC URL, checked to serve the resolved network
   pollMaxAttempts?: number,       // max polling attempts (default: 20)
   pollDelayMs?: number,           // delay between poll attempts in ms (default: 1,000)
   pollTimeoutMs?: number,         // overall poll timeout in ms (default: 20,000)
-  simulationTimeoutMs?: number,   // simulation timeout in ms (default: 10,000)
+  simulationTimeoutMs?: number,   // timeout for the rpcUrl network check in ms (default: 10,000)
   useUpgradedAuth?: boolean,      // request CAP-71 V2 auth entries in sponsored flows (default: false)
   onProgress?: (event) => void,   // lifecycle callback
 })
@@ -510,7 +511,7 @@ Example `.env` files are provided for each demo:
 | File                                   | Purpose                                             |
 | -------------------------------------- | --------------------------------------------------- |
 | `examples/.env.charge-server.example`  | Charge server (recipient key, security settings)    |
-| `examples/.env.charge-client.example`  | Charge client (secret key, server URL)              |
+| `examples/.env.charge-client.example`  | Charge client (secret key, server URL, network)     |
 | `examples/.env.channel-server.example` | Channel server (contract, commitment key, security) |
 | `examples/.env.channel-client.example` | Channel client (commitment secret, server URL)      |
 

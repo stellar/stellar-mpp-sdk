@@ -21,6 +21,7 @@ import { Mppx } from 'mppx/server'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ALL_ZEROS, USDC_SAC_TESTNET } from '../../constants.js'
 import { DEFAULT_POLL_MAX_ATTEMPTS } from '../../shared/defaults.js'
+import { signWithTorsionedNonce } from '../../shared/ed25519.test-helpers.js'
 import { PaymentVerificationError } from '../../shared/errors.js'
 
 const mockGetTransaction = vi.fn()
@@ -1487,6 +1488,61 @@ describe('charge hash format validation', () => {
 })
 
 describe('charge push-mode: source signature binding', () => {
+  it('rejects a sourceSignature with a small-order nonce component', async () => {
+    const client = PAYER
+    const tx = buildTransferTx({
+      source: client.publicKey(),
+      from: client.publicKey(),
+      to: RECIPIENT,
+      amount: 10000000n,
+      currency: USDC_SAC_TESTNET,
+    })
+    tx.sign(client)
+
+    mockGetTransaction.mockResolvedValueOnce({
+      status: 'SUCCESS',
+      envelopeXdr: tx.toXDR(),
+    })
+
+    const challenge = Challenge.from({
+      id: `test-${crypto.randomUUID()}`,
+      realm: 'localhost',
+      method: 'stellar',
+      intent: 'charge',
+      request: {
+        amount: '10000000',
+        currency: USDC_SAC_TESTNET,
+        recipient: RECIPIENT,
+        methodDetails: { network: 'stellar:testnet' },
+      },
+    })
+    const hash = testHash('strict-sig-hash')
+    const cred = Object.assign(
+      Credential.from({
+        challenge,
+        payload: {
+          type: 'signedHash',
+          hash,
+          sourceSignature: signWithTorsionedNonce(
+            client,
+            Buffer.from(`${challenge.id}:${hash}`),
+          ).toString('hex'),
+        },
+      }),
+      { source: `did:pkh:stellar:testnet:${client.publicKey()}` },
+    )
+
+    const method = charge({
+      recipient: RECIPIENT,
+      currency: USDC_SAC_TESTNET,
+      store: Store.memory(),
+    })
+
+    await expect(
+      method.verify({ credential: cred as any, request: cred.challenge.request }),
+    ).rejects.toThrow('Source signature does not authorize this payment')
+  })
+
   it('rejects push-mode credential with invalid sourceSignature', async () => {
     const client = PAYER
     const tx = buildTransferTx({

@@ -37,6 +37,7 @@ import {
   SettlementError,
 } from '../../shared/errors.js'
 import { wrapFeeBump } from '../../shared/fee-bump.js'
+import { verifyStrict } from '../../shared/ed25519.js'
 import { resolveKeypair } from '../../shared/keypairs.js'
 import { noopLogger, type Logger } from '../../shared/logger.js'
 import { pollTransaction, TransactionFailedError } from '../../shared/poll.js'
@@ -801,8 +802,9 @@ export function channel(parameters: channel.Parameters) {
       amount: commitmentAmount,
       network,
     })
-    // Equal to the on-chain CommitmentKey, checked above.
-    const valid = configuredCommitmentKP.verify(commitmentBytes, signatureBytes)
+    // Checked with the contract's own verification rules, against the on-chain
+    // key, so an accepted voucher is one the contract settles.
+    const valid = verifyStrict(commitmentBytes, signatureBytes, rawCommitmentKey)
 
     if (!valid) {
       throw new ChannelVerificationError(
