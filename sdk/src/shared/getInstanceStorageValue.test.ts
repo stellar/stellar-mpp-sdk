@@ -1,7 +1,7 @@
 import { Address, Keypair, StrKey, xdr } from '@stellar/stellar-sdk'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { getInstanceStorageValue } from './getInstanceStorageValue.js'
+import { getInstanceStorageEntry, getInstanceStorageValue } from './getInstanceStorageValue.js'
 
 const mockGetLedgerEntries = vi.fn()
 const rpcServer = { getLedgerEntries: mockGetLedgerEntries } as any
@@ -104,4 +104,61 @@ describe('getInstanceStorageValue', () => {
     )
     expect(present?.u32()).toBe(42)
   })
+})
+
+describe('getInstanceStorageEntry', () => {
+  beforeEach(() => {
+    mockGetLedgerEntries.mockReset()
+  })
+
+  it('returns the value together with the ledger the read was served at', async () => {
+    mockGetLedgerEntries.mockResolvedValue({
+      ...instanceResponse([[variant('CloseEffectiveAtLedger'), xdr.ScVal.scvU32(42)]]),
+      latestLedger: 4321,
+    })
+
+    const entry = await getInstanceStorageEntry(
+      rpcServer,
+      CHANNEL_ADDRESS,
+      TIMEOUT_MS,
+      'CloseEffectiveAtLedger',
+    )
+
+    expect(entry.value?.u32()).toBe(42)
+    expect(entry.latestLedger).toBe(4321)
+    expect(entry.instanceFound).toBe(true)
+    expect(mockGetLedgerEntries).toHaveBeenCalledOnce()
+  })
+
+  it('reports a present instance that lacks the key', async () => {
+    mockGetLedgerEntries.mockResolvedValue({
+      ...instanceResponse([[variant('Token'), Address.fromString(CHANNEL_ADDRESS).toScVal()]]),
+      latestLedger: 4322,
+    })
+
+    const entry = await getInstanceStorageEntry(
+      rpcServer,
+      CHANNEL_ADDRESS,
+      TIMEOUT_MS,
+      'CloseEffectiveAtLedger',
+    )
+
+    expect(entry).toEqual({ value: null, latestLedger: 4322, instanceFound: true })
+  })
+
+  it.each([{ entries: [] }, { entries: undefined }])(
+    'reports a missing instance entry with the ledger: $entries',
+    async ({ entries }) => {
+      mockGetLedgerEntries.mockResolvedValue({ entries, latestLedger: 777 })
+
+      const entry = await getInstanceStorageEntry(
+        rpcServer,
+        CHANNEL_ADDRESS,
+        TIMEOUT_MS,
+        'CloseEffectiveAtLedger',
+      )
+
+      expect(entry).toEqual({ value: null, latestLedger: 777, instanceFound: false })
+    },
+  )
 })

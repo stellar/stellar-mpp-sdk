@@ -45,3 +45,10 @@ export class SettlementError extends StellarMppError {
 }
 
 export class ChannelVerificationError extends StellarMppError {}
+
+/**
+ * `closeWithLatestCommitment()` has already sent `maxCloseSends` close
+ * transactions for the channel. Nothing more is sent until an operator
+ * reconciles the channel against the chain.
+ */
+export class CloseSendLimitError extends ChannelVerificationError {}

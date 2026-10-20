@@ -2,22 +2,38 @@ import { Address, rpc, xdr } from '@stellar/stellar-sdk'
 
 import { withTimeout } from './timeout.js'
 
+/** A value read from a contract's instance storage and the ledger the read was served at. */
+export type InstanceStorageEntry = {
+  /** The stored value, or null when the key is absent. */
+  value: xdr.ScVal | null
+  /** Latest ledger sequence at the time of the read, as reported by the RPC server. */
+  latestLedger: number
+  /**
+   * Whether the contract instance entry itself was found. False when the
+   * contract is archived or the address is wrong, which a caller may need to
+   * tell apart from an instance that merely lacks the key.
+   */
+  instanceFound: boolean
+}
+
 /**
- * Returns the value of the key specified from the contract's DataKey in the instance storage.
+ * Reads the value stored under the given DataKey in the contract's instance
+ * storage, together with the ledger the read was served at, so callers can
+ * date the value they observed.
  *
  * @param server - The RPC server instance to query.
  * @param channelAddress - The address of the channel contract.
- * @param simulationTimeoutMs - Timeout for the simulation in milliseconds.
+ * @param simulationTimeoutMs - Timeout for the read in milliseconds.
  * @param key - The name of the key to retrieve from the instance storage.
- * @returns ScVal or null if not found.
+ * @returns The value (or null if not found), whether the instance entry exists,
+ *   and the RPC server's latest ledger.
  */
-
-export async function getInstanceStorageValue(
+export async function getInstanceStorageEntry(
   server: rpc.Server,
   channelAddress: string,
   simulationTimeoutMs: number,
   key: string,
-): Promise<xdr.ScVal | null> {
+): Promise<InstanceStorageEntry> {
   const contractId = Address.fromString(channelAddress)
   const instanceKey = xdr.LedgerKey.contractData(
     new xdr.LedgerKeyContractData({
@@ -32,31 +48,49 @@ export async function getInstanceStorageValue(
     simulationTimeoutMs,
     `getLedgerEntries for channel ${channelAddress}`,
   )
+  const latestLedger = response.latestLedger
   if (!response.entries || response.entries.length === 0) {
-    return null
+    return { value: null, latestLedger, instanceFound: false }
   }
 
   const entry = response.entries[0]
   const ledgerData = entry.val
   const contractData = ledgerData?.contractData?.()
-  if (!contractData) return null
+  if (!contractData) return { value: null, latestLedger, instanceFound: true }
   const instance = contractData.val?.()?.instance?.()
-  if (!instance) return null
+  if (!instance) return { value: null, latestLedger, instanceFound: true }
   const instanceStorage = instance.storage()
 
-  if (!instanceStorage) return null
+  if (!instanceStorage) return { value: null, latestLedger, instanceFound: true }
 
   // Search for the requested DataKey variant in the instance storage map.
   // Soroban encodes simple enum variants as ScVal::Vec([ScVal::Symbol(name)])
-  for (const entry of instanceStorage) {
-    const entryKey = entry.key()
-    if (isEnumVariant(entryKey, key)) {
-      const val = entry.val()
-      return val
+  for (const item of instanceStorage) {
+    if (isEnumVariant(item.key(), key)) {
+      return { value: item.val(), latestLedger, instanceFound: true }
     }
   }
 
-  return null
+  return { value: null, latestLedger, instanceFound: true }
+}
+
+/**
+ * Returns the value of the key specified from the contract's DataKey in the instance storage.
+ *
+ * @param server - The RPC server instance to query.
+ * @param channelAddress - The address of the channel contract.
+ * @param simulationTimeoutMs - Timeout for the simulation in milliseconds.
+ * @param key - The name of the key to retrieve from the instance storage.
+ * @returns ScVal or null if not found.
+ */
+export async function getInstanceStorageValue(
+  server: rpc.Server,
+  channelAddress: string,
+  simulationTimeoutMs: number,
+  key: string,
+): Promise<xdr.ScVal | null> {
+  const { value } = await getInstanceStorageEntry(server, channelAddress, simulationTimeoutMs, key)
+  return value
 }
 
 /**

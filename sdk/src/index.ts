@@ -40,5 +40,7 @@ export {
   StellarMppError,
   PaymentVerificationError,
   ChannelVerificationError,
+  CloseSendLimitError,
   SettlementError,
 } from './shared/errors.js'
+export { PollMaxAttemptsError, PollTimeoutError, TransactionFailedError } from './shared/poll.js'
