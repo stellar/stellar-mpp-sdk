@@ -179,7 +179,7 @@ const mppx = Mppx.create({
   methods: [
     stellar.channel({
       channel: 'CABC...', // deployed one-way-channel contract address
-      commitmentKey: 'GFUNDER...', // ed25519 public key for verifying commitments
+      commitmentKey: 'GFUNDER...', // must match the channel's on-chain commitment_key
       store: Store.memory(), // tracks cumulative amounts + replay protection
       network: 'testnet',
     }),
@@ -278,7 +278,7 @@ stellar.charge({
 ```ts
 stellar.channel({
   channel: string,                // on-chain channel contract address (C...)
-  commitmentKey: string | Keypair,// ed25519 public key for verifying commitments
+  commitmentKey: string | Keypair,// must match the channel's on-chain commitment_key
   network?: 'stellar:testnet' | 'stellar:pubnet', // default: 'stellar:testnet'
   decimals?: number,              // default: 7
   rpcUrl?: string,                // custom Soroban RPC URL
@@ -439,8 +439,10 @@ Payment channels allow many off-chain micro-payments with minimal on-chain trans
 - The client signs cumulative commitment amounts off-chain using the ed25519 commitment key
 - The client should pin the channel contract with `allowedChannels` so it only signs for trusted channel addresses
 - The client builds the commitment message locally from the pinned channel, the intended cumulative amount, the expected network, and the channel domain separator, so it never signs bytes that another party supplied
-- The server builds the same message locally and checks the ed25519 signature against it. Signature verification makes no RPC call
-- When `checkOnChainState` is enabled (the default), the server also reads the channel state on-chain after the signature check. That read is the only RPC call left in the verification path, and `verifyMaxConcurrent` limits how many run at the same time
+- The client adds each payment to the lower of two values: the highest cumulative that it signed, and the cumulative in the server challenge. If the challenge has no `cumulativeAmount`, the client uses only its local value. The SDK server always sends it
+- Concurrent payments on one channel can need more retries. Send payments on one channel one at a time, or increase `maxPaymentRetries` on the mppx client. For concurrent payments, use a client store with an atomic `update`
+- The server builds the same message locally and checks the ed25519 signature against the `CommitmentKey` stored in the contract's instance storage. The server reads that key once and caches it, so after the first voucher signature verification makes no RPC call. A configured `commitmentKey` that differs from the on-chain key fails closed: every voucher is rejected, since the contract would never settle them
+- When `checkOnChainState` is enabled (the default), the server also reads the channel state on-chain after the signature check. That read is the only per-voucher RPC call in the verification path, and `verifyMaxConcurrent` limits how many run at the same time
 - An atomic `Store` is required on the server to track cumulative amounts and channel lifecycle state across requests
 - The server can call `close()` on-chain at any time to settle accumulated payments
 
