@@ -1141,6 +1141,48 @@ describe('stellar server channel verification', () => {
     expect((error as SettlementError).details).toEqual({ details: 'RPC down' })
   })
 
+  it('bounds a hung close broadcast with simulationTimeoutMs and reports a settlement failure', async () => {
+    const signerKp = Keypair.random()
+    const commitmentBytes = Buffer.from('close-send-hangs')
+    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
+    mockGetAccount.mockResolvedValueOnce(new Account(signerKp.publicKey(), '52'))
+    mockPrepareTransaction.mockImplementationOnce((tx: any) => tx)
+    mockSendTransaction.mockReturnValueOnce(new Promise<never>(() => {}))
+
+    const credential = makeSignedCredential({
+      action: 'close',
+      cumulativeAmount: 5000000n,
+      challengeAmount: '5000000',
+    })
+
+    const method = channel({
+      channel: CHANNEL_ADDRESS,
+      checkOnChainState: false,
+      commitmentKey: COMMITMENT_KEY,
+      feePayer: { envelopeSigner: signerKp },
+      simulationTimeoutMs: 1,
+      store: Store.memory(),
+    })
+
+    const error = await method
+      .verify({
+        credential: credential as any,
+        request: credential.challenge.request,
+      })
+      .catch((e: unknown) => e)
+
+    // The request may have reached the network, so the outcome is unknown and
+    // it is reported like any other failed broadcast, not as a rejected credential.
+    expect(error).toBeInstanceOf(SettlementError)
+    expect((error as SettlementError).message).toBe(
+      '[stellar:channel] Close broadcast failed: could not broadcast transaction.',
+    )
+    expect((error as SettlementError).details).toEqual({
+      details: `sendTransaction for close on channel ${CHANNEL_ADDRESS} timed out after 1ms`,
+    })
+    expect(mockGetTransaction).not.toHaveBeenCalled()
+  })
+
   it('rejects close when sendTransaction returns TRY_AGAIN_LATER', async () => {
     const signerKp = Keypair.random()
     const commitmentBytes = Buffer.from('close-tryagain-bytes')

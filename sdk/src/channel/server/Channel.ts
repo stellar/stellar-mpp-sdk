@@ -907,10 +907,13 @@ export function channel(parameters: channel.Parameters) {
    * Broadcasts a transaction via Soroban RPC, polls for confirmation, and
    * returns the transaction hash on success.
    *
+   * The send is bounded by `simulationTimeoutMs`; a timeout is reported as a
+   * settlement failure because the request may have reached the network.
+   *
    * @param tx - The signed transaction (or FeeBumpTransaction) to submit.
    * @param label - Action label for error messages (e.g. "Close").
-   * @throws {SettlementError} If the broadcast throws or returns a non-PENDING
-   *   status, or if polling does not confirm the transaction.
+   * @throws {SettlementError} If the broadcast throws, times out or returns a
+   *   non-PENDING status, or if polling does not confirm the transaction.
    */
   async function broadcastAndPoll(
     tx: Transaction | FeeBumpTransaction,
@@ -919,7 +922,11 @@ export function channel(parameters: channel.Parameters) {
     logger.debug(`${LOG_PREFIX} Broadcasting ${label.toLowerCase()} tx...`)
     let sendResult: rpc.Api.SendTransactionResponse
     try {
-      sendResult = await rpcServer.sendTransaction(tx)
+      sendResult = await withTimeout(
+        rpcServer.sendTransaction(tx),
+        simulationTimeoutMs,
+        `sendTransaction for ${label.toLowerCase()} on channel ${channelAddress}`,
+      )
     } catch (error) {
       throw new SettlementError(
         `${LOG_PREFIX} ${label} broadcast failed: could not broadcast transaction.`,
