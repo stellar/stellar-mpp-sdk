@@ -110,6 +110,19 @@ function makeLedgerEntryWithCloseEffective(ledgerValue: number) {
   return { entries: [{ val: entryData, lastModifiedLedgerSeq: 100 }] }
 }
 
+/** Builds the contract-data ledger entry stored under the channel's instance key. */
+function makeContractDataEntry(val: xdr.ScVal) {
+  return xdr.LedgerEntryData.contractData(
+    new xdr.ContractDataEntry({
+      ext: xdr.ExtensionPoint.fromXDR(Buffer.alloc(4, 0), 'raw'),
+      contract: Address.fromString(CHANNEL_ADDRESS).toScAddress(),
+      key: xdr.ScVal.scvLedgerKeyContractInstance(),
+      durability: xdr.ContractDataDurability.persistent(),
+      val,
+    }),
+  )
+}
+
 function makeLedgerEntryWithoutCloseEffective() {
   const instance = new xdr.ScContractInstance({
     executable: xdr.ContractExecutable.contractExecutableWasm(Buffer.alloc(32)),
@@ -238,8 +251,26 @@ describe('getChannelState', () => {
     expect(state.deposited).toBe(5_000_000n)
   })
 
-  it.each([{ entries: [] }, { entries: undefined }])(
-    'rejects when the channel instance entry is missing: $entries',
+  it.each([
+    { name: 'no entries', entries: [] },
+    { name: 'undefined entries', entries: undefined },
+    {
+      name: 'a ledger entry that is not contract data',
+      entries: [
+        {
+          val: xdr.LedgerEntryData.ttl(
+            new xdr.TtlEntry({ keyHash: Buffer.alloc(32), liveUntilLedgerSeq: 1 }),
+          ),
+          lastModifiedLedgerSeq: 100,
+        },
+      ],
+    },
+    {
+      name: 'a contract data value that is not a contract instance',
+      entries: [{ val: makeContractDataEntry(xdr.ScVal.scvU32(1)), lastModifiedLedgerSeq: 100 }],
+    },
+  ])(
+    'rejects when the channel instance entry is missing or unreadable: $name',
     async ({ entries }) => {
       setupSimulations({
         balance: 1_000_000n,

@@ -9,9 +9,10 @@ export type InstanceStorageEntry = {
   /** Latest ledger sequence at the time of the read, as reported by the RPC server. */
   latestLedger: number
   /**
-   * Whether the contract instance entry itself was found. False when the
-   * contract is archived or the address is wrong, which a caller may need to
-   * tell apart from an instance that merely lacks the key.
+   * Whether a readable contract instance entry was found. False when no entry
+   * comes back (archived contract, wrong address) and when the entry is not a
+   * contract instance, which a caller may need to tell apart from an instance
+   * that merely lacks the key.
    */
   instanceFound: boolean
 }
@@ -49,18 +50,18 @@ export async function getInstanceStorageEntry(
     `getLedgerEntries for channel ${channelAddress}`,
   )
   const latestLedger = response.latestLedger
-  if (!response.entries || response.entries.length === 0) {
-    return { value: null, latestLedger, instanceFound: false }
-  }
+  const notFound: InstanceStorageEntry = { value: null, latestLedger, instanceFound: false }
+  if (!response.entries || response.entries.length === 0) return notFound
 
-  const entry = response.entries[0]
-  const ledgerData = entry.val
-  const contractData = ledgerData?.contractData?.()
-  if (!contractData) return { value: null, latestLedger, instanceFound: true }
-  const instance = contractData.val?.()?.instance?.()
-  if (!instance) return { value: null, latestLedger, instanceFound: true }
-  const instanceStorage = instance.storage()
+  // An entry that is not a contract instance cannot be read as one, so it is
+  // reported as not found rather than as an instance that lacks the key.
+  const ledgerData = response.entries[0].val
+  if (ledgerData?.switch().value !== xdr.LedgerEntryType.contractData().value) return notFound
+  const stored = ledgerData.contractData().val()
+  if (stored.switch().value !== xdr.ScValType.scvContractInstance().value) return notFound
+  const instanceStorage = stored.instance().storage()
 
+  // An instance may have no storage map at all: it exists, but holds no key.
   if (!instanceStorage) return { value: null, latestLedger, instanceFound: true }
 
   // Search for the requested DataKey variant in the instance storage map.
