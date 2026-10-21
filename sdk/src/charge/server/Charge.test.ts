@@ -21,6 +21,7 @@ import { Mppx } from 'mppx/server'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ALL_ZEROS, USDC_SAC_TESTNET } from '../../constants.js'
 import { DEFAULT_POLL_MAX_ATTEMPTS } from '../../shared/defaults.js'
+import { signWithTorsionedNonce } from '../../shared/ed25519.test-helpers.js'
 import { PaymentVerificationError } from '../../shared/errors.js'
 
 const mockGetTransaction = vi.fn()
@@ -1487,7 +1488,13 @@ describe('charge hash format validation', () => {
 })
 
 describe('charge push-mode: source signature binding', () => {
-  it('rejects push-mode credential with invalid sourceSignature', async () => {
+  it.each([
+    ['an invalid sourceSignature', () => Buffer.alloc(64)],
+    [
+      'a sourceSignature the network would not accept',
+      (message: Buffer) => signWithTorsionedNonce(PAYER, message),
+    ],
+  ])('rejects push-mode credential with %s', async (_label, sign) => {
     const client = PAYER
     const tx = buildTransferTx({
       source: client.publicKey(),
@@ -1522,7 +1529,7 @@ describe('charge push-mode: source signature binding', () => {
         payload: {
           type: 'signedHash',
           hash,
-          sourceSignature: Buffer.alloc(64).toString('hex'), // invalid/wrong signature
+          sourceSignature: sign(Buffer.from(`${challenge.id}:${hash}`)).toString('hex'),
         },
       }),
       { source: `did:pkh:stellar:testnet:${client.publicKey()}` },

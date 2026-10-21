@@ -11,6 +11,7 @@ import {
   xdr,
 } from '@stellar/stellar-sdk'
 import { describe, expect, it } from 'vitest'
+import { signWithTorsionedNonce } from './ed25519.test-helpers.js'
 import { verifyAuthEntrySignature } from './verify-auth.js'
 import { StellarMppError } from './errors.js'
 
@@ -163,6 +164,24 @@ describe('verifyAuthEntrySignature', () => {
     const entry = await signedEntryFor(Keypair.random())
 
     expect(() => verifyAuthEntrySignature(entry, OTHER_NETWORK)).toThrow(StellarMppError)
+  })
+
+  it('rejects an entry whose signature the network would not accept', async () => {
+    const signer = Keypair.random()
+    const entry = await authorizeInvocation({
+      signer: (preimage: xdr.HashIdPreimage) => ({
+        signature: signWithTorsionedNonce(signer, hash(preimage.toXDR())),
+        publicKey: signer.publicKey(),
+      }),
+      validUntilLedgerSeq: VALID_UNTIL_LEDGER,
+      invocation: transferInvocation(signer.publicKey()),
+      publicKey: signer.publicKey(),
+      networkPassphrase: NETWORK,
+    })
+
+    expect(() => verifyAuthEntrySignature(entry, NETWORK)).toThrow(
+      'does not match the authorization payload',
+    )
   })
 
   it('rejects an entry signed by a key other than the authorizing account', async () => {
