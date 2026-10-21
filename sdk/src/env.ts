@@ -1,4 +1,6 @@
 import { StrKey } from '@stellar/stellar-sdk'
+import { STELLAR_TESTNET, type NetworkId } from './constants.js'
+import { resolveNetworkId } from './shared/validation.js'
 
 export function parseRequired(name: string): string {
   const value = process.env[name]
@@ -49,6 +51,11 @@ export function parseContractAddress(name: string): string {
     throw new Error(`${name} must be a valid contract address (C...)`)
   }
   return value
+}
+
+/** Parses a CAIP-2 Stellar network identifier, defaulting to testnet. */
+export function parseNetworkId(name: string = 'STELLAR_NETWORK'): NetworkId {
+  return resolveNetworkId(parseOptional(name, STELLAR_TESTNET))
 }
 
 export function parseHexKey(name: string, length: number = 64): string {

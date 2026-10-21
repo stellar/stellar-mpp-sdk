@@ -23,6 +23,7 @@ Mppx.create({
     stellar.charge({
       keypair,
       mode: Env.chargeClientMode,
+      network: Env.network,
       onProgress(event) {
         const ts = new Date().toISOString().slice(11, 23)
         switch (event.type) {

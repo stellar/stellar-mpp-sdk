@@ -24,6 +24,7 @@ Mppx.create({
     stellar.channel({
       commitmentKey,
       allowedChannels: [Env.channelContract],
+      network: Env.network,
       onProgress(event) {
         const ts = new Date().toISOString().slice(11, 23)
         switch (event.type) {
