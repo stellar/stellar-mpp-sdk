@@ -948,9 +948,16 @@ describe('stellar server channel verification', () => {
       cumulativeAmount: 5000000n,
       challengeAmount: '5000000',
     })
+    // A read that fails before the send is a rejected credential (402), with
+    // the cause kept server-side.
     await expect(
       method.verify({ credential: closeCred as any, request: closeCred.challenge.request }),
-    ).rejects.toThrow('pre-broadcast failure')
+    ).rejects.toEqual(
+      new ChannelVerificationError(
+        `[stellar:channel] prepareTransaction for close on channel ${CHANNEL_ADDRESS} failed; nothing was sent.`,
+        { channel: CHANNEL_ADDRESS, error: 'pre-broadcast failure' },
+      ),
+    )
     expect(mockSendTransaction.mock.calls.length).toBe(sendsBefore)
 
     // Closing is final: the latch and the pair stay for a later close.
@@ -2656,10 +2663,14 @@ describe('closeWithLatestCommitment', () => {
     const { store, method, parameters } = setup()
     const accepted = voucher(100n)
     await method.verify(accepted)
-    const error = new Error('prepare failed')
-    mockPrepareTransaction.mockRejectedValueOnce(error)
+    mockPrepareTransaction.mockRejectedValueOnce(new Error('prepare failed'))
 
-    await expect(closeWithLatestCommitment(parameters)).rejects.toBe(error)
+    await expect(closeWithLatestCommitment(parameters)).rejects.toEqual(
+      new ChannelVerificationError(
+        `[stellar:channel] prepareTransaction for close on channel ${CHANNEL_ADDRESS} failed; nothing was sent.`,
+        { channel: CHANNEL_ADDRESS, error: 'prepare failed' },
+      ),
+    )
     expect(await store.get(cumulativeKey)).toEqual({ ...storedPair(accepted), closing: true })
     expect(await store.get(closedKey)).toBeNull()
     // A close that never reached the network does not use up the send cap.
@@ -2877,35 +2888,53 @@ describe('closeWithLatestCommitment', () => {
     await expect(method.verify(voucher(100n))).rejects.toEqual(closingError)
   })
 
-  it.each(['getAccount', 'prepareTransaction', 'sendTransaction'] as const)(
-    'bounds a hung %s with simulationTimeoutMs',
+  it.each(['getAccount', 'prepareTransaction'] as const)(
+    'reports a hung %s as a verification error without sending',
     async (call) => {
       const { store, method, parameters } = setup()
       const accepted = voucher(100n)
       await method.verify(accepted)
-      const hang = new Promise<never>(() => {})
-      const mock = {
-        getAccount: mockGetAccount,
-        prepareTransaction: mockPrepareTransaction,
-        sendTransaction: mockSendTransaction,
-      }[call]
-      mock.mockReturnValueOnce(hang)
+      const mock = { getAccount: mockGetAccount, prepareTransaction: mockPrepareTransaction }[call]
+      mock.mockReturnValueOnce(new Promise<never>(() => {}))
 
-      const error = await closeWithLatestCommitment({
-        ...parameters,
-        simulationTimeoutMs: 1,
-      }).catch((e: unknown) => e)
-
-      expect(error).toBeInstanceOf(TimeoutError)
-      expect((error as Error).message).toContain(`${call} for close on channel ${CHANNEL_ADDRESS}`)
-      expect(await store.get(cumulativeKey)).toEqual({ ...storedPair(accepted), closing: true })
-      // A send that may have been transmitted keeps its slot; a hang before the
-      // send never reached the network and is not counted.
-      expect(await store.get(closeSendsKey)).toEqual(
-        call === 'sendTransaction' ? { count: 1 } : null,
+      await expect(
+        closeWithLatestCommitment({ ...parameters, simulationTimeoutMs: 1 }),
+      ).rejects.toEqual(
+        new ChannelVerificationError(
+          `[stellar:channel] ${call} for close on channel ${CHANNEL_ADDRESS} failed; nothing was sent.`,
+          {
+            channel: CHANNEL_ADDRESS,
+            error: `${call} for close on channel ${CHANNEL_ADDRESS} timed out after 1ms`,
+          },
+        ),
       )
+      expect(mockSendTransaction).toHaveBeenCalledTimes(0)
+      expect(await store.get(cumulativeKey)).toEqual({ ...storedPair(accepted), closing: true })
+      // A hang before the send never reached the network and is not counted.
+      expect(await store.get(closeSendsKey)).toBeNull()
     },
   )
+
+  it('bounds a hung sendTransaction with simulationTimeoutMs and keeps its slot', async () => {
+    const { store, method, parameters } = setup()
+    const accepted = voucher(100n)
+    await method.verify(accepted)
+    mockSendTransaction.mockReturnValueOnce(new Promise<never>(() => {}))
+
+    const error = await closeWithLatestCommitment({
+      ...parameters,
+      simulationTimeoutMs: 1,
+    }).catch((e: unknown) => e)
+
+    // The outcome of a send that may have been transmitted is unknown, so it
+    // is not reported as a rejected credential and keeps its slot.
+    expect(error).toBeInstanceOf(TimeoutError)
+    expect((error as Error).message).toBe(
+      `sendTransaction for close on channel ${CHANNEL_ADDRESS} timed out after 1ms`,
+    )
+    expect(await store.get(cumulativeKey)).toEqual({ ...storedPair(accepted), closing: true })
+    expect(await store.get(closeSendsKey)).toEqual({ count: 1 })
+  })
 
   it('treats a legacy settling record as closing', async () => {
     const { store, method, parameters } = setup()

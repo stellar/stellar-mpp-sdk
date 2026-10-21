@@ -695,7 +695,8 @@ export function channel(parameters: channel.Parameters) {
    * If the close does not confirm, {@link closeWithLatestCommitment} completes
    * it later with the same stored commitment.
    *
-   * @throws {ChannelVerificationError} If no envelopeSigner is configured.
+   * @throws {ChannelVerificationError} If no envelopeSigner is configured, or
+   *   a read the close is built from fails or times out before anything is sent.
    * @throws {SettlementError} If the broadcast fails or the on-chain tx does
    *   not confirm.
    */
@@ -1570,7 +1571,8 @@ async function releaseCloseSend(store: Store.AtomicStore, key: string): Promise<
 /**
  * Builds, simulates, checks and signs a `close(amount, signature)` transaction.
  * Each RPC call is bounded by `simulationTimeoutMs` so a hung RPC cannot stall
- * the caller.
+ * the caller; a read that fails or times out throws `ChannelVerificationError`,
+ * since nothing has been sent.
  */
 async function buildClose(parameters: close.Parameters): Promise<PreparedClose> {
   const {
@@ -1596,10 +1598,11 @@ async function buildClose(parameters: close.Parameters): Promise<PreparedClose> 
   )
 
   const signer = resolveKeypair(feePayer.envelopeSigner)
-  const account = await withTimeout(
+  const read = { channel: channelAddress, simulationTimeoutMs }
+  const account = await readForClose(
     server.getAccount(signer.publicKey()),
-    simulationTimeoutMs,
     `getAccount for close on channel ${channelAddress}`,
+    read,
   )
   const tx = new TransactionBuilder(account, {
     fee: DEFAULT_FEE,
@@ -1609,10 +1612,10 @@ async function buildClose(parameters: close.Parameters): Promise<PreparedClose> 
     .setTimeout(DEFAULT_TIMEOUT)
     .build()
 
-  const prepared = await withTimeout(
+  const prepared = await readForClose(
     server.prepareTransaction(tx),
-    simulationTimeoutMs,
     `prepareTransaction for close on channel ${channelAddress}`,
+    read,
   )
   assertPreparedCloseIsSafe(prepared, channelAddress)
   assertCloseFeeWithinCeiling(prepared, maxFeeBumpStroops)
@@ -1626,6 +1629,27 @@ async function buildClose(parameters: close.Parameters): Promise<PreparedClose> 
     })
   }
   return { server, tx: txToSubmit }
+}
+
+/**
+ * Bounds an RPC read the close is built from and reports its failure, a
+ * timeout included, as a verification error. Nothing has been sent when such
+ * a read fails, so a close credential is answered with 402 like any other
+ * rejected credential; a plain error would be answered as an internal fault.
+ */
+async function readForClose<T>(
+  operation: Promise<T>,
+  label: string,
+  parameters: { channel: string; simulationTimeoutMs: number },
+): Promise<T> {
+  try {
+    return await withTimeout(operation, parameters.simulationTimeoutMs, label)
+  } catch (error) {
+    throw new ChannelVerificationError(`${LOG_PREFIX} ${label} failed; nothing was sent.`, {
+      channel: parameters.channel,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
 }
 
 type ClosePollOptions = Pick<close.Parameters, 'pollMaxAttempts' | 'pollDelayMs' | 'pollTimeoutMs'>
