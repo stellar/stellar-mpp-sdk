@@ -44,7 +44,7 @@ export interface ExpectedCommitment {
  * @param expected - The channel, amount and network for the commitment.
  * @returns The XDR-encoded commitment bytes. The client signs these bytes.
  */
-export function buildCommitmentMessage(expected: ExpectedCommitment): Buffer {
+export function buildCommitmentMessage(expected: ExpectedCommitment): Uint8Array {
   const networkId = hash(Buffer.from(NETWORK_PASSPHRASE[expected.network]))
   return xdr.ScVal.scvMap([
     new xdr.ScMapEntry({
@@ -63,7 +63,7 @@ export function buildCommitmentMessage(expected: ExpectedCommitment): Buffer {
       key: nativeToScVal('network', { type: 'symbol' }),
       val: xdr.ScVal.scvBytes(networkId),
     }),
-  ]).toXDR()
+  ]).toXdr()
 }
 
 /**
@@ -85,7 +85,7 @@ export function assertCommitmentBinds(
 ): void {
   let decoded: unknown
   try {
-    decoded = scValToNative(xdr.ScVal.fromXDR(Buffer.from(commitmentBytes)))
+    decoded = scValToNative(xdr.ScVal.fromXdr(Buffer.from(commitmentBytes)))
   } catch (error) {
     throw new StellarMppError(
       `Refusing to sign: prepare_commitment did not return a decodable commitment ` +

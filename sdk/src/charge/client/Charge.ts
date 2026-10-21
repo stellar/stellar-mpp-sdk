@@ -75,22 +75,19 @@ function assertInvocationIsExactTransfer(
   invocation: StellarXdr.SorobanAuthorizedInvocation,
   expected: ExpectedTransfer,
 ): void {
-  if (invocation.subInvocations().length > 0) {
+  if (invocation.subInvocations.length > 0) {
     throw new StellarMppError(
       'Refusing to sign: the authorization tree contains unexpected sub-invocations.',
     )
   }
 
-  const fn = invocation.function()
-  if (
-    fn.switch().value !==
-    StellarXdr.SorobanAuthorizedFunctionType.sorobanAuthorizedFunctionTypeContractFn().value
-  ) {
+  const fn = invocation.function
+  if (fn.type !== 'sorobanAuthorizedFunctionTypeContractFn') {
     throw new StellarMppError('Refusing to sign: unexpected authorized function type.')
   }
 
-  const contractFn = fn.contractFn()
-  const authorizedContract = Address.fromScAddress(contractFn.contractAddress()).toString()
+  const contractFn = fn.contractFn
+  const authorizedContract = Address.fromScAddress(contractFn.contractAddress).toString()
   if (authorizedContract !== expected.currency) {
     throw new StellarMppError(
       `Refusing to sign: authorization targets contract "${authorizedContract}" ` +
@@ -98,11 +95,11 @@ function assertInvocationIsExactTransfer(
     )
   }
 
-  if (contractFn.functionName().toString() !== 'transfer') {
+  if (contractFn.functionName.toString() !== 'transfer') {
     throw new StellarMppError('Refusing to sign: authorization is not a transfer call.')
   }
 
-  const args = contractFn.args()
+  const args = contractFn.args
   if (
     args.length !== 3 ||
     Address.fromScVal(args[0]).toString() !== expected.from ||
@@ -123,13 +120,13 @@ function assertTransactionAuthorizesOnlyTransfer(
   tx: StellarXdr.Transaction,
   expected: ExpectedTransfer,
 ): void {
-  for (const op of tx.operations()) {
-    const body = op.body()
-    if (body.switch().value !== StellarXdr.OperationType.invokeHostFunction().value) {
+  for (const op of tx.operations) {
+    const body = op.body
+    if (body.type !== 'invokeHostFunction') {
       continue
     }
-    for (const entry of body.invokeHostFunctionOp().auth()) {
-      assertInvocationIsExactTransfer(entry.rootInvocation(), expected)
+    for (const entry of body.invokeHostFunctionOp.auth) {
+      assertInvocationIsExactTransfer(entry.rootInvocation, expected)
     }
   }
 }
@@ -303,18 +300,18 @@ export function charge(parameters: charge.Parameters) {
         // Sign only the Soroban authorization entries — do NOT sign the
         // transaction envelope (the server will do that after rebuilding).
         const envelope = prepared.toEnvelope()
-        const v1 = envelope.v1()
+        const v1 = StellarXdr.expectUnionVariant(envelope, 'envelopeTypeTx').v1
 
         // Confirm the simulated auth tree is exactly the intended transfer
         // before authorizing any entry.
-        assertTransactionAuthorizesOnlyTransfer(v1.tx(), expectedTransfer)
+        assertTransactionAuthorizesOnlyTransfer(v1.tx, expectedTransfer)
 
-        for (const op of v1.tx().operations()) {
-          const body = op.body()
-          if (body.switch().value !== StellarXdr.OperationType.invokeHostFunction().value) {
+        for (const op of v1.tx.operations) {
+          const body = op.body
+          if (body.type !== 'invokeHostFunction') {
             continue
           }
-          const authEntries = body.invokeHostFunctionOp().auth()
+          const authEntries = body.invokeHostFunctionOp.auth
           for (let i = 0; i < authEntries.length; i++) {
             const entry = authEntries[i]
             // Sign both the legacy V1 arm and the CAP-71 V2 arm; simulation
@@ -322,7 +319,7 @@ export function charge(parameters: charge.Parameters) {
             // upgraded auth. `authorizeEntry` picks the matching preimage for
             // each arm. Anything else (source-account, delegated) is left
             // untouched and rejected by the server's credential checks.
-            if (getAddressCredentials(entry.credentials())) {
+            if (getAddressCredentials(entry.credentials)) {
               authEntries[i] = await authorizeEntry(
                 entry,
                 clientKP,
@@ -333,7 +330,7 @@ export function charge(parameters: charge.Parameters) {
           }
         }
 
-        const signedXdr = envelope.toXDR('base64')
+        const signedXdr = envelope.toXdr('base64')
         onProgress?.({ type: 'signed', transaction: signedXdr })
 
         const source = `did:pkh:${network}:${clientKP.publicKey()}`
@@ -375,7 +372,10 @@ export function charge(parameters: charge.Parameters) {
 
       // The envelope signature authorizes the entire Soroban auth tree, so
       // confirm it is exactly the intended transfer before signing.
-      assertTransactionAuthorizesOnlyTransfer(prepared.toEnvelope().v1().tx(), expectedTransfer)
+      assertTransactionAuthorizesOnlyTransfer(
+        StellarXdr.expectUnionVariant(prepared.toEnvelope(), 'envelopeTypeTx').v1.tx,
+        expectedTransfer,
+      )
 
       onProgress?.({ type: 'signing' })
       prepared.sign(clientKP)

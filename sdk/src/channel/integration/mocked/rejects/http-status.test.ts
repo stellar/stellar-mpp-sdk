@@ -53,10 +53,10 @@ function instanceWithCommitmentKey(key: Keypair) {
   })
   const val = xdr.LedgerEntryData.contractData(
     new xdr.ContractDataEntry({
-      ext: new xdr.ExtensionPoint(0),
+      ext: xdr.ExtensionPoint.v0(),
       contract: Address.fromString(CHANNEL_ADDRESS).toScAddress(),
       key: xdr.ScVal.scvLedgerKeyContractInstance(),
-      durability: xdr.ContractDataDurability.persistent(),
+      durability: xdr.ContractDataDurability.persistent,
       val: xdr.ScVal.scvContractInstance(instance),
     }),
   )

@@ -1352,7 +1352,7 @@ describe('charge tx hash dedup', () => {
     // Pre-seed the canonical inner-tx-hash dedup entry as already settled. Dedup
     // is keyed on the inner transaction hash (derived from the on-chain envelope),
     // not on whatever hash the client presents.
-    const canonicalHash = tx.hash().toString('hex')
+    const canonicalHash = Buffer.from(tx.hash()).toString('hex')
     await store.put(`stellar:charge:hash:${canonicalHash}`, {
       state: 'used',
       usedAt: new Date().toISOString(),
@@ -2025,20 +2025,21 @@ async function buildSponsoredEnvelopeWithValidAuth(opts?: {
     currency: USDC_SAC_TESTNET,
     maxTimeSeconds: opts?.maxTimeSeconds,
   })
-  const invokeContractArgs = tx
-    .toEnvelope()
-    .v1()
-    .tx()
-    .operations()[0]
-    .body()
-    .invokeHostFunctionOp()
-    .hostFunction()
-    .invokeContract()
+  const envelope = tx.toEnvelope()
+  const envelopeTx = xdr.expectUnionVariant(envelope, 'envelopeTypeTx').v1.tx
+  const invokeOp = xdr.expectUnionVariant(
+    envelopeTx.operations[0].body,
+    'invokeHostFunction',
+  ).invokeHostFunctionOp
+  const invokeContractArgs = xdr.expectUnionVariant(
+    invokeOp.hostFunction,
+    'hostFunctionTypeInvokeContract',
+  ).invokeContract
   const unsignedAuthEntry = new xdr.SorobanAuthorizationEntry({
     credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
       new xdr.SorobanAddressCredentials({
         address: new Address(PAYER.publicKey()).toScAddress(),
-        nonce: xdr.Int64.fromString('0'),
+        nonce: 0n,
         signatureExpirationLedger: expirationLedger,
         signature: xdr.ScVal.scvVec([]),
       }),
@@ -2055,13 +2056,12 @@ async function buildSponsoredEnvelopeWithValidAuth(opts?: {
     expirationLedger,
     NETWORK_PASSPHRASE,
   )
-  const envelope = tx.toEnvelope()
-  envelope.v1().tx().operations()[0].body().invokeHostFunctionOp().auth([authEntry])
+  invokeOp.auth.splice(0, invokeOp.auth.length, authEntry)
   // The auth signature covers the invocation, not the tx fee, so an optional fee
   // override applied here keeps the entry valid while letting callers exercise
   // different inclusion fees.
   if (opts?.fee !== undefined) {
-    envelope.v1().tx().fee(opts.fee)
+    Object.assign(envelopeTx, { fee: opts.fee })
   }
   return envelope
 }
@@ -2097,16 +2097,16 @@ function makeMockTransferEvent(from: string, to: string, amount: bigint, contrac
   const amountScVal = nativeToScVal(amount, { type: 'i128' })
 
   return {
-    event: () => ({
-      type: () => ({ name: 'contract' }),
-      contractId: () => Address.fromString(contract).toBuffer().subarray(0, 32),
-      body: () => ({
-        v0: () => ({
-          topics: () => [{ sym: () => ({ toString: () => 'transfer' }) }, fromScVal, toScVal],
-          data: () => amountScVal,
-        }),
-      }),
-    }),
+    event: {
+      type: xdr.ContractEventType.contract,
+      contractId: new xdr.ContractId(Address.fromString(contract).toBuffer().subarray(0, 32)),
+      body: {
+        v0: {
+          topics: [xdr.ScVal.scvSymbol('transfer'), fromScVal, toScVal],
+          data: amountScVal,
+        },
+      },
+    },
   }
 }
 
@@ -3067,16 +3067,16 @@ describe('charge simulation event validation', () => {
     tx.sign(PAYER)
 
     const nonTransferEvent = {
-      event: () => ({
-        type: () => ({ name: 'contract' }),
-        contractId: () => null,
-        body: () => ({
-          v0: () => ({
-            topics: () => [{ sym: () => ({ toString: () => 'mint' }) }],
-            data: () => nativeToScVal(0n, { type: 'i128' }),
-          }),
-        }),
-      }),
+      event: {
+        type: xdr.ContractEventType.contract,
+        contractId: null,
+        body: {
+          v0: {
+            topics: [xdr.ScVal.scvSymbol('mint')],
+            data: nativeToScVal(0n, { type: 'i128' }),
+          },
+        },
+      },
     }
 
     mockSimulateTransaction.mockResolvedValueOnce({
@@ -3112,16 +3112,16 @@ describe('charge simulation event validation', () => {
     const amountScVal = nativeToScVal(10000000n, { type: 'i128' })
 
     const eventWithNoContractId = {
-      event: () => ({
-        type: () => ({ name: 'contract' }),
-        contractId: () => null,
-        body: () => ({
-          v0: () => ({
-            topics: () => [{ sym: () => ({ toString: () => 'transfer' }) }, fromScVal, toScVal],
-            data: () => amountScVal,
-          }),
-        }),
-      }),
+      event: {
+        type: xdr.ContractEventType.contract,
+        contractId: null,
+        body: {
+          v0: {
+            topics: [xdr.ScVal.scvSymbol('transfer'), fromScVal, toScVal],
+            data: amountScVal,
+          },
+        },
+      },
     }
 
     mockSimulateTransaction.mockResolvedValueOnce({
@@ -3688,15 +3688,13 @@ describe('charge validateAuthEntries (sponsored path)', () => {
       amount: opts.amount ?? 10000000n,
       currency: USDC_SAC_TESTNET,
     })
-    return tx
-      .toEnvelope()
-      .v1()
-      .tx()
-      .operations()[0]
-      .body()
-      .invokeHostFunctionOp()
-      .hostFunction()
-      .invokeContract()
+    const envelopeTx = xdr.expectUnionVariant(tx.toEnvelope(), 'envelopeTypeTx').v1.tx
+    const invokeOp = xdr.expectUnionVariant(
+      envelopeTx.operations[0].body,
+      'invokeHostFunction',
+    ).invokeHostFunctionOp
+    return xdr.expectUnionVariant(invokeOp.hostFunction, 'hostFunctionTypeInvokeContract')
+      .invokeContract
   }
 
   /** The root invocation an honest client authorizes: the requested transfer,
@@ -3778,7 +3776,12 @@ describe('charge validateAuthEntries (sponsored path)', () => {
       maxTimeSeconds,
     })
     const envelope = tx.toEnvelope()
-    envelope.v1().tx().operations()[0].body().invokeHostFunctionOp().auth(authEntries)
+    const envelopeTx = xdr.expectUnionVariant(envelope, 'envelopeTypeTx').v1.tx
+    const invokeOp = xdr.expectUnionVariant(
+      envelopeTx.operations[0].body,
+      'invokeHostFunction',
+    ).invokeHostFunctionOp
+    invokeOp.auth.splice(0, invokeOp.auth.length, ...authEntries)
     return envelope.toXDR('base64')
   }
 
@@ -3910,7 +3913,7 @@ describe('charge validateAuthEntries (sponsored path)', () => {
   it('accepts a CAP-71 V2 (address-bound) auth entry signed by the payer', async () => {
     // authorizeEntry keeps the V2 arm and signs the address-bound preimage.
     const authEntry = await makeSignedAuthEntry({ arm: 'addressV2' })
-    expect(authEntry.credentials().switch().name).toBe('sorobanCredentialsAddressV2')
+    expect(authEntry.credentials.type).toBe('sorobanCredentialsAddressV2')
 
     mockSuccessfulSettlement('valid-v2-auth-hash')
 
@@ -4024,7 +4027,7 @@ describe('charge validateAuthEntries (sponsored path)', () => {
     // non-numeric amount argument. Decoding it must count as "does not authorize
     // the transfer", not surface as an unexpected decode error.
     const args = transferContractArgs()
-    args.args([args.args()[0], args.args()[1], xdr.ScVal.scvString('not-a-number')])
+    args.args.splice(2, 1, xdr.ScVal.scvString('not-a-number'))
 
     mockGetLatestLedger.mockResolvedValueOnce({ sequence: 100 })
 
@@ -4055,11 +4058,9 @@ describe('charge operation-level source validation', () => {
     })
     // Inject the server signer address as the operation-level source via XDR
     const envelope = tx.toEnvelope()
-    envelope
-      .v1()
-      .tx()
-      .operations()[0]
-      .sourceAccount(xdr.MuxedAccount.keyTypeEd25519(serverKp.rawPublicKey()))
+    Object.assign(xdr.expectUnionVariant(envelope, 'envelopeTypeTx').v1.tx.operations[0], {
+      sourceAccount: xdr.MuxedAccount.keyTypeEd25519(serverKp.rawPublicKey()),
+    })
     const txXdr = envelope.toXDR('base64')
 
     tx.sign(PAYER)
@@ -4773,7 +4774,7 @@ describe('charge fee-bump cross-mode dedup (canonical inner hash)', () => {
       transactionData: new SorobanDataBuilder(),
     })
     mockSendTransaction.mockResolvedValueOnce({
-      hash: feeBumpTx.hash().toString('hex'),
+      hash: Buffer.from(feeBumpTx.hash()).toString('hex'),
       status: 'PENDING',
     })
     mockGetTransaction.mockResolvedValueOnce({ status: 'SUCCESS' }) // poll
@@ -4789,7 +4790,7 @@ describe('charge fee-bump cross-mode dedup (canonical inner hash)', () => {
   it('rejects a signedHash push reusing the OUTER hash of a fee-bump already settled via pull', async () => {
     const store = Store.memory()
     const { feeBumpTx } = buildSignedFeeBump()
-    const outerHash = feeBumpTx.hash().toString('hex')
+    const outerHash = Buffer.from(feeBumpTx.hash()).toString('hex')
 
     await settleViaPull(store, feeBumpTx)
 
@@ -4822,7 +4823,7 @@ describe('charge fee-bump cross-mode dedup (canonical inner hash)', () => {
   it('rejects a legacy hash push reusing the OUTER hash of a fee-bump already settled via pull', async () => {
     const store = Store.memory()
     const { feeBumpTx } = buildSignedFeeBump()
-    const outerHash = feeBumpTx.hash().toString('hex')
+    const outerHash = Buffer.from(feeBumpTx.hash()).toString('hex')
 
     await settleViaPull(store, feeBumpTx)
 
@@ -4853,7 +4854,7 @@ describe('charge fee-bump cross-mode dedup (canonical inner hash)', () => {
   it('still settles a standalone fee-bump push when the payment was not previously settled', async () => {
     const store = Store.memory()
     const { feeBumpTx } = buildSignedFeeBump()
-    const outerHash = feeBumpTx.hash().toString('hex')
+    const outerHash = Buffer.from(feeBumpTx.hash()).toString('hex')
 
     mockGetTransaction.mockResolvedValueOnce({
       status: 'SUCCESS',
@@ -5013,7 +5014,7 @@ describe('charge sponsored auth-entry expiration', () => {
       publicKey: PAYER.publicKey(),
       networkPassphrase: NETWORK_PASSPHRASE,
     })
-    transferOp.body().invokeHostFunctionOp().auth().push(auth)
+    transferOp.body.invokeHostFunctionOp.auth.push(auth)
     const tx = new TransactionBuilder(account, {
       fee: BASE_FEE,
       networkPassphrase: NETWORK_PASSPHRASE,
@@ -5110,7 +5111,9 @@ describe('charge sponsored dedup key (canonical on-chain inner hash)', () => {
     const store = Store.memory()
     const clientEnvelope = await buildSponsoredEnvelopeWithValidAuth()
     const clientXdr = clientEnvelope.toXDR('base64')
-    const clientTxHash = new Transaction(clientXdr, NETWORK_PASSPHRASE).hash().toString('hex')
+    const clientTxHash = Buffer.from(
+      new Transaction(clientXdr, NETWORK_PASSPHRASE).hash(),
+    ).toString('hex')
 
     mockGetLatestLedger.mockResolvedValue({ sequence: 100 })
     mockGetAccount.mockResolvedValue(new Account(envelopeKP.publicKey(), '5'))
@@ -5122,7 +5125,7 @@ describe('charge sponsored dedup key (canonical on-chain inner hash)', () => {
     let submittedInnerHash: string | undefined
     mockSendTransaction.mockImplementation((submitted: Transaction | FeeBumpTransaction) => {
       const inner = submitted instanceof FeeBumpTransaction ? submitted.innerTransaction : submitted
-      submittedInnerHash = inner.hash().toString('hex')
+      submittedInnerHash = Buffer.from(inner.hash()).toString('hex')
       return Promise.resolve({ hash: submittedInnerHash, status: 'PENDING' })
     })
     mockGetTransaction.mockResolvedValue({ status: 'SUCCESS' })

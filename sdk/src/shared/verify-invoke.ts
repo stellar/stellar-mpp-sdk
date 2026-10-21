@@ -34,17 +34,19 @@ export function verifyInvokeContractOp(
     })
   }
 
-  const invokeHostFnOp = tx.toEnvelope().v1().tx().operations()[0].body().invokeHostFunctionOp()
-  const hostFn = invokeHostFnOp.hostFunction()
+  const envelope = xdr.expectUnionVariant(tx.toEnvelope(), 'envelopeTypeTx')
+  const body = xdr.expectUnionVariant(envelope.v1.tx.operations[0].body, 'invokeHostFunction')
+  const invokeHostFnOp = body.invokeHostFunctionOp
+  const hostFn = invokeHostFnOp.hostFunction
 
-  if (hostFn.switch().value !== xdr.HostFunctionType.hostFunctionTypeInvokeContract().value) {
+  if (hostFn.type !== 'hostFunctionTypeInvokeContract') {
     throw new StellarMppError(`${logPrefix} Host function is not a contract invocation.`, {
-      hostFunctionType: hostFn.switch().name,
+      hostFunctionType: hostFn.type,
     })
   }
 
-  const invokeArgs = hostFn.invokeContract()
-  const contractAddress = Address.fromScAddress(invokeArgs.contractAddress()).toString()
+  const invokeArgs = hostFn.invokeContract
+  const contractAddress = Address.fromScAddress(invokeArgs.contractAddress).toString()
 
-  return { contractAddress, invokeArgs, authEntries: invokeHostFnOp.auth() }
+  return { contractAddress, invokeArgs, authEntries: invokeHostFnOp.auth }
 }

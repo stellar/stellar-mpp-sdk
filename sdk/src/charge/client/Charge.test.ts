@@ -111,6 +111,7 @@ function buildMockPrepareTxAuthEntry() {
   authorizeInvocation({
     signer: TEST_KEYPAIR,
     validUntilLedgerSeq: 1000,
+    authV2: false,
     invocation: new xdr.SorobanAuthorizedInvocation({
       function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(
         new xdr.InvokeContractArgs({
@@ -127,7 +128,7 @@ function buildMockPrepareTxAuthEntry() {
     }),
     networkPassphrase: NETWORK_PASSPHRASE[STELLAR_TESTNET],
   }).then((auth) => {
-    transferOp.body().invokeHostFunctionOp().auth().push(auth)
+    transferOp.body.invokeHostFunctionOp.auth.push(auth)
   })
   return new TransactionBuilder(account, {
     fee: '100',
@@ -181,7 +182,7 @@ async function buildTxWithAuthInvocation(opts: {
     invocation: opts.rootInvocation,
     networkPassphrase: NETWORK_PASSPHRASE[STELLAR_TESTNET],
   })
-  transferOp.body().invokeHostFunctionOp().auth().push(auth)
+  transferOp.body.invokeHostFunctionOp.auth.push(auth)
   return buildTx(opts.source, transferOp)
 }
 
@@ -193,7 +194,7 @@ type CredentialArm = 'address' | 'addressV2' | 'addressWithDelegates'
 function unsignedAuthEntry(arm: CredentialArm) {
   const addressCredentials = new xdr.SorobanAddressCredentials({
     address: new Address(TEST_KEYPAIR.publicKey()).toScAddress(),
-    nonce: new xdr.Int64(1),
+    nonce: xdr.Int64(1),
     signatureExpirationLedger: 0,
     signature: xdr.ScVal.scvVoid(),
   })
@@ -226,7 +227,7 @@ function unsignedAuthEntry(arm: CredentialArm) {
 // transfer tx carrying one unsigned auth entry for the client to sign.
 function mockSponsoredPrepare(arm: CredentialArm) {
   const transferOp = buildTransferOp()
-  transferOp.body().invokeHostFunctionOp().auth().push(unsignedAuthEntry(arm))
+  transferOp.body.invokeHostFunctionOp.auth.push(unsignedAuthEntry(arm))
 
   mockGetAccount.mockResolvedValueOnce(new Account(TEST_KEYPAIR.publicKey(), '0'))
   mockPrepareTransaction.mockResolvedValueOnce(buildTx(ALL_ZEROS, transferOp))
@@ -289,15 +290,15 @@ function expectSignedByClient(
   entry: xdr.SorobanAuthorizationEntry,
   addressCredentials: xdr.SorobanAddressCredentials,
 ) {
-  const [sig] = scValToNative(addressCredentials.signature()) as Array<{
+  const [sig] = scValToNative(addressCredentials.signature) as Array<{
     public_key: Uint8Array
     signature: Uint8Array
   }>
-  expect(Buffer.from(sig.public_key)).toEqual(TEST_KEYPAIR.rawPublicKey())
+  expect(Buffer.from(sig.public_key)).toEqual(Buffer.from(TEST_KEYPAIR.rawPublicKey()))
   const payload = hash(
     buildAuthorizationEntryPreimage(
       entry,
-      addressCredentials.signatureExpirationLedger(),
+      addressCredentials.signatureExpirationLedger,
       NETWORK_PASSPHRASE[STELLAR_TESTNET],
     ).toXDR(),
   )
@@ -447,25 +448,23 @@ describe('charge createCredential', () => {
     expect(op.auth?.length).toBe(1)
     const auth = op.auth![0]
     expect(auth).toBeDefined()
-    expect(auth.rootInvocation().subInvocations().length).toBe(0)
+    expect(auth.rootInvocation.subInvocations.length).toBe(0)
 
     // The address credential should be valid
-    const cred = auth.credentials()
-    expect(cred.switch().name).toBe('sorobanCredentialsAddress')
-    expect(Address.fromScAddress(cred.address().address()).toString()).toBe(
-      TEST_KEYPAIR.publicKey(),
-    )
-    expect(cred.address().signature()).toBeDefined()
-    expect(cred.address().nonce()).toBeDefined()
-    expect(cred.address().signatureExpirationLedger()).toBeDefined()
+    const cred = auth.credentials
+    expect(cred.type).toBe('sorobanCredentialsAddress')
+    expect(Address.fromScAddress(cred.address.address).toString()).toBe(TEST_KEYPAIR.publicKey())
+    expect(cred.address.signature).toBeDefined()
+    expect(cred.address.nonce).toBeDefined()
+    expect(cred.address.signatureExpirationLedger).toBeDefined()
 
     // The authorized function invocation should be valid
-    const func = auth.rootInvocation().function().contractFn()
-    expect(Address.fromScAddress(func.contractAddress()).toString()).toBe(USDC_SAC_TESTNET)
-    expect(func.functionName().toString()).toBe('transfer')
+    const func = auth.rootInvocation.function.contractFn
+    expect(Address.fromScAddress(func.contractAddress).toString()).toBe(USDC_SAC_TESTNET)
+    expect(func.functionName.toString()).toBe('transfer')
 
     // The authorized function args should be valid
-    const args = func.args()
+    const args = func.args
     expect(args.length).toBe(3)
     expect(scValToNative(args[0])).toBe(TEST_KEYPAIR.publicKey())
     expect(scValToNative(args[1])).toBe(RECIPIENT)
@@ -748,38 +747,34 @@ describe('charge createCredential', () => {
     mockSponsoredPrepare('address')
 
     const entry = soleAuthEntry(await createSponsoredTx())
-    const creds = entry.credentials()
+    const creds = entry.credentials
 
-    expect(creds.switch().name).toBe('sorobanCredentialsAddress')
-    expectSignedByClient(entry, creds.address())
+    expect(creds.type).toBe('sorobanCredentialsAddress')
+    expectSignedByClient(entry, creds.address)
   })
 
   it('signs a CAP-71 V2 auth entry returned by simulation over the address-bound preimage', async () => {
     mockSponsoredPrepare('addressV2')
 
     const entry = soleAuthEntry(await createSponsoredTx())
-    const creds = entry.credentials()
+    const creds = entry.credentials
 
     // The arm must be preserved: downgrading to V1 would produce an entry the
     // network rejects once V2 is mandatory.
-    expect(creds.switch().name).toBe('sorobanCredentialsAddressV2')
-    expect(Address.fromScAddress(creds.addressV2().address()).toString()).toBe(
-      TEST_KEYPAIR.publicKey(),
-    )
-    expect(creds.addressV2().signatureExpirationLedger()).toBeGreaterThan(50)
-    expectSignedByClient(entry, creds.addressV2())
+    expect(creds.type).toBe('sorobanCredentialsAddressV2')
+    expect(Address.fromScAddress(creds.addressV2.address).toString()).toBe(TEST_KEYPAIR.publicKey())
+    expect(creds.addressV2.signatureExpirationLedger).toBeGreaterThan(50)
+    expectSignedByClient(entry, creds.addressV2)
   })
 
   it('does not sign a delegated-credentials auth entry returned by simulation', async () => {
     mockSponsoredPrepare('addressWithDelegates')
 
-    const creds = soleAuthEntry(await createSponsoredTx()).credentials()
+    const creds = soleAuthEntry(await createSponsoredTx()).credentials
 
-    expect(creds.switch().name).toBe('sorobanCredentialsAddressWithDelegates')
+    expect(creds.type).toBe('sorobanCredentialsAddressWithDelegates')
     // Left exactly as simulation produced it; the server rejects this arm.
-    expect(creds.addressWithDelegates().addressCredentials().signature().switch().name).toBe(
-      'scvVoid',
-    )
+    expect(creds.addressWithDelegates.addressCredentials.signature.type).toBe('scvVoid')
   })
 
   // ── useUpgradedAuth ──────────────────────────────────────────────────────
@@ -800,10 +795,10 @@ describe('charge createCredential', () => {
     expect(tx.source).toBe(ALL_ZEROS)
     expect(tx.signatures.length).toBe(0)
     const entry = soleAuthEntry(tx)
-    const creds = entry.credentials()
-    expect(creds.switch().name).toBe('sorobanCredentialsAddressV2')
-    expect(creds.addressV2().signatureExpirationLedger()).toBeGreaterThan(50)
-    expectSignedByClient(entry, creds.addressV2())
+    const creds = entry.credentials
+    expect(creds.type).toBe('sorobanCredentialsAddressV2')
+    expect(creds.addressV2.signatureExpirationLedger).toBeGreaterThan(50)
+    expectSignedByClient(entry, creds.addressV2)
   })
 
   it('keeps using prepareTransaction (legacy V1 entries) when useUpgradedAuth is off', async () => {
@@ -811,11 +806,11 @@ describe('charge createCredential', () => {
     mockSimulateTransaction.mockClear()
     mockSponsoredPrepare('address')
 
-    const creds = soleAuthEntry(await createSponsoredTx()).credentials()
+    const creds = soleAuthEntry(await createSponsoredTx()).credentials
 
     expect(mockSimulateTransaction).not.toHaveBeenCalled()
     expect(mockPrepareTransaction).toHaveBeenCalledTimes(1)
-    expect(creds.switch().name).toBe('sorobanCredentialsAddress')
+    expect(creds.type).toBe('sorobanCredentialsAddress')
   })
 
   it('surfaces a simulation error when useUpgradedAuth is set', async () => {

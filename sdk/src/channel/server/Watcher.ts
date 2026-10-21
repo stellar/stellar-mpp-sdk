@@ -324,8 +324,8 @@ function parseEvent(event: rpc.Api.EventResponse): ChannelEvent | null {
 
 function decodeSymbol(scVal: xdr.ScVal): string | null {
   try {
-    if (scVal.switch().value === xdr.ScValType.scvSymbol().value) {
-      return scVal.sym().toString()
+    if (scVal.type === 'scvSymbol') {
+      return scVal.sym.toString()
     }
   } catch {
     // Not a symbol

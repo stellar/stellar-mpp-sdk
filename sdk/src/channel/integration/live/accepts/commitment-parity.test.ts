@@ -6,6 +6,7 @@ import {
   TransactionBuilder,
   nativeToScVal,
   rpc,
+  xdr,
 } from '@stellar/stellar-sdk'
 import { beforeAll, describe, expect, it } from 'vitest'
 import {
@@ -61,7 +62,7 @@ describe.skipIf(!CHANNEL_CONTRACT)('commitment encoding parity with the contract
     }
     const retval = (sim as rpc.Api.SimulateTransactionSuccessResponse).result?.retval
     if (!retval) throw new Error('prepare_commitment returned no value')
-    return Buffer.from(retval.bytes())
+    return Buffer.from(xdr.expectUnionVariant(retval, 'scvBytes').bytes.toBytes())
   }
 
   // These amounts cover the i128 range: a boundary value, a typical voucher and
@@ -93,7 +94,9 @@ describe.skipIf(!CHANNEL_CONTRACT)('commitment encoding parity with the contract
       amount,
       network: STELLAR_TESTNET,
     })
-    expect(message.toString('hex')).toBe((await prepareCommitmentOnChain(amount)).toString('hex'))
+    expect(Buffer.from(message).toString('hex')).toBe(
+      (await prepareCommitmentOnChain(amount)).toString('hex'),
+    )
 
     const signature = kp.sign(message)
     expect(Keypair.fromPublicKey(kp.publicKey()).verify(message, signature)).toBe(true)
@@ -106,13 +109,17 @@ describe.skipIf(!CHANNEL_CONTRACT)('commitment encoding parity with the contract
     const amount = 1_000_000n
 
     expect(
-      buildCommitmentMessage({
-        channel: CHANNEL_CONTRACT!,
-        amount,
-        network: STELLAR_TESTNET,
-      }).toString('hex'),
+      Buffer.from(
+        buildCommitmentMessage({
+          channel: CHANNEL_CONTRACT!,
+          amount,
+          network: STELLAR_TESTNET,
+        }),
+      ).toString('hex'),
     ).not.toBe(
-      buildCommitmentMessage({ channel: other, amount, network: STELLAR_TESTNET }).toString('hex'),
+      Buffer.from(
+        buildCommitmentMessage({ channel: other, amount, network: STELLAR_TESTNET }),
+      ).toString('hex'),
     )
   })
 })

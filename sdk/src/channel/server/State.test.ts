@@ -94,7 +94,7 @@ function makeLedgerEntryWithCloseEffective(ledgerValue: number) {
     ext: xdr.ExtensionPoint.fromXDR(Buffer.alloc(4, 0), 'raw'),
     contract: Address.fromString(CHANNEL_ADDRESS).toScAddress(),
     key: xdr.ScVal.scvLedgerKeyContractInstance(),
-    durability: xdr.ContractDataDurability.persistent(),
+    durability: xdr.ContractDataDurability.persistent,
     val: xdr.ScVal.scvContractInstance(instance),
   })
 
@@ -113,7 +113,7 @@ function makeLedgerEntryWithoutCloseEffective() {
     ext: xdr.ExtensionPoint.fromXDR(Buffer.alloc(4, 0), 'raw'),
     contract: Address.fromString(CHANNEL_ADDRESS).toScAddress(),
     key: xdr.ScVal.scvLedgerKeyContractInstance(),
-    durability: xdr.ContractDataDurability.persistent(),
+    durability: xdr.ContractDataDurability.persistent,
     val: xdr.ScVal.scvContractInstance(instance),
   })
 

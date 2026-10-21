@@ -98,7 +98,7 @@ describe('charge cross-process replay protection', () => {
     const sharedStore = Store.memory()
     const tx = buildTransferTx()
     // Present the real on-chain hash; dedup is keyed on the canonical inner hash.
-    const hash = tx.hash().toString('hex')
+    const hash = Buffer.from(tx.hash()).toString('hex')
 
     mockGetTransaction.mockResolvedValue({
       status: 'SUCCESS',

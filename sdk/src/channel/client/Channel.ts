@@ -187,7 +187,7 @@ export function channel(parameters: channel.Parameters) {
       const signature = commitmentKey.sign(Buffer.from(commitmentBytes))
 
       // Convert signature to hex string
-      const sigHex = signature.toString('hex')
+      const sigHex = Buffer.from(signature).toString('hex')
 
       // The store keeps the highest cumulative that this client signed.
       await persistHighestCumulative(store, clientCumulativeKey, cumulativeAmount)

@@ -21,10 +21,10 @@ function instanceResponse(storage: [xdr.ScVal, xdr.ScVal][]) {
   })
   const val = xdr.LedgerEntryData.contractData(
     new xdr.ContractDataEntry({
-      ext: new xdr.ExtensionPoint(0),
+      ext: xdr.ExtensionPoint.v0(),
       contract: Address.fromString(CHANNEL_ADDRESS).toScAddress(),
       key: xdr.ScVal.scvLedgerKeyContractInstance(),
-      durability: xdr.ContractDataDurability.persistent(),
+      durability: xdr.ContractDataDurability.persistent,
       val: xdr.ScVal.scvContractInstance(instance),
     }),
   )
@@ -59,9 +59,8 @@ describe('getInstanceStorageValue', () => {
     expect(result?.toXDR('base64')).toBe(commitmentKey.toXDR('base64'))
     expect(mockGetLedgerEntries).toHaveBeenCalledOnce()
     const [ledgerKey] = mockGetLedgerEntries.mock.calls[0] as [xdr.LedgerKey]
-    expect(ledgerKey.contractData().key().switch()).toBe(
-      xdr.ScValType.scvLedgerKeyContractInstance(),
-    )
+    const contractDataKey = xdr.expectUnionVariant(ledgerKey, 'contractData').contractData
+    expect(contractDataKey.key.type).toBe('scvLedgerKeyContractInstance')
   })
 
   it('returns null when the contract instance entry is absent', async () => {
@@ -102,6 +101,6 @@ describe('getInstanceStorageValue', () => {
       TIMEOUT_MS,
       'CloseEffectiveAtLedger',
     )
-    expect(present?.u32()).toBe(42)
+    expect(present?.toXdr('base64')).toBe(xdr.ScVal.scvU32(42).toXdr('base64'))
   })
 })

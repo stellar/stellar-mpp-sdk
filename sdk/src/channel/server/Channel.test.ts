@@ -2555,12 +2555,14 @@ describe('atomic challenge replay protection (channel)', () => {
     })
 
     const amount = '200'
-    const signature = COMMITMENT_KEY.sign(
-      buildCommitmentMessage({
-        channel: CHANNEL_ADDRESS,
-        amount: BigInt(amount),
-        network: STELLAR_TESTNET,
-      }),
+    const signature = Buffer.from(
+      COMMITMENT_KEY.sign(
+        buildCommitmentMessage({
+          channel: CHANNEL_ADDRESS,
+          amount: BigInt(amount),
+          network: STELLAR_TESTNET,
+        }),
+      ),
     ).toString('hex')
 
     const cred = Object.assign(
@@ -2629,9 +2631,9 @@ describe('atomic challenge replay protection (channel)', () => {
 
     // Try commitment amount (100) that is not strictly greater than previous (100) — should fail
     const amountNotGreater = '100'
-    const signatureNotGreater = COMMITMENT_KEY.sign(Buffer.from('test-commitment-bytes')).toString(
-      'hex',
-    )
+    const signatureNotGreater = Buffer.from(
+      COMMITMENT_KEY.sign(Buffer.from('test-commitment-bytes')),
+    ).toString('hex')
 
     const credNotGreater = Object.assign(
       Credential.from({
@@ -2686,8 +2688,8 @@ describe('atomic challenge replay protection (channel)', () => {
 
     // Commitment of 140 does not cover 100 + 50 = 150, should fail
     const amountInsufficient = '140'
-    const signatureInsufficient = COMMITMENT_KEY.sign(
-      Buffer.from('test-commitment-bytes'),
+    const signatureInsufficient = Buffer.from(
+      COMMITMENT_KEY.sign(Buffer.from('test-commitment-bytes')),
     ).toString('hex')
 
     const credInsufficient = Object.assign(
@@ -2746,12 +2748,14 @@ describe('atomic challenge replay protection (channel)', () => {
 
     // Commitment of 200 is > 100 and covers 100 + 50 = 150, should succeed
     const amount = '200'
-    const signature = COMMITMENT_KEY.sign(
-      buildCommitmentMessage({
-        channel: CHANNEL_ADDRESS,
-        amount: BigInt(amount),
-        network: STELLAR_TESTNET,
-      }),
+    const signature = Buffer.from(
+      COMMITMENT_KEY.sign(
+        buildCommitmentMessage({
+          channel: CHANNEL_ADDRESS,
+          amount: BigInt(amount),
+          network: STELLAR_TESTNET,
+        }),
+      ),
     ).toString('hex')
 
     const cred = Object.assign(
@@ -2978,13 +2982,12 @@ describe('channel server close transaction inspection (auth-tree injection)', ()
   /** Returns the prepared close tx with an injected sub-invocation auth entry. */
   function preparedCloseWithInjectedAuth(tx: Transaction): Transaction {
     const envelope = tx.toEnvelope()
-    envelope
-      .v1()
-      .tx()
-      .operations()[0]
-      .body()
-      .invokeHostFunctionOp()
-      .auth([injectedTransferAuthEntry()])
+    const envelopeTx = xdr.expectUnionVariant(envelope, 'envelopeTypeTx').v1.tx
+    const invokeOp = xdr.expectUnionVariant(
+      envelopeTx.operations[0].body,
+      'invokeHostFunction',
+    ).invokeHostFunctionOp
+    invokeOp.auth.splice(0, invokeOp.auth.length, injectedTransferAuthEntry())
     return new Transaction(envelope, Networks.TESTNET)
   }
 

@@ -50,9 +50,18 @@ function accountSignature(publicKey: Buffer, signature: Buffer): xdr.ScVal {
   return nativeToScVal({ public_key: publicKey, signature }, ACCOUNT_SIGNATURE_TYPE)
 }
 
+/** The address credentials of an entry, under either address arm. */
+function addressCredsOf(entry: xdr.SorobanAuthorizationEntry): xdr.SorobanAddressCredentials {
+  const creds = entry.credentials
+  if (creds.type === 'sorobanCredentialsAddressV2') {
+    return creds.addressV2
+  }
+  return xdr.expectUnionVariant(creds, 'sorobanCredentialsAddress').address
+}
+
 /** Reads the signature vector out of an entry's address credentials. */
 function signaturesOf(entry: xdr.SorobanAuthorizationEntry): AccountSignature[] {
-  return scValToNative(entry.credentials().address().signature()) as AccountSignature[]
+  return scValToNative(addressCredsOf(entry).signature) as AccountSignature[]
 }
 
 /** An address-credentials entry for `address`, under the given credential arm. */
@@ -66,7 +75,7 @@ function entryFor(
 ): xdr.SorobanAuthorizationEntry {
   const credentials = new xdr.SorobanAddressCredentials({
     address: new Address(address).toScAddress(),
-    nonce: new xdr.Int64(1),
+    nonce: xdr.Int64(1),
     signatureExpirationLedger: VALID_UNTIL_LEDGER,
     signature: opts.signature ?? xdr.ScVal.scvVec([]),
   })
@@ -145,16 +154,13 @@ describe('verifyAuthEntrySignature', () => {
   it('rejects an entry whose signature bytes were tampered with', async () => {
     const entry = await signedEntryFor(Keypair.random())
 
-    const tampered = xdr.SorobanAuthorizationEntry.fromXDR(entry.toXDR())
+    const tampered = xdr.SorobanAuthorizationEntry.fromXdr(entry.toXdr())
     const [original] = signaturesOf(tampered)
-    tampered
-      .credentials()
-      .address()
-      .signature(
-        xdr.ScVal.scvVec([
-          accountSignature(Buffer.from(original.public_key), Buffer.alloc(64, 0x07)),
-        ]),
-      )
+    Object.assign(addressCredsOf(tampered), {
+      signature: xdr.ScVal.scvVec([
+        accountSignature(Buffer.from(original.public_key), Buffer.alloc(64, 0x07)),
+      ]),
+    })
 
     expect(() => verifyAuthEntrySignature(tampered, NETWORK)).toThrow(StellarMppError)
   })
@@ -227,7 +233,7 @@ describe('verifyAuthEntrySignature', () => {
   it('accepts a V2 entry signed by the authorizing account', async () => {
     const entry = await signedEntryFor(Keypair.random(), { authV2: true })
 
-    expect(entry.credentials().switch().name).toBe('sorobanCredentialsAddressV2')
+    expect(entry.credentials.type).toBe('sorobanCredentialsAddressV2')
     expect(() => verifyAuthEntrySignature(entry, NETWORK)).not.toThrow()
   })
 

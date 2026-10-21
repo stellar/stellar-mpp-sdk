@@ -512,8 +512,8 @@ export function charge(parameters: charge.Parameters) {
           // Using explicit constructors instead of TransactionBuilder.fromXDR +
           // instanceof avoids false negatives when the FeeBumpTransaction class
           // reference differs across module boundaries (e.g. in test environments).
-          const txEnvelope = xdr.TransactionEnvelope.fromXDR(txXdr, 'base64')
-          const isFeeBump = txEnvelope.switch().name === 'envelopeTypeTxFeeBump'
+          const txEnvelope = xdr.TransactionEnvelope.fromXdr(txXdr, 'base64')
+          const isFeeBump = txEnvelope.type === 'envelopeTypeTxFeeBump'
 
           let tx: Transaction
           let txToSubmit: Transaction | FeeBumpTransaction
@@ -566,8 +566,8 @@ export function charge(parameters: charge.Parameters) {
             logger.debug(`${LOG_PREFIX} Rebuilding sponsored tx...`)
             const serverAccount = await rpcServer.getAccount(envelopeKP.publicKey())
             const originalSeq = serverAccount.sequenceNumber() // needed because Transaction.build sets sequence to account's current + 1 in place.
-            const envelopeTx = tx.toEnvelope().v1().tx()
-            const rawOp = envelopeTx.operations()[0]
+            const envelopeTx = xdr.expectUnionVariant(tx.toEnvelope(), 'envelopeTypeTx').v1.tx
+            const rawOp = envelopeTx.operations[0]
 
             // Build without sorobanData so simulation determines resources.
             // This consumes the account's sequence (N → N+1).
@@ -662,7 +662,7 @@ export function charge(parameters: charge.Parameters) {
           // arrives or whether it is wrapped in a fee-bump.
           const broadcastInnerTx =
             txToSubmit instanceof FeeBumpTransaction ? txToSubmit.innerTransaction : txToSubmit
-          const txHash = broadcastInnerTx.hash().toString('hex')
+          const txHash = Buffer.from(broadcastInnerTx.hash()).toString('hex')
           hashKey = await claimTxHash(store, logger, txHash, {
             state: 'pending',
             claimedAt: new Date().toISOString(),
@@ -849,8 +849,8 @@ export function charge(parameters: charge.Parameters) {
     expiresTimestamp: number | undefined,
     expectedTransfer: { currency: string; from: string; to: string; amount: bigint },
   ) {
-    const envelope = tx.toEnvelope().v1().tx()
-    const ops = envelope.operations()
+    const envelope = xdr.expectUnionVariant(tx.toEnvelope(), 'envelopeTypeTx').v1.tx
+    const ops = envelope.operations
 
     // The latest ledger bounds auth-entry expirations on both ends. Fetch it
     // lazily and once, only when there is something to check.
@@ -882,15 +882,15 @@ export function charge(parameters: charge.Parameters) {
     const serverAddress = Address.fromString(serverPublicKey)
 
     for (let i = 0; i < ops.length; i++) {
-      const opBody = ops[i].body()
-      if (opBody.switch().value !== xdr.OperationType.invokeHostFunction().value) {
+      const opBody = ops[i].body
+      if (opBody.type !== 'invokeHostFunction') {
         throw new PaymentVerificationError(
           `${LOG_PREFIX} All operations must be invokeHostFunction in sponsored path.`,
-          { operationType: opBody.switch().name },
+          { operationType: opBody.type },
         )
       }
 
-      const authEntries = opBody.invokeHostFunctionOp().auth()
+      const authEntries = opBody.invokeHostFunctionOp.auth
       // The transfer requires authorization from its `from` account; track that
       // at least one valid entry actually authorizes this exact transfer.
       // Otherwise a structurally valid but unrelated (or absent) entry would let
@@ -898,17 +898,17 @@ export function charge(parameters: charge.Parameters) {
       // wasting the fee it paid to settle it.
       let transferAuthorized = false
       for (const entry of authEntries) {
-        const credentials = entry.credentials()
+        const credentials = entry.credentials
         const addressCred = getAddressCredentials(credentials)
 
         if (!addressCred) {
           throw new PaymentVerificationError(
             `${LOG_PREFIX} Only address-type auth entries are permitted.`,
-            { credentialType: credentials.switch().name },
+            { credentialType: credentials.type },
           )
         }
 
-        const entryAddress = Address.fromScAddress(addressCred.address())
+        const entryAddress = Address.fromScAddress(addressCred.address)
         if (entryAddress.toString() === serverAddress.toString()) {
           throw new PaymentVerificationError(
             `${LOG_PREFIX} Server address must not appear in client auth entries.`,
@@ -916,7 +916,7 @@ export function charge(parameters: charge.Parameters) {
           )
         }
 
-        const entryExpiration = addressCred.signatureExpirationLedger()
+        const entryExpiration = addressCred.signatureExpirationLedger
         const latestLedger = await getLatestLedgerSeq()
         if (entryExpiration <= latestLedger) {
           throw new PaymentVerificationError(
@@ -937,8 +937,8 @@ export function charge(parameters: charge.Parameters) {
           )
         }
 
-        const rootInvocation = entry.rootInvocation()
-        if (rootInvocation.subInvocations().length > 0) {
+        const rootInvocation = entry.rootInvocation
+        if (rootInvocation.subInvocations.length > 0) {
           throw new PaymentVerificationError(
             `${LOG_PREFIX} Auth entries must not contain sub-invocations.`,
             {},
@@ -1047,21 +1047,18 @@ function authorizationCoversTransfer(
   rootInvocation: xdr.SorobanAuthorizedInvocation,
   expected: { currency: string; from: string; to: string; amount: bigint },
 ): boolean {
-  const authorizedFunction = rootInvocation.function()
-  if (
-    authorizedFunction.switch().value !==
-    xdr.SorobanAuthorizedFunctionType.sorobanAuthorizedFunctionTypeContractFn().value
-  ) {
+  const authorizedFunction = rootInvocation.function
+  if (authorizedFunction.type !== 'sorobanAuthorizedFunctionTypeContractFn') {
     return false
   }
-  const invokeArgs = authorizedFunction.contractFn()
-  if (Address.fromScAddress(invokeArgs.contractAddress()).toString() !== expected.currency) {
+  const invokeArgs = authorizedFunction.contractFn
+  if (Address.fromScAddress(invokeArgs.contractAddress).toString() !== expected.currency) {
     return false
   }
-  if (invokeArgs.functionName().toString() !== 'transfer') {
+  if (invokeArgs.functionName.toString() !== 'transfer') {
     return false
   }
-  const args = invokeArgs.args()
+  const args = invokeArgs.args
   if (args.length !== 3) {
     return false
   }
@@ -1131,7 +1128,7 @@ function verifyTokenTransfer(
     )
   }
 
-  const functionName = invokeArgs.functionName().toString()
+  const functionName = invokeArgs.functionName.toString()
   if (functionName !== 'transfer') {
     throw new PaymentVerificationError(
       `${LOG_PREFIX} Function name must be "transfer", got "${functionName}".`,
@@ -1139,7 +1136,7 @@ function verifyTokenTransfer(
     )
   }
 
-  const args = invokeArgs.args()
+  const args = invokeArgs.args
   if (args.length !== 3) {
     throw new PaymentVerificationError(
       `${LOG_PREFIX} Transfer function expects 3 arguments, got ${args.length}.`,
@@ -1199,7 +1196,7 @@ function verifyTokenTransferFromResult(
   let envelope: xdr.TransactionEnvelope
   if (typeof txResult.envelopeXdr === 'string') {
     try {
-      envelope = xdr.TransactionEnvelope.fromXDR(txResult.envelopeXdr, 'base64')
+      envelope = xdr.TransactionEnvelope.fromXdr(txResult.envelopeXdr, 'base64')
     } catch (error) {
       throw new PaymentVerificationError(
         `${LOG_PREFIX} Could not parse transaction envelope for verification.`,
@@ -1214,7 +1211,7 @@ function verifyTokenTransferFromResult(
 
   let innerTx: Transaction
   try {
-    const parsed = TransactionBuilder.fromXDR(envelope.toXDR('base64'), networkPassphrase)
+    const parsed = TransactionBuilder.fromXDR(envelope.toXdr('base64'), networkPassphrase)
     innerTx =
       parsed instanceof FeeBumpTransaction ? parsed.innerTransaction : (parsed as Transaction)
   } catch {
@@ -1226,7 +1223,7 @@ function verifyTokenTransferFromResult(
 
   verifyTokenTransfer(innerTx, expected)
 
-  return innerTx.hash().toString('hex')
+  return Buffer.from(innerTx.hash()).toString('hex')
 }
 
 // ---------------------------------------------------------------------------
@@ -1256,22 +1253,22 @@ function validateSimulationEvents(
   const transferEvents: Array<{ from: string; to: string; amount: bigint; contract: string }> = []
 
   for (const event of events) {
-    const contractEvent = event.event()
+    const contractEvent = event.event
     // Only process contract events — skip system and diagnostic events
-    if (contractEvent.type().name !== 'contract') continue
+    if (contractEvent.type.name !== 'contract') continue
 
-    const body = contractEvent.body().v0()
-    const topics = body.topics()
+    const body = contractEvent.body.v0
+    const topics = body.topics
     if (topics.length < 3) continue
 
     // CAP-46: topic[0] = "transfer"
-    const topicName = topics[0].sym?.()?.toString()
+    const topicName = topics[0].type === 'scvSymbol' ? topics[0].sym.toString() : undefined
     if (topicName !== 'transfer') continue
 
     const from = Address.fromScVal(topics[1]).toString()
     const to = Address.fromScVal(topics[2]).toString()
-    const amount = scValToBigInt(body.data())
-    const contractId = contractEvent.contractId()
+    const amount = scValToBigInt(body.data)
+    const contractId = contractEvent.contractId
     if (!contractId) {
       throw new PaymentVerificationError(
         `${LOG_PREFIX} Transfer event is missing contract ID — cannot verify source contract.`,

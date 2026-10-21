@@ -50,7 +50,7 @@ describe('verifyInvokeContractOp', () => {
 
     expect(result.contractAddress).toBe(CONTRACT_ID)
     expect(result.invokeArgs).toBeDefined()
-    expect(result.invokeArgs.functionName().toString()).toBe('transfer')
+    expect(result.invokeArgs.functionName.toString()).toBe('transfer')
   })
 
   it('returns correct contract address for different contract IDs', () => {
@@ -65,7 +65,7 @@ describe('verifyInvokeContractOp', () => {
     const tx = buildInvokeContractTx()
     const { invokeArgs } = verifyInvokeContractOp(tx, '[test]')
 
-    const args = invokeArgs.args()
+    const args = invokeArgs.args
     expect(args.length).toBe(3)
 
     const from = Address.fromScVal(args[0]).toString()
@@ -82,7 +82,7 @@ describe('verifyInvokeContractOp', () => {
     // Build a tx then strip operations via XDR manipulation
     const tx = buildInvokeContractTx()
     const envelope = tx.toEnvelope()
-    envelope.v1().tx().operations([]) // clear operations
+    xdr.expectUnionVariant(envelope, 'envelopeTypeTx').v1.tx.operations.splice(0) // clear operations
     const stripped = TransactionBuilder.fromXDR(envelope.toXDR('base64'), NETWORK) as typeof tx
 
     expect(() => verifyInvokeContractOp(stripped, '[test]')).toThrow(

@@ -7,6 +7,7 @@ import {
   Transaction,
   TransactionBuilder,
   nativeToScVal,
+  xdr,
 } from '@stellar/stellar-sdk'
 import { Server as SorobanServer, Api } from '@stellar/stellar-sdk/rpc'
 import { Credential, Method, Receipt, Store } from 'mppx'
@@ -315,14 +316,13 @@ function expectFeeBumpEnvelope(
  * rebuild the client's entries on the way to the chain.
  */
 function expectV2AuthEntries(inner: Transaction): void {
-  const arms = inner
-    .toEnvelope()
-    .v1()
-    .tx()
-    .operations()
-    .filter((op) => op.body().switch().name === 'invokeHostFunction')
-    .flatMap((op) => op.body().invokeHostFunctionOp().auth())
-    .map((entry) => entry.credentials().switch().name)
+  const arms = xdr
+    .expectUnionVariant(inner.toEnvelope(), 'envelopeTypeTx')
+    .v1.tx.operations.filter((op) => op.body.type === 'invokeHostFunction')
+    .flatMap(
+      (op) => xdr.expectUnionVariant(op.body, 'invokeHostFunction').invokeHostFunctionOp.auth,
+    )
+    .map((entry) => entry.credentials.type)
 
   expect(arms.length).toBeGreaterThan(0)
   expect([...new Set(arms)]).toEqual(['sorobanCredentialsAddressV2'])

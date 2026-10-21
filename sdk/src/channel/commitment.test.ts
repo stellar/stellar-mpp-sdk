@@ -158,7 +158,7 @@ describe('buildCommitmentMessage', () => {
       network: STELLAR_TESTNET,
     })
 
-    expect(local.toString('hex')).toBe(ON_CHAIN_BYTES_HEX)
+    expect(Buffer.from(local).toString('hex')).toBe(ON_CHAIN_BYTES_HEX)
   })
 
   it('round-trips through assertCommitmentBinds', () => {
