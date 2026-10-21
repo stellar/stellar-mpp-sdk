@@ -79,7 +79,7 @@ describe.skipIf(!CHANNEL_CONTRACT)('commitment encoding parity with the contract
       }),
     ]
 
-    expect(local.toString('hex')).toBe(onChain.toString('hex'))
+    expect(Buffer.from(local).toString('hex')).toBe(onChain.toString('hex'))
   })
 
   it('produces bytes a real keypair signature verifies against', async () => {
