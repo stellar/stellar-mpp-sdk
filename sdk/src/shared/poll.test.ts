@@ -101,6 +101,30 @@ describe('pollTransaction', () => {
     expect(rpc.getTransaction).toHaveBeenCalledTimes(1)
   })
 
+  it('caps the backoff sleep by the remaining budget', async () => {
+    const rpc = createMockRpc([{ status: 'NOT_FOUND' }])
+
+    let caughtError: unknown
+    const promise = pollTransaction(rpc, 'tx-hash-backoff', {
+      timeoutMs: 500,
+      delayMs: 1_000,
+      backoffMultiplier: 1,
+      jitterMs: 0,
+    }).catch((err) => {
+      caughtError = err
+    })
+
+    // One backoff would run to 1 s; the poll must end at its 500 ms budget.
+    await vi.advanceTimersByTimeAsync(500)
+    await promise
+
+    expect(caughtError).toBeInstanceOf(PollTimeoutError)
+    expect((caughtError as Error).message).toBe(
+      'Poll timed out after 500ms for transaction tx-hash-backoff',
+    )
+    expect(rpc.getTransaction).toHaveBeenCalledTimes(1)
+  })
+
   it('throws PollMaxAttemptsError when max attempts exceeded', async () => {
     const rpc = createMockRpc([{ status: 'NOT_FOUND' }])
 

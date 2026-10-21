@@ -119,7 +119,10 @@ export async function pollTransaction(
 
       const baseDelay = delayMs * Math.pow(backoffMultiplier, attempts - 1)
       const jitter = (Math.random() * 2 - 1) * jitterMs
-      const delay = Math.max(0, baseDelay + jitter)
+      // The sleep is capped by the remaining budget too, so the poll ends at
+      // `timeoutMs` and not one backoff later.
+      const remainingAfterRequest = timeoutMs - (Date.now() - startTime)
+      const delay = Math.max(0, Math.min(baseDelay + jitter, remainingAfterRequest))
       await new Promise((resolve) => setTimeout(resolve, delay))
     }
   } finally {
