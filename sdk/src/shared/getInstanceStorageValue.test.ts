@@ -1,7 +1,7 @@
 import { Address, Keypair, StrKey, xdr } from '@stellar/stellar-sdk'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { getInstanceStorageValue } from './getInstanceStorageValue.js'
+import { getInstanceStorageEntry, getInstanceStorageValue } from './getInstanceStorageValue.js'
 
 const mockGetLedgerEntries = vi.fn()
 const rpcServer = { getLedgerEntries: mockGetLedgerEntries } as any
@@ -13,22 +13,29 @@ const TIMEOUT_MS = 1_000
 /** Encodes a simple Soroban enum variant: `Vec([Symbol(name)])`. */
 const variant = (name: string) => xdr.ScVal.scvVec([xdr.ScVal.scvSymbol(name)])
 
+/** Builds the contract-data ledger entry stored under the channel's instance key. */
+function contractDataEntry(val: xdr.ScVal) {
+  return xdr.LedgerEntryData.contractData(
+    new xdr.ContractDataEntry({
+      ext: new xdr.ExtensionPoint(0),
+      contract: Address.fromString(CHANNEL_ADDRESS).toScAddress(),
+      key: xdr.ScVal.scvLedgerKeyContractInstance(),
+      durability: xdr.ContractDataDurability.persistent(),
+      val,
+    }),
+  )
+}
+
 /** Builds the `getLedgerEntries` response for a contract instance holding `storage`. */
 function instanceResponse(storage: [xdr.ScVal, xdr.ScVal][]) {
   const instance = new xdr.ScContractInstance({
     executable: xdr.ContractExecutable.contractExecutableStellarAsset(),
     storage: storage.map(([key, val]) => new xdr.ScMapEntry({ key, val })),
   })
-  const val = xdr.LedgerEntryData.contractData(
-    new xdr.ContractDataEntry({
-      ext: new xdr.ExtensionPoint(0),
-      contract: Address.fromString(CHANNEL_ADDRESS).toScAddress(),
-      key: xdr.ScVal.scvLedgerKeyContractInstance(),
-      durability: xdr.ContractDataDurability.persistent(),
-      val: xdr.ScVal.scvContractInstance(instance),
-    }),
-  )
-  return { entries: [{ val }], latestLedger: 100 }
+  return {
+    entries: [{ val: contractDataEntry(xdr.ScVal.scvContractInstance(instance)) }],
+    latestLedger: 100,
+  }
 }
 
 describe('getInstanceStorageValue', () => {
@@ -103,5 +110,107 @@ describe('getInstanceStorageValue', () => {
       'CloseEffectiveAtLedger',
     )
     expect(present?.u32()).toBe(42)
+  })
+})
+
+describe('getInstanceStorageEntry', () => {
+  beforeEach(() => {
+    mockGetLedgerEntries.mockReset()
+  })
+
+  it('returns the value together with the ledger the read was served at', async () => {
+    mockGetLedgerEntries.mockResolvedValue({
+      ...instanceResponse([[variant('CloseEffectiveAtLedger'), xdr.ScVal.scvU32(42)]]),
+      latestLedger: 4321,
+    })
+
+    const entry = await getInstanceStorageEntry(
+      rpcServer,
+      CHANNEL_ADDRESS,
+      TIMEOUT_MS,
+      'CloseEffectiveAtLedger',
+    )
+
+    expect(entry.value?.u32()).toBe(42)
+    expect(entry.latestLedger).toBe(4321)
+    expect(entry.instanceFound).toBe(true)
+    expect(mockGetLedgerEntries).toHaveBeenCalledOnce()
+  })
+
+  it('reports a present instance that lacks the key', async () => {
+    mockGetLedgerEntries.mockResolvedValue({
+      ...instanceResponse([[variant('Token'), Address.fromString(CHANNEL_ADDRESS).toScVal()]]),
+      latestLedger: 4322,
+    })
+
+    const entry = await getInstanceStorageEntry(
+      rpcServer,
+      CHANNEL_ADDRESS,
+      TIMEOUT_MS,
+      'CloseEffectiveAtLedger',
+    )
+
+    expect(entry).toEqual({ value: null, latestLedger: 4322, instanceFound: true })
+  })
+
+  it.each([{ entries: [] }, { entries: undefined }])(
+    'reports a missing instance entry with the ledger: $entries',
+    async ({ entries }) => {
+      mockGetLedgerEntries.mockResolvedValue({ entries, latestLedger: 777 })
+
+      const entry = await getInstanceStorageEntry(
+        rpcServer,
+        CHANNEL_ADDRESS,
+        TIMEOUT_MS,
+        'CloseEffectiveAtLedger',
+      )
+
+      expect(entry).toEqual({ value: null, latestLedger: 777, instanceFound: false })
+    },
+  )
+
+  it.each([
+    {
+      name: 'a ledger entry that is not contract data',
+      val: xdr.LedgerEntryData.ttl(
+        new xdr.TtlEntry({ keyHash: Buffer.alloc(32), liveUntilLedgerSeq: 1 }),
+      ),
+    },
+    {
+      name: 'a contract data value that is not a contract instance',
+      val: contractDataEntry(xdr.ScVal.scvU32(1)),
+    },
+    { name: 'an entry without a value', val: undefined },
+  ])('reports $name as a missing instance instead of an open one', async ({ val }) => {
+    mockGetLedgerEntries.mockResolvedValue({ entries: [{ val }], latestLedger: 778 })
+
+    const entry = await getInstanceStorageEntry(
+      rpcServer,
+      CHANNEL_ADDRESS,
+      TIMEOUT_MS,
+      'CloseEffectiveAtLedger',
+    )
+
+    expect(entry).toEqual({ value: null, latestLedger: 778, instanceFound: false })
+  })
+
+  it('reports an instance without a storage map as present without the key', async () => {
+    const instance = new xdr.ScContractInstance({
+      executable: xdr.ContractExecutable.contractExecutableStellarAsset(),
+      storage: null,
+    })
+    mockGetLedgerEntries.mockResolvedValue({
+      entries: [{ val: contractDataEntry(xdr.ScVal.scvContractInstance(instance)) }],
+      latestLedger: 779,
+    })
+
+    const entry = await getInstanceStorageEntry(
+      rpcServer,
+      CHANNEL_ADDRESS,
+      TIMEOUT_MS,
+      'CloseEffectiveAtLedger',
+    )
+
+    expect(entry).toEqual({ value: null, latestLedger: 779, instanceFound: true })
   })
 })

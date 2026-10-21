@@ -8,10 +8,10 @@ import {
   type NetworkId,
 } from '../../constants.js'
 import { DEFAULT_SIM_TIMEOUT_SECS, DEFAULT_SIMULATION_TIMEOUT_MS } from '../../shared/defaults.js'
-import { StellarMppError } from '../../shared/errors.js'
+import { ChannelVerificationError, StellarMppError } from '../../shared/errors.js'
 import { scValToBigInt } from '../../shared/scval.js'
 import { withTimeout } from '../../shared/timeout.js'
-import { getInstanceStorageValue } from '../../shared/getInstanceStorageValue.js'
+import { getInstanceStorageEntry } from '../../shared/getInstanceStorageValue.js'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -20,6 +20,17 @@ import { getInstanceStorageValue } from '../../shared/getInstanceStorageValue.js
 export type ChannelState = {
   /** Current token balance held in the channel contract. */
   balance: bigint
+  /**
+   * Total amount the recipient has already withdrawn via `settle` or `close`.
+   * A close with a stored commitment is complete once this reaches its amount.
+   */
+  withdrawn: bigint
+  /**
+   * Total amount deposited into the channel (`balance + withdrawn`), read from
+   * the contract's `deposited()` in one call so a settle landing between the
+   * separate `balance` and `withdrawn` reads cannot overstate it.
+   */
+  deposited: bigint
   /** The refund waiting period in ledgers. */
   refundWaitingPeriod: number
   /** Token contract address. */
@@ -34,7 +45,12 @@ export type ChannelState = {
    * If the current ledger is past this value, the funder can call `refund`.
    */
   closeEffectiveAtLedger: number | null
-  /** Current ledger sequence at the time of the query. */
+  /** Ledger sequence `closeEffectiveAtLedger` was read at. */
+  closeStatusLedger: number
+  /**
+   * Latest ledger sequence, read before the close status, so
+   * `closeStatusLedger` is normally at or after it.
+   */
   currentLedger: number
 }
 
@@ -47,6 +63,9 @@ export type ChannelState = {
  *
  * This calls the contract's public getter functions via simulation
  * (no transaction fees) and reads instance storage for dispute status.
+ * Getter simulation failures propagate before the instance-storage read.
+ *
+ * @throws {ChannelVerificationError} If the instance entry is missing when read.
  *
  * @example
  * ```ts
@@ -99,53 +118,75 @@ export async function getChannelState(
         `Failed to simulate ${fnName} on channel ${channelAddress}: ${errorMsg}`,
       )
     }
-    return result.result?.retval
+    const retval = result.result?.retval
+    if (!retval) {
+      throw new StellarMppError(
+        `Failed to simulate ${fnName} on channel ${channelAddress}: missing return value`,
+      )
+    }
+    return retval
   }
 
-  // Run getter simulations in parallel
-  const [balanceVal, waitingPeriodVal, tokenVal, fromVal, toVal] = await Promise.all([
-    simulateGetter('balance'),
-    simulateGetter('refund_waiting_period'),
-    simulateGetter('token'),
-    simulateGetter('from'),
-    simulateGetter('to'),
-  ])
+  // Run getter simulations in parallel. Each simulation is its own ledger
+  // read, so `deposited` comes from the contract's getter rather than from
+  // `balance + withdrawn`: a settle landing between those two reads would
+  // otherwise overstate the deposit.
+  const [balanceVal, waitingPeriodVal, tokenVal, fromVal, toVal, withdrawnVal, depositedVal] =
+    await Promise.all([
+      simulateGetter('balance'),
+      simulateGetter('refund_waiting_period'),
+      simulateGetter('token'),
+      simulateGetter('from'),
+      simulateGetter('to'),
+      simulateGetter('withdrawn'),
+      simulateGetter('deposited'),
+    ])
 
-  const balance = scValToBigInt(balanceVal!)
-  if (!waitingPeriodVal) {
-    throw new StellarMppError(
-      `Failed to simulate refund_waiting_period on channel ${channelAddress}: missing return value`,
-    )
-  }
+  const balance = scValToBigInt(balanceVal)
+  const withdrawn = scValToBigInt(withdrawnVal)
+  const deposited = scValToBigInt(depositedVal)
   const refundWaitingPeriod = waitingPeriodVal.u32()
-  const token = Address.fromScVal(tokenVal!).toString()
-  const from = Address.fromScVal(fromVal!).toString()
-  const to = Address.fromScVal(toVal!).toString()
+  const token = Address.fromScVal(tokenVal).toString()
+  const from = Address.fromScVal(fromVal).toString()
+  const to = Address.fromScVal(toVal).toString()
 
-  // Read CloseEffectiveAtLedger from contract instance storage.
-  // The contract uses DataKey::CloseEffectiveAtLedger stored in instance storage.
-  const closeEntry = await getInstanceStorageValue(
-    server,
-    channelAddress,
-    simulationTimeoutMs,
-    'CloseEffectiveAtLedger',
-  )
-
-  const closeEffectiveAtLedger = closeEntry ? closeEntry.u32() : null
-
+  // Read the latest ledger before the close status, so the status covers it
+  // even when a ledger closes between the two reads.
   const latestLedger = await withTimeout(
     server.getLatestLedger(),
     simulationTimeoutMs,
     `getLatestLedger for channel ${channelAddress}`,
   )
 
+  // Read CloseEffectiveAtLedger from contract instance storage, together with
+  // the ledger that read was served at, so the close status carries its date.
+  // An existing instance without that key is open; a missing instance cannot
+  // be treated as open because it may be archived or the address may be wrong.
+  const closeEntry = await getInstanceStorageEntry(
+    server,
+    channelAddress,
+    simulationTimeoutMs,
+    'CloseEffectiveAtLedger',
+  )
+  if (!closeEntry.instanceFound) {
+    throw new ChannelVerificationError(
+      '[stellar:channel] Channel instance entry not found on-chain (archived or wrong address).',
+      { channel: channelAddress },
+    )
+  }
+  const closeEffectiveAtLedger = closeEntry.value ? closeEntry.value.u32() : null
+  const closeStatusLedger = closeEntry.latestLedger
+
   return {
     balance,
+    withdrawn,
+    deposited,
     refundWaitingPeriod,
     token,
     from,
     to,
     closeEffectiveAtLedger,
+    closeStatusLedger,
     currentLedger: latestLedger.sequence,
   }
 }

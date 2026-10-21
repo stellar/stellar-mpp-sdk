@@ -2,22 +2,39 @@ import { Address, rpc, xdr } from '@stellar/stellar-sdk'
 
 import { withTimeout } from './timeout.js'
 
+/** A value read from a contract's instance storage and the ledger the read was served at. */
+export type InstanceStorageEntry = {
+  /** The stored value, or null when the key is absent. */
+  value: xdr.ScVal | null
+  /** Latest ledger sequence at the time of the read, as reported by the RPC server. */
+  latestLedger: number
+  /**
+   * Whether a readable contract instance entry was found. False when no entry
+   * comes back (archived contract, wrong address) and when the entry is not a
+   * contract instance, which a caller may need to tell apart from an instance
+   * that merely lacks the key.
+   */
+  instanceFound: boolean
+}
+
 /**
- * Returns the value of the key specified from the contract's DataKey in the instance storage.
+ * Reads the value stored under the given DataKey in the contract's instance
+ * storage, together with the ledger the read was served at, so callers can
+ * date the value they observed.
  *
  * @param server - The RPC server instance to query.
  * @param channelAddress - The address of the channel contract.
- * @param simulationTimeoutMs - Timeout for the simulation in milliseconds.
+ * @param simulationTimeoutMs - Timeout for the read in milliseconds.
  * @param key - The name of the key to retrieve from the instance storage.
- * @returns ScVal or null if not found.
+ * @returns The value (or null if not found), whether the instance entry exists,
+ *   and the RPC server's latest ledger.
  */
-
-export async function getInstanceStorageValue(
+export async function getInstanceStorageEntry(
   server: rpc.Server,
   channelAddress: string,
   simulationTimeoutMs: number,
   key: string,
-): Promise<xdr.ScVal | null> {
+): Promise<InstanceStorageEntry> {
   const contractId = Address.fromString(channelAddress)
   const instanceKey = xdr.LedgerKey.contractData(
     new xdr.LedgerKeyContractData({
@@ -32,31 +49,49 @@ export async function getInstanceStorageValue(
     simulationTimeoutMs,
     `getLedgerEntries for channel ${channelAddress}`,
   )
-  if (!response.entries || response.entries.length === 0) {
-    return null
-  }
+  const latestLedger = response.latestLedger
+  const notFound: InstanceStorageEntry = { value: null, latestLedger, instanceFound: false }
+  if (!response.entries || response.entries.length === 0) return notFound
 
-  const entry = response.entries[0]
-  const ledgerData = entry.val
-  const contractData = ledgerData?.contractData?.()
-  if (!contractData) return null
-  const instance = contractData.val?.()?.instance?.()
-  if (!instance) return null
-  const instanceStorage = instance.storage()
+  // An entry that is not a contract instance cannot be read as one, so it is
+  // reported as not found rather than as an instance that lacks the key.
+  const ledgerData = response.entries[0].val
+  if (ledgerData?.switch().value !== xdr.LedgerEntryType.contractData().value) return notFound
+  const stored = ledgerData.contractData().val()
+  if (stored.switch().value !== xdr.ScValType.scvContractInstance().value) return notFound
+  const instanceStorage = stored.instance().storage()
 
-  if (!instanceStorage) return null
+  // An instance may have no storage map at all: it exists, but holds no key.
+  if (!instanceStorage) return { value: null, latestLedger, instanceFound: true }
 
   // Search for the requested DataKey variant in the instance storage map.
   // Soroban encodes simple enum variants as ScVal::Vec([ScVal::Symbol(name)])
-  for (const entry of instanceStorage) {
-    const entryKey = entry.key()
-    if (isEnumVariant(entryKey, key)) {
-      const val = entry.val()
-      return val
+  for (const item of instanceStorage) {
+    if (isEnumVariant(item.key(), key)) {
+      return { value: item.val(), latestLedger, instanceFound: true }
     }
   }
 
-  return null
+  return { value: null, latestLedger, instanceFound: true }
+}
+
+/**
+ * Returns the value of the key specified from the contract's DataKey in the instance storage.
+ *
+ * @param server - The RPC server instance to query.
+ * @param channelAddress - The address of the channel contract.
+ * @param simulationTimeoutMs - Timeout for the simulation in milliseconds.
+ * @param key - The name of the key to retrieve from the instance storage.
+ * @returns ScVal or null if not found.
+ */
+export async function getInstanceStorageValue(
+  server: rpc.Server,
+  channelAddress: string,
+  simulationTimeoutMs: number,
+  key: string,
+): Promise<xdr.ScVal | null> {
+  const { value } = await getInstanceStorageEntry(server, channelAddress, simulationTimeoutMs, key)
+  return value
 }
 
 /**

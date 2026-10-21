@@ -54,6 +54,41 @@ export function validateContractAddress(address: unknown): void {
   }
 }
 
+/**
+ * Validates a configured numeric bound.
+ *
+ * Bounds such as fee ceilings, send caps, timeouts and concurrency limits are
+ * compared with `>`, and a zero or negative value would disable or stall them.
+ * `NaN` or `Infinity` would never trip a comparison, so they are rejected up front.
+ *
+ * @param name - The option name, used in the error message.
+ * @param value - The configured value.
+ * @throws {StellarMppError} If the value is not a positive safe integer.
+ */
+export function validatePositiveSafeInteger(name: string, value: number): void {
+  if (!(Number.isSafeInteger(value) && value > 0)) {
+    throw new StellarMppError(`\`${name}\` must be a positive safe integer.`, {
+      [name]: String(value),
+    })
+  }
+}
+
+/**
+ * Validates a configured numeric option where zero is a meaningful value,
+ * such as a poll delay of 0 or a token with 0 decimal places.
+ *
+ * @param name - The option name, used in the error message.
+ * @param value - The configured value.
+ * @throws {StellarMppError} If the value is not a non-negative safe integer.
+ */
+export function validateNonNegativeSafeInteger(name: string, value: number): void {
+  if (!(Number.isSafeInteger(value) && value >= 0)) {
+    throw new StellarMppError(`\`${name}\` must be a non-negative safe integer.`, {
+      [name]: String(value),
+    })
+  }
+}
+
 /** Largest value representable by a signed 128-bit integer (Soroban `i128`). */
 export const I128_MAX = 2n ** 127n - 1n
 
