@@ -19,12 +19,14 @@ import {
   DEFAULT_LEDGER_CLOSE_TIME,
   DEFAULT_TIMEOUT,
   NETWORK_PASSPHRASE,
+  type NetworkId,
   SOROBAN_RPC_URLS,
 } from '../../constants.js'
 import * as Methods from '../Methods.js'
 import { fromBaseUnits } from '../Methods.js'
 import { StellarMppError } from '../../shared/errors.js'
 import { resolveKeypair } from '../../shared/keypairs.js'
+import { assertRpcServesNetwork } from '../../shared/rpc-network.js'
 import { resolveNetworkId, validateAmount } from '../../shared/validation.js'
 import { scValToBigInt } from '../../shared/scval.js'
 import { pollTransaction } from '../../shared/poll.js'
@@ -160,13 +162,14 @@ export function charge(parameters: charge.Parameters) {
     decimals = DEFAULT_DECIMALS,
     keypair: keypairParam,
     mode: defaultMode = 'pull',
+    network: pinnedNetwork,
     onProgress,
     pollDelayMs = DEFAULT_POLL_DELAY_MS,
     pollMaxAttempts = DEFAULT_POLL_MAX_ATTEMPTS,
     pollTimeoutMs = DEFAULT_POLL_TIMEOUT_MS,
     rpcUrl,
     secretKey,
-    simulationTimeoutMs: _simulationTimeoutMs = DEFAULT_SIMULATION_TIMEOUT_MS,
+    simulationTimeoutMs = DEFAULT_SIMULATION_TIMEOUT_MS,
     timeout = DEFAULT_TIMEOUT,
     useUpgradedAuth = false,
   } = parameters
@@ -187,6 +190,14 @@ export function charge(parameters: charge.Parameters) {
 
       const network = resolveNetworkId(request.methodDetails?.network)
 
+      // A pinned client signs for one network only.
+      if (pinnedNetwork && network !== pinnedNetwork) {
+        throw new StellarMppError(
+          `Network mismatch: server advertised "${network}" ` +
+            `but this client is pinned to "${pinnedNetwork}".`,
+        )
+      }
+
       onProgress?.({
         type: 'challenge',
         recipient,
@@ -197,6 +208,12 @@ export function charge(parameters: charge.Parameters) {
       const resolvedRpcUrl = rpcUrl ?? SOROBAN_RPC_URLS[network]
       const networkPassphrase = NETWORK_PASSPHRASE[network]
       const server = new rpc.Server(resolvedRpcUrl)
+
+      // A caller-supplied endpoint must serve the resolved network, so the
+      // simulation and the signature refer to the same chain.
+      if (rpcUrl) {
+        await assertRpcServesNetwork(server, rpcUrl, network, simulationTimeoutMs)
+      }
 
       // Validate the counterparty-supplied amount before converting it: an
       // out-of-range or malformed value would otherwise surface as an untyped
@@ -446,7 +463,13 @@ export declare namespace charge {
     keypair?: Keypair
     /** Number of decimal places for the token. @default 7 */
     decimals?: number
-    /** Custom Soroban RPC URL. Defaults based on network. */
+    /**
+     * Network this client signs for (e.g. `'stellar:testnet'`). When set, a
+     * challenge advertising any other network is rejected; when omitted, the
+     * network is taken from the challenge.
+     */
+    network?: NetworkId
+    /** Custom Soroban RPC URL, checked to serve the resolved network. Defaults based on network. */
     rpcUrl?: string
     /**
      * Controls how the charge transaction is submitted.
@@ -468,7 +491,10 @@ export declare namespace charge {
     pollDelayMs?: number
     /** Overall poll timeout in ms. @default 20_000 */
     pollTimeoutMs?: number
-    /** Simulation timeout in ms. @default 10_000 */
+    /**
+     * Timeout in ms for the check that a caller-supplied `rpcUrl` serves the
+     * expected network. @default 10_000
+     */
     simulationTimeoutMs?: number
     /**
      * Ask simulation to record CAP-71 `SOROBAN_CREDENTIALS_ADDRESS_V2`

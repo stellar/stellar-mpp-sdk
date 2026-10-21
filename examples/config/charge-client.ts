@@ -1,8 +1,13 @@
-import { parseOptional, parseStellarSecretKey } from '../../sdk/src/env.js'
+import { parseNetworkId, parseOptional, parseStellarSecretKey } from '../../sdk/src/env.js'
+import type { NetworkId } from '../../sdk/src/constants.js'
 
 export class Env {
   static get stellarSecret(): string {
     return parseStellarSecretKey('STELLAR_SECRET')
+  }
+
+  static get network(): NetworkId {
+    return parseNetworkId()
   }
 
   static get serverUrl(): string {
