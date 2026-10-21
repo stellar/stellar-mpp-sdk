@@ -4711,6 +4711,26 @@ describe('channel server close transaction inspection (auth-tree injection)', ()
     return new Transaction(envelope, Networks.TESTNET)
   }
 
+  /** Returns the prepared close with other arguments and an auth root that matches them. */
+  function preparedCloseWithReplacedArgs(tx: Transaction): Transaction {
+    const envelope = tx.toEnvelope()
+    const op = envelope.v1().tx().operations()[0].body().invokeHostFunctionOp()
+    const invocation = op.hostFunction().invokeContract()
+    const [, signature] = invocation.args()
+    invocation.args([nativeToScVal(1n, { type: 'i128' }), signature])
+    op.auth([
+      new xdr.SorobanAuthorizationEntry({
+        credentials: xdr.SorobanCredentials.sorobanCredentialsSourceAccount(),
+        rootInvocation: new xdr.SorobanAuthorizedInvocation({
+          function:
+            xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(invocation),
+          subInvocations: [],
+        }),
+      }),
+    ])
+    return new Transaction(envelope, Networks.TESTNET)
+  }
+
   /** Keep a valid first entry to ensure every authorization entry is inspected. */
   function preparedCloseWithAuth(
     tx: Transaction,
@@ -4893,6 +4913,24 @@ describe('channel server close transaction inspection (auth-tree injection)', ()
 
         await expect(runClose()).rejects.toEqual(
           new ChannelVerificationError(`[stellar:channel] Prepared close authorization ${message}`),
+        )
+        expect(prepared?.signatures).toEqual([])
+        expect(mockSendTransaction).not.toHaveBeenCalled()
+      })
+
+      it('rejects a prepared close whose arguments differ from the requested close', async () => {
+        let prepared: Transaction | undefined
+        mockPrepareTransaction.mockImplementationOnce((tx: Transaction) => {
+          prepared = preparedCloseWithReplacedArgs(tx)
+          return prepared
+        })
+
+        // The auth root matches the replaced arguments, so only the operation
+        // check can catch the substitution.
+        await expect(runClose()).rejects.toEqual(
+          new ChannelVerificationError(
+            '[stellar:channel] Prepared close arguments do not match the requested close.',
+          ),
         )
         expect(prepared?.signatures).toEqual([])
         expect(mockSendTransaction).not.toHaveBeenCalled()

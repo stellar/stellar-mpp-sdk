@@ -1064,16 +1064,22 @@ export function channel(parameters: channel.Parameters) {
 /**
  * Inspect a `prepareTransaction`-built close transaction before it is signed.
  *
- * `prepareTransaction` returns RPC-supplied authorization from recording-mode
- * simulation. The envelope signature authorizes source-account entries, so each
- * must be restricted to the expected channel's `close` invocation with exactly
- * the operation's arguments and no sub-invocations. Refuse other credential
- * types and root functions before signing.
+ * The operation must be the expected channel's `close` with the arguments the
+ * caller built, so the server signs no commitment other than the one it
+ * selected. `prepareTransaction` returns RPC-supplied authorization from
+ * recording-mode simulation. The envelope signature authorizes source-account
+ * entries, so each must be restricted to that same invocation with exactly its
+ * arguments and no sub-invocations. Refuse other credential types and root
+ * functions before signing.
  *
- * @throws {ChannelVerificationError} If the prepared close or its authorization
- *   entries do not match these restrictions.
+ * @throws {ChannelVerificationError} If the prepared close, its arguments or
+ *   its authorization entries do not match these restrictions.
  */
-function assertPreparedCloseIsSafe(preparedTx: Transaction, channelAddress: string): void {
+function assertPreparedCloseIsSafe(
+  preparedTx: Transaction,
+  channelAddress: string,
+  expectedArgs: xdr.ScVal[],
+): void {
   const { contractAddress, invokeArgs, authEntries } = verifyInvokeContractOp(
     preparedTx,
     LOG_PREFIX,
@@ -1092,6 +1098,11 @@ function assertPreparedCloseIsSafe(preparedTx: Transaction, channelAddress: stri
     )
   }
   const closeArgs = invokeArgs.args()
+  if (!sameScVals(closeArgs, expectedArgs)) {
+    throw new ChannelVerificationError(
+      `${LOG_PREFIX} Prepared close arguments do not match the requested close.`,
+    )
+  }
   for (const entry of authEntries) {
     if (
       entry.credentials().switch().value !==
@@ -1122,11 +1133,7 @@ function assertPreparedCloseIsSafe(preparedTx: Transaction, channelAddress: stri
         `${LOG_PREFIX} Prepared close authorization invokes an unexpected function.`,
       )
     }
-    const args = rootArgs.args()
-    if (
-      args.length !== closeArgs.length ||
-      args.some((arg, index) => arg.toXDR('base64') !== closeArgs[index].toXDR('base64'))
-    ) {
+    if (!sameScVals(rootArgs.args(), closeArgs)) {
       throw new ChannelVerificationError(
         `${LOG_PREFIX} Prepared close authorization arguments do not match the close operation.`,
       )
@@ -1138,6 +1145,14 @@ function assertPreparedCloseIsSafe(preparedTx: Transaction, channelAddress: stri
       )
     }
   }
+}
+
+/** Whether two argument lists encode the same values. */
+function sameScVals(a: xdr.ScVal[], b: xdr.ScVal[]): boolean {
+  return (
+    a.length === b.length &&
+    a.every((arg, index) => arg.toXDR('base64') === b[index].toXDR('base64'))
+  )
 }
 
 /**
@@ -1591,11 +1606,11 @@ async function buildClose(parameters: close.Parameters): Promise<PreparedClose> 
   const server = new rpc.Server(resolvedRpcUrl)
 
   const contract = new Contract(channelAddress)
-  const closeOp = contract.call(
-    'close',
+  const closeArgs = [
     nativeToScVal(amount, { type: 'i128' }),
     nativeToScVal(Buffer.from(signature), { type: 'bytes' }),
-  )
+  ]
+  const closeOp = contract.call('close', ...closeArgs)
 
   const signer = resolveKeypair(feePayer.envelopeSigner)
   const read = { channel: channelAddress, simulationTimeoutMs }
@@ -1617,7 +1632,7 @@ async function buildClose(parameters: close.Parameters): Promise<PreparedClose> 
     `prepareTransaction for close on channel ${channelAddress}`,
     read,
   )
-  assertPreparedCloseIsSafe(prepared, channelAddress)
+  assertPreparedCloseIsSafe(prepared, channelAddress, closeArgs)
   assertCloseFeeWithinCeiling(prepared, maxFeeBumpStroops)
   prepared.sign(signer)
 
