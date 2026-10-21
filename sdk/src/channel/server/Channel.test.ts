@@ -9,6 +9,7 @@ import {
   xdr,
 } from '@stellar/stellar-sdk'
 import { STELLAR_TESTNET } from '../../constants.js'
+import { signWithTorsionedNonce } from '../../shared/ed25519.test-helpers.js'
 import { buildCommitmentMessage } from '../commitment.js'
 import { Challenge, Credential, Store } from 'mppx'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -667,15 +668,27 @@ describe('stellar server channel verification', () => {
     ).rejects.toThrow('Invalid signature')
   })
 
-  it('rejects invalid ed25519 signature (bad sig, valid hex)', async () => {
+  it.each([
+    ['bad sig, valid hex', 'ab'.repeat(64)],
+    [
+      'signature the channel contract would not accept',
+      signWithTorsionedNonce(
+        COMMITMENT_KEY,
+        buildCommitmentMessage({
+          channel: CHANNEL_ADDRESS,
+          amount: 1_000_000n,
+          network: STELLAR_TESTNET,
+        }),
+      ).toString('hex'),
+    ],
+  ])('rejects invalid ed25519 signature (%s)', async (_label, signature) => {
     const commitmentBytes = Buffer.from('test-commitment-data')
     mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
-    // Use a valid-length hex string that is NOT a valid signature
     const credential = makeCredential({
       amount: '1000000',
       challengeAmount: '1000000',
-      signature: 'ab'.repeat(64), // 128 hex chars, 64 bytes, but wrong sig
+      signature,
     })
 
     const method = channel({

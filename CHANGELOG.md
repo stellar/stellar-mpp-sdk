@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Verify channel vouchers, authorization entries and push-mode source signatures with the Soroban host's ed25519 rules, so an accepted signature is one the network accepts [#97](https://github.com/stellar/stellar-mpp-sdk/pull/97)
+  - `@noble/ed25519` and `@noble/hashes`, already in the tree through `@stellar/stellar-sdk`, become direct dependencies
 - Raise the `mppx` peer dependency to `^0.13.4` (from `^0.10.1`) — consumers must bump. `mppx@0.13.4` in turn raises its `viem` peer minimum to `>=2.57.1` (the development `viem` dependency here moves to `^2.57.1` to match) and its own `zod` dependency to `^4.6.5`; this repo's `zod` dependency moves to `^4.6.5` too so a single zod copy resolves, avoiding a type mismatch in `Challenge`/`Credential` generics. No SDK source changes are needed for the bump. `mppx@0.10.1` had already raised the `viem` peer minimum to `>=2.54.0` [#78](https://github.com/stellar/stellar-mpp-sdk/pull/78). [#94](https://github.com/stellar/stellar-mpp-sdk/pull/94)
 - **BREAKING:** Base each channel commitment on the lower of two values: the highest cumulative that the client signed, and the cumulative in the server challenge. The client does not use a server value above the local value [#91](https://github.com/stellar/stellar-mpp-sdk/pull/91)
   - The channel client rejects a challenge `cumulativeAmount` that is not a non-negative integer string in the i128 range, with a `StellarMppError`. Before, the client ignored this field. A server must send a valid value or omit the field
