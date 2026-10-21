@@ -19,7 +19,11 @@ import {
   StellarMppError,
 } from '../../shared/errors.js'
 import { TimeoutError } from '../../shared/timeout.js'
-import { PollMaxAttemptsError, TransactionFailedError } from '../../shared/poll.js'
+import {
+  PollMaxAttemptsError,
+  PollTimeoutError,
+  TransactionFailedError,
+} from '../../shared/poll.js'
 
 import { DEFAULT_SIMULATION_TIMEOUT_MS } from '../../shared/defaults.js'
 
@@ -2931,6 +2935,25 @@ describe('closeWithLatestCommitment', () => {
     expect(error).toBeInstanceOf(TimeoutError)
     expect((error as Error).message).toBe(
       `sendTransaction for close on channel ${CHANNEL_ADDRESS} timed out after 1ms`,
+    )
+    expect(await store.get(cumulativeKey)).toEqual({ ...storedPair(accepted), closing: true })
+    expect(await store.get(closeSendsKey)).toEqual({ count: 1 })
+  })
+
+  it('bounds a hung getTransaction poll with pollTimeoutMs and keeps its slot', async () => {
+    const { store, method, parameters } = setup()
+    const accepted = voucher(100n)
+    await method.verify(accepted)
+    mockGetTransaction.mockReturnValueOnce(new Promise<never>(() => {}))
+
+    const error = await closeWithLatestCommitment({ ...parameters, pollTimeoutMs: 1 }).catch(
+      (e: unknown) => e,
+    )
+
+    // The send was accepted, so the slot stays used; only the wait is bounded.
+    expect(error).toBeInstanceOf(PollTimeoutError)
+    expect((error as Error).message).toBe(
+      'Poll timed out after 1ms for transaction stored-close-hash',
     )
     expect(await store.get(cumulativeKey)).toEqual({ ...storedPair(accepted), closing: true })
     expect(await store.get(closeSendsKey)).toEqual({ count: 1 })

@@ -9,6 +9,7 @@ import {
 } from './defaults.js'
 import { StellarMppError } from './errors.js'
 import type { Semaphore } from './semaphore.js'
+import { TimeoutError, withTimeout } from './timeout.js'
 
 export class PollTimeoutError extends Error {
   constructor(message: string) {
@@ -52,7 +53,8 @@ export interface PollOptions {
  * @param opts.delayMs - Base delay between attempts (before backoff).
  * @param opts.backoffMultiplier - Multiplier applied to `delayMs` on each successive attempt.
  * @param opts.jitterMs - Maximum random jitter added/subtracted from each delay.
- * @param opts.timeoutMs - Hard wall-clock timeout across all attempts.
+ * @param opts.timeoutMs - Hard wall-clock timeout across all attempts; a request that hangs is
+ *   abandoned when it runs out.
  * @param opts.semaphore - Optional concurrency limiter.
  * @returns The successful {@link rpc.Api.GetTransactionResponse} once the transaction confirms.
  * @throws {PollTimeoutError} If `timeoutMs` elapses before a terminal status.
@@ -77,12 +79,26 @@ export async function pollTransaction(
     const startTime = Date.now()
     let attempts = 0
 
-    while (true) {
-      if (Date.now() - startTime > timeoutMs) {
-        throw new PollTimeoutError(`Poll timed out after ${timeoutMs}ms for transaction ${hash}`)
-      }
+    const timedOut = () =>
+      new PollTimeoutError(`Poll timed out after ${timeoutMs}ms for transaction ${hash}`)
 
-      const result = await rpcServer.getTransaction(hash)
+    while (true) {
+      const remainingMs = timeoutMs - (Date.now() - startTime)
+      if (remainingMs <= 0) throw timedOut()
+
+      // Each request is bounded by the remaining budget, so a hung RPC call
+      // cannot keep the poll running past `timeoutMs`.
+      let result: rpc.Api.GetTransactionResponse
+      try {
+        result = await withTimeout(
+          rpcServer.getTransaction(hash),
+          remainingMs,
+          `getTransaction for ${hash}`,
+        )
+      } catch (error) {
+        if (error instanceof TimeoutError) throw timedOut()
+        throw error
+      }
 
       if (result.status === 'SUCCESS') {
         return result
