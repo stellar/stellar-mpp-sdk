@@ -281,7 +281,7 @@ function expectPlainEnvelope(
   ) as Transaction
   expect(envelope.source).toBe(expectedSource.publicKey())
   expect(envelope.signatures.length).toBe(1)
-  expect(envelope.signatures[0].hint()).toEqual(expectedSource.signatureHint())
+  expect(envelope.signatures[0].hint.toBytes()).toEqual(expectedSource.signatureHint())
   return envelope
 }
 
@@ -301,12 +301,12 @@ function expectFeeBumpEnvelope(
   ) as FeeBumpTransaction
   expect(outerEnv.feeSource).toBe(feeBumpKP.publicKey())
   expect(outerEnv.signatures.length).toBe(1)
-  expect(outerEnv.signatures[0].hint()).toEqual(feeBumpKP.signatureHint())
+  expect(outerEnv.signatures[0].hint.toBytes()).toEqual(feeBumpKP.signatureHint())
 
   const innerEnv = outerEnv.innerTransaction
   expect(innerEnv.source).toBe(innerKP.publicKey())
   expect(innerEnv.signatures.length).toBe(1)
-  expect(innerEnv.signatures[0].hint()).toEqual(innerKP.signatureHint())
+  expect(innerEnv.signatures[0].hint.toBytes()).toEqual(innerKP.signatureHint())
   return outerEnv
 }
 
