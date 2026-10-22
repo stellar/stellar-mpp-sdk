@@ -135,7 +135,8 @@ function assertTransactionAuthorizesOnlyTransfer(
  * Simulates `tx` and assembles the footprint, resource fee, and recorded auth
  * entries onto it. Equivalent to `rpc.Server.prepareTransaction`, except that
  * `useUpgradedAuth` is forwarded to the RPC so it records CAP-71 V2
- * (address-bound) auth entries when requested.
+ * (address-bound) auth entries only when requested. `prepareTransaction`
+ * defaults the flag to `true`, so the off path passes `false` explicitly.
  */
 async function prepareForSigning(
   server: rpc.Server,
@@ -143,7 +144,7 @@ async function prepareForSigning(
   useUpgradedAuth: boolean,
 ): Promise<Transaction> {
   if (!useUpgradedAuth) {
-    return server.prepareTransaction(tx)
+    return server.prepareTransaction(tx, false)
   }
   const simulation = await server.simulateTransaction(tx, undefined, undefined, true)
   if (rpc.Api.isSimulationError(simulation)) {
