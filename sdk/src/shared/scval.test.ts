@@ -41,6 +41,19 @@ describe('scValToBigInt', () => {
     expect(scValToBigInt(val)).toBe((1n << 64n) + 99n)
   })
 
+  it('converts negative scvI128', () => {
+    // Two's complement across both limbs: hi = -1, lo = 2^64 - 1 is -1.
+    const val = xdr.ScVal.scvI128(
+      new xdr.Int128Parts({ hi: xdr.Int64(-1), lo: xdr.Uint64(0xffffffffffffffffn) }),
+    )
+    expect(scValToBigInt(val)).toBe(-1n)
+  })
+
+  it('converts negative scvI128 with a large magnitude', () => {
+    const val = xdr.ScVal.scvI128(new xdr.Int128Parts({ hi: xdr.Int64(-2), lo: xdr.Uint64(1) }))
+    expect(scValToBigInt(val)).toBe((-2n << 64n) + 1n)
+  })
+
   it('converts scvU128 with non-zero hi (large amounts)', () => {
     // Verifies u128 with significant hi bits also decodes correctly
     const val = xdr.ScVal.scvU128(new xdr.Uint128Parts({ hi: xdr.Uint64(2), lo: xdr.Uint64(0) }))

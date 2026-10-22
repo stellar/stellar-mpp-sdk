@@ -91,7 +91,7 @@ Client (Funder)                 Server (Recipient)                Stellar
 
 ## Prerequisites
 
-- [Node.js](https://nodejs.org/) 22+
+- [Node.js](https://nodejs.org/) 22.12+
 - [pnpm](https://pnpm.io/) 10.33+ (via [corepack](https://nodejs.org/api/corepack.html))
 
 ```bash
