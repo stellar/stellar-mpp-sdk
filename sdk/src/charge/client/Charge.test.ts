@@ -271,7 +271,7 @@ function decodeCredential(credential: string) {
 
 // The transaction carried by a decoded `type: 'transaction'` credential.
 function decodeCredentialTx(credential: string): Transaction {
-  return TransactionBuilder.fromXDR(
+  return TransactionBuilder.fromXdr(
     decodeCredential(credential).payload.transaction,
     NETWORK_PASSPHRASE[STELLAR_TESTNET],
   ) as Transaction
@@ -300,7 +300,7 @@ function expectSignedByClient(
       entry,
       addressCredentials.signatureExpirationLedger,
       NETWORK_PASSPHRASE[STELLAR_TESTNET],
-    ).toXDR(),
+    ).toXdr(),
   )
   expect(TEST_KEYPAIR.verify(payload, Buffer.from(sig.signature))).toBe(true)
 }

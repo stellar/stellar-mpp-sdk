@@ -380,7 +380,7 @@ export function charge(parameters: charge.Parameters) {
       onProgress?.({ type: 'signing' })
       prepared.sign(clientKP)
 
-      const signedXdr = prepared.toXDR()
+      const signedXdr = prepared.toXdr()
       onProgress?.({ type: 'signed', transaction: signedXdr })
 
       const source = `did:pkh:${network}:${clientKP.publicKey()}`

@@ -102,7 +102,7 @@ describe('charge cross-process replay protection', () => {
 
     mockGetTransaction.mockResolvedValue({
       status: 'SUCCESS',
-      envelopeXdr: tx.toXDR(),
+      envelopeXdr: tx.toXdr(),
     })
 
     const method1 = serverCharge({

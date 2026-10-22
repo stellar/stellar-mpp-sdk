@@ -139,7 +139,7 @@ function feeBumpChargeClient(opts: {
 
       return Credential.serialize({
         challenge,
-        payload: { type: 'transaction' as const, transaction: feeBumpTx.toXDR() },
+        payload: { type: 'transaction' as const, transaction: feeBumpTx.toXdr() },
         source,
       })
     },
@@ -275,7 +275,7 @@ function expectPlainEnvelope(
   expectedSource: Keypair,
 ): Transaction {
   expect(tx.feeBump).toBe(false)
-  const envelope = TransactionBuilder.fromXDR(
+  const envelope = TransactionBuilder.fromXdr(
     tx.envelopeXdr,
     NETWORK_PASSPHRASE[STELLAR_TESTNET],
   ) as Transaction
@@ -295,7 +295,7 @@ function expectFeeBumpEnvelope(
   innerKP: Keypair,
 ): FeeBumpTransaction {
   expect(tx.feeBump).toBe(true)
-  const outerEnv = TransactionBuilder.fromXDR(
+  const outerEnv = TransactionBuilder.fromXdr(
     tx.envelopeXdr,
     NETWORK_PASSPHRASE[STELLAR_TESTNET],
   ) as FeeBumpTransaction

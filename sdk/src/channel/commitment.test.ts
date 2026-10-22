@@ -42,7 +42,7 @@ function buildCommitmentBytes(opts: {
       val: xdr.ScVal.scvBytes(networkId),
     }),
   ])
-  return map.toXDR()
+  return map.toXdr()
 }
 
 describe('assertCommitmentBinds', () => {

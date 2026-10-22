@@ -29,7 +29,7 @@ vi.mock('@stellar/stellar-sdk', async (importOriginal) => {
       },
       {
         ...OriginalTransactionBuilder,
-        fromXDR: (...args: unknown[]) => mockFromXDR(...args),
+        fromXdr: (...args: unknown[]) => mockFromXDR(...args),
       },
     ),
     rpc: {

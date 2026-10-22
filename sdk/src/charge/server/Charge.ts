@@ -509,7 +509,7 @@ export function charge(parameters: charge.Parameters) {
           const txXdr = payload.transaction
 
           // Detect FeeBump by inspecting the XDR envelope type directly.
-          // Using explicit constructors instead of TransactionBuilder.fromXDR +
+          // Using explicit constructors instead of TransactionBuilder.fromXdr +
           // instanceof avoids false negatives when the FeeBumpTransaction class
           // reference differs across module boundaries (e.g. in test environments).
           const txEnvelope = xdr.TransactionEnvelope.fromXdr(txXdr, 'base64')
@@ -1211,7 +1211,7 @@ function verifyTokenTransferFromResult(
 
   let innerTx: Transaction
   try {
-    const parsed = TransactionBuilder.fromXDR(envelope.toXdr('base64'), networkPassphrase)
+    const parsed = TransactionBuilder.fromXdr(envelope.toXdr('base64'), networkPassphrase)
     innerTx =
       parsed instanceof FeeBumpTransaction ? parsed.innerTransaction : (parsed as Transaction)
   } catch {

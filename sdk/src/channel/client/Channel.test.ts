@@ -112,7 +112,7 @@ function buildCommitment(opts: {
       val: xdr.ScVal.scvBytes(networkId),
     }),
   ])
-  return map.toXDR()
+  return map.toXdr()
 }
 
 // ── Construction tests ─────────────────────────────────────────────────────

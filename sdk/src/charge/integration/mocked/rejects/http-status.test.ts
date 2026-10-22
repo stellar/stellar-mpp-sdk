@@ -111,7 +111,7 @@ describe('charge rejection HTTP status (real mppx handler)', () => {
 
     const response = await respondWith(chargeHandler(), {
       type: 'transaction',
-      transaction: tx.toXDR(),
+      transaction: tx.toXdr(),
     })
 
     expect(response.status).toBe(402)
@@ -149,7 +149,7 @@ describe('charge rejection HTTP status (real mppx handler)', () => {
 
     const response = await respondWith(chargeHandler(), {
       type: 'transaction',
-      transaction: tx.toXDR(),
+      transaction: tx.toXdr(),
     })
 
     expect(mockSimulateTransaction).toHaveBeenCalledTimes(1)

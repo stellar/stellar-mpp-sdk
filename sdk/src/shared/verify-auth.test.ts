@@ -111,7 +111,7 @@ function entrySignedByOther(
 ): Promise<xdr.SorobanAuthorizationEntry> {
   return authorizeInvocation({
     signer: (preimage: xdr.HashIdPreimage) => ({
-      signature: attacker.sign(hash(preimage.toXDR())),
+      signature: attacker.sign(hash(preimage.toXdr())),
       publicKey: attacker.publicKey(),
     }),
     validUntilLedgerSeq: VALID_UNTIL_LEDGER,
@@ -136,7 +136,7 @@ function entrySignedOver(signer: Keypair, arm: Arm, preimage: Arm) {
       entryFor(signer.publicKey(), { arm: preimage, rootInvocation }),
       VALID_UNTIL_LEDGER,
       NETWORK,
-    ).toXDR(),
+    ).toXdr(),
   )
   const signature = xdr.ScVal.scvVec([
     accountSignature(signer.rawPublicKey(), signer.sign(payload)),

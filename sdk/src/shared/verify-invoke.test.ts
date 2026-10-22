@@ -73,7 +73,7 @@ describe('verifyInvokeContractOp', () => {
     const to = Address.fromScVal(args[1]).toString()
     expect(to).toBe(DESTINATION_ADDRESS)
     const amount = nativeToScVal(1000000n, { type: 'i128' })
-    expect(args[2].toXDR('hex')).toBe(amount.toXDR('hex'))
+    expect(args[2].toXdr('hex')).toBe(amount.toXdr('hex'))
   })
 
   // ── Operation count ──────────────────────────────────────────────────
@@ -83,7 +83,7 @@ describe('verifyInvokeContractOp', () => {
     const tx = buildInvokeContractTx()
     const envelope = tx.toEnvelope()
     xdr.expectUnionVariant(envelope, 'envelopeTypeTx').v1.tx.operations.splice(0) // clear operations
-    const stripped = TransactionBuilder.fromXDR(envelope.toXDR('base64'), NETWORK) as typeof tx
+    const stripped = TransactionBuilder.fromXdr(envelope.toXdr('base64'), NETWORK) as typeof tx
 
     expect(() => verifyInvokeContractOp(stripped, '[test]')).toThrow(
       'must contain exactly one operation',

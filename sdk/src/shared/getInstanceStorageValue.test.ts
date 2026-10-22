@@ -56,7 +56,7 @@ describe('getInstanceStorageValue', () => {
       'CommitmentKey',
     )
 
-    expect(result?.toXDR('base64')).toBe(commitmentKey.toXDR('base64'))
+    expect(result?.toXdr('base64')).toBe(commitmentKey.toXdr('base64'))
     expect(mockGetLedgerEntries).toHaveBeenCalledOnce()
     const [ledgerKey] = mockGetLedgerEntries.mock.calls[0] as [xdr.LedgerKey]
     const contractDataKey = xdr.expectUnionVariant(ledgerKey, 'contractData').contractData
