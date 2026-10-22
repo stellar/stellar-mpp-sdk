@@ -786,8 +786,7 @@ describe('charge createCredential', () => {
 
     const tx = await createSponsoredTx({ useUpgradedAuth: true })
 
-    // Simulation is asked for upgraded auth; prepareTransaction (which cannot
-    // pass the flag on stellar-sdk 16) is bypassed.
+    // The client simulates directly with the flag; prepareTransaction is bypassed.
     expect(mockPrepareTransaction).not.toHaveBeenCalled()
     expect(mockSimulateTransaction).toHaveBeenCalledTimes(1)
     expect(mockSimulateTransaction.mock.calls[0][3]).toBe(true)
@@ -801,16 +800,16 @@ describe('charge createCredential', () => {
     expectSignedByClient(entry, creds.addressV2)
   })
 
-  it('keeps using prepareTransaction (legacy V1 entries) when useUpgradedAuth is off', async () => {
+  it('uses prepareTransaction, which requests V2 entries itself, when useUpgradedAuth is off', async () => {
     mockPrepareTransaction.mockClear()
     mockSimulateTransaction.mockClear()
-    mockSponsoredPrepare('address')
+    mockSponsoredPrepare('addressV2')
 
     const creds = soleAuthEntry(await createSponsoredTx()).credentials
 
     expect(mockSimulateTransaction).not.toHaveBeenCalled()
     expect(mockPrepareTransaction).toHaveBeenCalledTimes(1)
-    expect(creds.type).toBe('sorobanCredentialsAddress')
+    expect(creds.type).toBe('sorobanCredentialsAddressV2')
   })
 
   it('surfaces a simulation error when useUpgradedAuth is set', async () => {
