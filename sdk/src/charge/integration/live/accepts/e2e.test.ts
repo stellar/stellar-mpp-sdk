@@ -7,6 +7,7 @@ import {
   Transaction,
   TransactionBuilder,
   nativeToScVal,
+  xdr,
 } from '@stellar/stellar-sdk'
 import { Server as SorobanServer, Api } from '@stellar/stellar-sdk/rpc'
 import { Credential, Method, Receipt, Store } from 'mppx'
@@ -138,7 +139,7 @@ function feeBumpChargeClient(opts: {
 
       return Credential.serialize({
         challenge,
-        payload: { type: 'transaction' as const, transaction: feeBumpTx.toXDR() },
+        payload: { type: 'transaction' as const, transaction: feeBumpTx.toXdr() },
         source,
       })
     },
@@ -274,13 +275,13 @@ function expectPlainEnvelope(
   expectedSource: Keypair,
 ): Transaction {
   expect(tx.feeBump).toBe(false)
-  const envelope = TransactionBuilder.fromXDR(
+  const envelope = TransactionBuilder.fromXdr(
     tx.envelopeXdr,
     NETWORK_PASSPHRASE[STELLAR_TESTNET],
   ) as Transaction
   expect(envelope.source).toBe(expectedSource.publicKey())
   expect(envelope.signatures.length).toBe(1)
-  expect(envelope.signatures[0].hint()).toEqual(expectedSource.signatureHint())
+  expect(envelope.signatures[0].hint.toBytes()).toEqual(expectedSource.signatureHint())
   return envelope
 }
 
@@ -294,18 +295,18 @@ function expectFeeBumpEnvelope(
   innerKP: Keypair,
 ): FeeBumpTransaction {
   expect(tx.feeBump).toBe(true)
-  const outerEnv = TransactionBuilder.fromXDR(
+  const outerEnv = TransactionBuilder.fromXdr(
     tx.envelopeXdr,
     NETWORK_PASSPHRASE[STELLAR_TESTNET],
   ) as FeeBumpTransaction
   expect(outerEnv.feeSource).toBe(feeBumpKP.publicKey())
   expect(outerEnv.signatures.length).toBe(1)
-  expect(outerEnv.signatures[0].hint()).toEqual(feeBumpKP.signatureHint())
+  expect(outerEnv.signatures[0].hint.toBytes()).toEqual(feeBumpKP.signatureHint())
 
   const innerEnv = outerEnv.innerTransaction
   expect(innerEnv.source).toBe(innerKP.publicKey())
   expect(innerEnv.signatures.length).toBe(1)
-  expect(innerEnv.signatures[0].hint()).toEqual(innerKP.signatureHint())
+  expect(innerEnv.signatures[0].hint.toBytes()).toEqual(innerKP.signatureHint())
   return outerEnv
 }
 
@@ -315,14 +316,13 @@ function expectFeeBumpEnvelope(
  * rebuild the client's entries on the way to the chain.
  */
 function expectV2AuthEntries(inner: Transaction): void {
-  const arms = inner
-    .toEnvelope()
-    .v1()
-    .tx()
-    .operations()
-    .filter((op) => op.body().switch().name === 'invokeHostFunction')
-    .flatMap((op) => op.body().invokeHostFunctionOp().auth())
-    .map((entry) => entry.credentials().switch().name)
+  const arms = xdr
+    .expectUnionVariant(inner.toEnvelope(), 'envelopeTypeTx')
+    .v1.tx.operations.filter((op) => op.body.type === 'invokeHostFunction')
+    .flatMap(
+      (op) => xdr.expectUnionVariant(op.body, 'invokeHostFunction').invokeHostFunctionOp.auth,
+    )
+    .map((entry) => entry.credentials.type)
 
   expect(arms.length).toBeGreaterThan(0)
   expect([...new Set(arms)]).toEqual(['sorobanCredentialsAddressV2'])

@@ -35,19 +35,19 @@ export function verifyAuthEntrySignature(
   entry: xdr.SorobanAuthorizationEntry,
   networkPassphrase: string,
 ): void {
-  const credentials = entry.credentials()
+  const credentials = entry.credentials
   const addressCred = getAddressCredentials(credentials)
   if (!addressCred) {
     throw new StellarMppError('Auth entry must use address credentials to verify its signature.', {
-      credentialType: credentials.switch().name,
+      credentialType: credentials.type,
     })
   }
 
-  const authorizer = addressCred.address()
-  if (authorizer.switch().value !== xdr.ScAddressType.scAddressTypeAccount().value) {
+  const authorizer = addressCred.address
+  if (authorizer.type !== 'scAddressTypeAccount') {
     throw new StellarMppError(
       'Auth entry authorizer must be a stellar account; contract authorizers cannot be verified off-chain.',
-      { addressType: authorizer.switch().name },
+      { addressType: authorizer.type },
     )
   }
   const authorizerPublicKey = Address.fromScAddress(authorizer).toString()
@@ -60,12 +60,12 @@ export function verifyAuthEntrySignature(
   // lockstep, so a signature over the wrong arm's preimage is rejected.
   const preimage = buildAuthorizationEntryPreimage(
     entry,
-    addressCred.signatureExpirationLedger(),
+    addressCred.signatureExpirationLedger,
     networkPassphrase,
   )
-  const payload = hash(preimage.toXDR())
+  const payload = hash(preimage.toXdr())
 
-  const signatures = parseAccountSignatures(addressCred.signature())
+  const signatures = parseAccountSignatures(addressCred.signature)
   if (signatures.length === 0) {
     throw new StellarMppError('Auth entry carries no signatures.')
   }
@@ -98,8 +98,7 @@ function parseAccountSignatures(
   // require_auth gains nothing from extras. Reject a longer vector on the raw
   // ScVal, before decoding and verifying, so a padded vector cannot amplify the
   // per-element verification work below.
-  const rawEntries =
-    signature.switch().value === xdr.ScValType.scvVec().value ? signature.vec() : null
+  const rawEntries = signature.type === 'scvVec' ? signature.vec : null
   if (rawEntries && rawEntries.length > 1) {
     throw new StellarMppError('Auth entry must carry a single account signature.', {
       count: rawEntries.length,

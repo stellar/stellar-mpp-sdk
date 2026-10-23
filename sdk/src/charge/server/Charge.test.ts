@@ -375,7 +375,7 @@ describe('charge legacy hash (unsigned push) handling', () => {
 
     mockGetTransaction.mockResolvedValueOnce({
       status: 'SUCCESS',
-      envelopeXdr: tx.toXDR(),
+      envelopeXdr: tx.toXdr(),
     })
 
     const challenge = Challenge.from({
@@ -432,7 +432,7 @@ describe('charge legacy hash (unsigned push) handling', () => {
 
     mockGetTransaction.mockResolvedValueOnce({
       status: 'SUCCESS',
-      envelopeXdr: tx.toXDR(),
+      envelopeXdr: tx.toXdr(),
     })
 
     const challenge = Challenge.from({
@@ -506,7 +506,7 @@ describe('charge legacy hash (unsigned push) handling', () => {
 
     mockGetTransaction.mockResolvedValueOnce({
       status: 'SUCCESS',
-      envelopeXdr: tx.toXDR(),
+      envelopeXdr: tx.toXdr(),
     })
 
     const challenge = Challenge.from({
@@ -556,7 +556,7 @@ describe('charge legacy hash (unsigned push) handling', () => {
 
     mockGetTransaction.mockResolvedValueOnce({
       status: 'SUCCESS',
-      envelopeXdr: tx.toXDR(),
+      envelopeXdr: tx.toXdr(),
     })
 
     const store = Store.memory()
@@ -611,7 +611,7 @@ describe('charge legacy hash (unsigned push) handling', () => {
 
     mockGetTransaction.mockResolvedValueOnce({
       status: 'SUCCESS',
-      envelopeXdr: tx.toXDR(),
+      envelopeXdr: tx.toXdr(),
     })
 
     const challenge = Challenge.from({
@@ -706,7 +706,7 @@ describe('charge push-mode payment freshness', () => {
     const oneWeekAgo = Math.floor(Date.now() / 1000) - 7 * 24 * 60 * 60
     mockGetTransaction.mockResolvedValueOnce({
       status: 'SUCCESS',
-      envelopeXdr: tx.toXDR(),
+      envelopeXdr: tx.toXdr(),
       createdAt: oneWeekAgo,
     })
 
@@ -738,7 +738,7 @@ describe('charge push-mode payment freshness', () => {
     const thirtySecondsAgo = Math.floor(Date.now() / 1000) - 30
     mockGetTransaction.mockResolvedValueOnce({
       status: 'SUCCESS',
-      envelopeXdr: tx.toXDR(),
+      envelopeXdr: tx.toXdr(),
       createdAt: thirtySecondsAgo,
     })
 
@@ -773,7 +773,7 @@ describe('charge push-mode payment freshness', () => {
     const oneWeekAgo = Math.floor(Date.now() / 1000) - 7 * 24 * 60 * 60
     mockGetTransaction.mockResolvedValueOnce({
       status: 'SUCCESS',
-      envelopeXdr: tx.toXDR(),
+      envelopeXdr: tx.toXdr(),
       createdAt: String(oneWeekAgo),
     })
 
@@ -804,7 +804,7 @@ describe('charge push-mode payment freshness', () => {
     const thirtySecondsAgo = Math.floor(Date.now() / 1000) - 30
     mockGetTransaction.mockResolvedValueOnce({
       status: 'SUCCESS',
-      envelopeXdr: tx.toXDR(),
+      envelopeXdr: tx.toXdr(),
       createdAt: String(thirtySecondsAgo),
     })
 
@@ -837,7 +837,7 @@ describe('charge push-mode payment freshness', () => {
 
     mockGetTransaction.mockResolvedValueOnce({
       status: 'SUCCESS',
-      envelopeXdr: tx.toXDR(),
+      envelopeXdr: tx.toXdr(),
       createdAt: 'not-a-unix-timestamp' as unknown as number,
     })
 
@@ -876,7 +876,7 @@ describe('charge push-mode payment freshness', () => {
     const createdAtSeconds = Math.floor(Date.now() / 1000) - 700
     mockGetTransaction.mockResolvedValueOnce({
       status: 'SUCCESS',
-      envelopeXdr: tx.toXDR(),
+      envelopeXdr: tx.toXdr(),
       createdAt: createdAtSeconds,
     })
 
@@ -908,7 +908,7 @@ describe('charge push-mode payment freshness', () => {
     const createdAtSeconds = Math.floor(Date.now() / 1000) - 60
     mockGetTransaction.mockResolvedValueOnce({
       status: 'SUCCESS',
-      envelopeXdr: tx.toXDR(),
+      envelopeXdr: tx.toXdr(),
       createdAt: createdAtSeconds,
     })
 
@@ -944,7 +944,7 @@ describe('charge push-mode payment freshness', () => {
     const createdAtSeconds = Math.floor(Date.now() / 1000) - 30
     mockGetTransaction.mockResolvedValueOnce({
       status: 'SUCCESS',
-      envelopeXdr: tx.toXDR(),
+      envelopeXdr: tx.toXdr(),
       createdAt: createdAtSeconds,
     })
 
@@ -978,7 +978,7 @@ describe('charge push-mode sender verification', () => {
 
     mockGetTransaction.mockResolvedValueOnce({
       status: 'SUCCESS',
-      envelopeXdr: tx.toXDR(),
+      envelopeXdr: tx.toXdr(),
     })
 
     const credentialKey = Keypair.random().publicKey()
@@ -1041,7 +1041,7 @@ describe('charge push-mode sender verification', () => {
 
     mockGetTransaction.mockResolvedValueOnce({
       status: 'SUCCESS',
-      envelopeXdr: tx.toXDR(),
+      envelopeXdr: tx.toXdr(),
     })
 
     // Credential source matches the actual `from` in the tx
@@ -1203,7 +1203,7 @@ describe('charge push-mode verification', () => {
 
     mockGetTransaction.mockResolvedValueOnce({
       status: 'SUCCESS',
-      envelopeXdr: wrongAmountTx.toXDR(),
+      envelopeXdr: wrongAmountTx.toXdr(),
     })
 
     const cred = makeHashCredential({
@@ -1235,7 +1235,7 @@ describe('charge push-mode verification', () => {
 
     mockGetTransaction.mockResolvedValueOnce({
       status: 'SUCCESS',
-      envelopeXdr: tx.toXDR(),
+      envelopeXdr: tx.toXdr(),
     })
 
     const cred = makeHashCredential({
@@ -1267,7 +1267,7 @@ describe('charge push-mode verification', () => {
 
     mockGetTransaction.mockResolvedValueOnce({
       status: 'SUCCESS',
-      envelopeXdr: tx.toXDR(),
+      envelopeXdr: tx.toXdr(),
     })
 
     const cred = makeHashCredential({
@@ -1352,7 +1352,7 @@ describe('charge tx hash dedup', () => {
     // Pre-seed the canonical inner-tx-hash dedup entry as already settled. Dedup
     // is keyed on the inner transaction hash (derived from the on-chain envelope),
     // not on whatever hash the client presents.
-    const canonicalHash = tx.hash().toString('hex')
+    const canonicalHash = Buffer.from(tx.hash()).toString('hex')
     await store.put(`stellar:charge:hash:${canonicalHash}`, {
       state: 'used',
       usedAt: new Date().toISOString(),
@@ -1360,7 +1360,7 @@ describe('charge tx hash dedup', () => {
 
     mockGetTransaction.mockResolvedValueOnce({
       status: 'SUCCESS',
-      envelopeXdr: tx.toXDR(),
+      envelopeXdr: tx.toXdr(),
     })
 
     const method = charge({
@@ -1457,7 +1457,7 @@ describe('charge push-mode: source signature binding', () => {
 
     mockGetTransaction.mockResolvedValueOnce({
       status: 'SUCCESS',
-      envelopeXdr: tx.toXDR(),
+      envelopeXdr: tx.toXdr(),
     })
 
     const challenge = Challenge.from({
@@ -1511,11 +1511,11 @@ describe('charge push-mode: source signature binding', () => {
     mockGetTransaction
       .mockResolvedValueOnce({
         status: 'SUCCESS',
-        envelopeXdr: tx.toXDR(),
+        envelopeXdr: tx.toXdr(),
       })
       .mockResolvedValueOnce({
         status: 'SUCCESS',
-        envelopeXdr: tx.toXDR(),
+        envelopeXdr: tx.toXdr(),
       })
 
     const firstChallenge = Challenge.from({
@@ -1603,7 +1603,7 @@ describe('charge push-mode: source signature binding', () => {
 
     mockGetTransaction.mockResolvedValueOnce({
       status: 'SUCCESS',
-      envelopeXdr: tx.toXDR(),
+      envelopeXdr: tx.toXdr(),
     })
 
     const challenge = Challenge.from({
@@ -1658,7 +1658,7 @@ describe('charge push-mode: source signature binding', () => {
 
     mockGetTransaction.mockResolvedValueOnce({
       status: 'SUCCESS',
-      envelopeXdr: tx.toXDR(),
+      envelopeXdr: tx.toXdr(),
     })
 
     const challenge = Challenge.from({
@@ -1714,7 +1714,7 @@ describe('charge push-mode: source signature binding', () => {
 
     mockGetTransaction.mockResolvedValueOnce({
       status: 'SUCCESS',
-      envelopeXdr: tx.toXDR(),
+      envelopeXdr: tx.toXdr(),
     })
 
     const challenge = Challenge.from({
@@ -2025,20 +2025,21 @@ async function buildSponsoredEnvelopeWithValidAuth(opts?: {
     currency: USDC_SAC_TESTNET,
     maxTimeSeconds: opts?.maxTimeSeconds,
   })
-  const invokeContractArgs = tx
-    .toEnvelope()
-    .v1()
-    .tx()
-    .operations()[0]
-    .body()
-    .invokeHostFunctionOp()
-    .hostFunction()
-    .invokeContract()
+  const envelope = tx.toEnvelope()
+  const envelopeTx = xdr.expectUnionVariant(envelope, 'envelopeTypeTx').v1.tx
+  const invokeOp = xdr.expectUnionVariant(
+    envelopeTx.operations[0].body,
+    'invokeHostFunction',
+  ).invokeHostFunctionOp
+  const invokeContractArgs = xdr.expectUnionVariant(
+    invokeOp.hostFunction,
+    'hostFunctionTypeInvokeContract',
+  ).invokeContract
   const unsignedAuthEntry = new xdr.SorobanAuthorizationEntry({
     credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
       new xdr.SorobanAddressCredentials({
         address: new Address(PAYER.publicKey()).toScAddress(),
-        nonce: xdr.Int64.fromString('0'),
+        nonce: 0n,
         signatureExpirationLedger: expirationLedger,
         signature: xdr.ScVal.scvVec([]),
       }),
@@ -2055,13 +2056,12 @@ async function buildSponsoredEnvelopeWithValidAuth(opts?: {
     expirationLedger,
     NETWORK_PASSPHRASE,
   )
-  const envelope = tx.toEnvelope()
-  envelope.v1().tx().operations()[0].body().invokeHostFunctionOp().auth([authEntry])
+  invokeOp.auth.splice(0, invokeOp.auth.length, authEntry)
   // The auth signature covers the invocation, not the tx fee, so an optional fee
   // override applied here keeps the entry valid while letting callers exercise
   // different inclusion fees.
   if (opts?.fee !== undefined) {
-    envelope.v1().tx().fee(opts.fee)
+    Object.assign(envelopeTx, { fee: opts.fee })
   }
   return envelope
 }
@@ -2097,16 +2097,16 @@ function makeMockTransferEvent(from: string, to: string, amount: bigint, contrac
   const amountScVal = nativeToScVal(amount, { type: 'i128' })
 
   return {
-    event: () => ({
-      type: () => ({ name: 'contract' }),
-      contractId: () => Address.fromString(contract).toBuffer().subarray(0, 32),
-      body: () => ({
-        v0: () => ({
-          topics: () => [{ sym: () => ({ toString: () => 'transfer' }) }, fromScVal, toScVal],
-          data: () => amountScVal,
-        }),
-      }),
-    }),
+    event: {
+      type: xdr.ContractEventType.contract,
+      contractId: new xdr.ContractId(Address.fromString(contract).toBuffer().subarray(0, 32)),
+      body: {
+        v0: {
+          topics: [xdr.ScVal.scvSymbol('transfer'), fromScVal, toScVal],
+          data: amountScVal,
+        },
+      },
+    },
   }
 }
 
@@ -2131,7 +2131,7 @@ describe('charge transaction verification', () => {
       .build()
     tx.sign(PAYER)
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -2174,7 +2174,7 @@ describe('charge transaction verification', () => {
       },
     })
     const cred = Object.assign(
-      Credential.from({ challenge, payload: { type: 'transaction', transaction: tx.toXDR() } }),
+      Credential.from({ challenge, payload: { type: 'transaction', transaction: tx.toXdr() } }),
       { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
     )
 
@@ -2202,7 +2202,7 @@ describe('charge transaction verification', () => {
     tx.sign(actualPayer)
 
     // Credential claims PAYER as source, but tx `from` is actualPayer — mismatch
-    const cred = Object.assign(makeTransactionCredential(tx.toXDR()), {
+    const cred = Object.assign(makeTransactionCredential(tx.toXdr()), {
       source: `did:pkh:stellar:testnet:${PAYER.publicKey()}`,
     })
     const method = charge({
@@ -2227,7 +2227,7 @@ describe('charge transaction verification', () => {
     })
     tx.sign(PAYER)
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -2249,7 +2249,7 @@ describe('charge transaction verification', () => {
     })
     tx.sign(PAYER)
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -2272,7 +2272,7 @@ describe('charge transaction verification', () => {
     })
     tx.sign(PAYER)
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -2293,7 +2293,7 @@ describe('charge transaction verification', () => {
       currency: USDC_SAC_TESTNET,
     })
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     // No feePayer configured
     const method = charge({
       recipient: RECIPIENT,
@@ -2371,7 +2371,7 @@ describe('charge transaction verification', () => {
       },
     })
     const cred = Object.assign(
-      Credential.from({ challenge, payload: { type: 'transaction', transaction: tx.toXDR() } }),
+      Credential.from({ challenge, payload: { type: 'transaction', transaction: tx.toXdr() } }),
       { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
     )
 
@@ -2419,7 +2419,7 @@ describe('charge transaction verification', () => {
       },
     })
     const cred = Object.assign(
-      Credential.from({ challenge, payload: { type: 'transaction', transaction: tx.toXDR() } }),
+      Credential.from({ challenge, payload: { type: 'transaction', transaction: tx.toXdr() } }),
       { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
     )
 
@@ -2452,7 +2452,7 @@ describe('charge transaction verification', () => {
     mockSendTransaction.mockResolvedValueOnce({ hash: 'verified-tx-hash', status: 'PENDING' })
     mockGetTransaction.mockResolvedValueOnce({ status: 'SUCCESS' })
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -2495,8 +2495,8 @@ describe('charge transaction verification', () => {
     mockSendTransaction.mockResolvedValueOnce({ hash: 'feebump-pull-hash', status: 'PENDING' })
     mockGetTransaction.mockResolvedValueOnce({ status: 'SUCCESS' })
 
-    // Use toEnvelope().toXDR('base64') to get the FeeBump envelope XDR correctly
-    const cred = makeTransactionCredential(feeBumpTx.toEnvelope().toXDR('base64'))
+    // Use toEnvelope().toXdr('base64') to get the FeeBump envelope XDR correctly
+    const cred = makeTransactionCredential(feeBumpTx.toEnvelope().toXdr('base64'))
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -2533,7 +2533,7 @@ describe('charge transaction verification', () => {
     })
     mockSendTransaction.mockRejectedValueOnce(new Error('RPC down'))
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
     const method = charge({
       recipient: RECIPIENT,
@@ -2570,7 +2570,7 @@ describe('charge transaction verification', () => {
     mockSendTransaction.mockResolvedValueOnce({ hash: 'unconfirmed-hash', status: 'PENDING' })
     mockGetTransaction.mockResolvedValue({ status: 'FAILED', resultXdr: 'tx_failed' })
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -2599,7 +2599,7 @@ describe('charge transaction verification', () => {
     })
     mockSendTransaction.mockResolvedValueOnce({ hash: 'error-hash', status: 'ERROR' })
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -2628,7 +2628,7 @@ describe('charge transaction verification', () => {
     })
     mockSendTransaction.mockResolvedValueOnce({ hash: 'dup-hash', status: 'DUPLICATE' })
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -2657,7 +2657,7 @@ describe('charge transaction verification', () => {
     })
     mockSendTransaction.mockResolvedValueOnce({ hash: 'retry-hash', status: 'TRY_AGAIN_LATER' })
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -2697,7 +2697,7 @@ describe('charge transaction verification', () => {
     })
     const cred = Credential.from({
       challenge,
-      payload: { type: 'transaction', transaction: tx.toXDR() },
+      payload: { type: 'transaction', transaction: tx.toXdr() },
     })
 
     // First call fails (wrong recipient) — a pre-broadcast verification failure.
@@ -2748,7 +2748,7 @@ describe('charge pull-mode tx-hash dedup', () => {
       currency: USDC_SAC_TESTNET,
     })
     tx.sign(PAYER)
-    const txXdr = tx.toXDR()
+    const txXdr = tx.toXdr()
 
     mockSimulateTransaction.mockResolvedValue({
       result: { retval: null },
@@ -2789,7 +2789,7 @@ describe('charge pull-mode tx-hash dedup', () => {
       currency: USDC_SAC_TESTNET,
     })
     tx.sign(PAYER)
-    const txXdr = tx.toXDR()
+    const txXdr = tx.toXdr()
 
     const store = Store.memory()
     const method = charge({ recipient: RECIPIENT, currency: USDC_SAC_TESTNET, store })
@@ -2839,7 +2839,7 @@ describe('charge pull-mode settlement rollback', () => {
       currency: USDC_SAC_TESTNET,
     })
     tx.sign(PAYER)
-    return makeTransactionCredential(tx.toXDR())
+    return makeTransactionCredential(tx.toXdr())
   }
 
   it('releases the challenge claim when verification fails before broadcast, so the same challenge can be retried', async () => {
@@ -2924,7 +2924,7 @@ describe('charge pull-mode settlement rollback', () => {
       maxTimeSeconds: expiredMaxTime,
     })
     tx.sign(PAYER)
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
 
     mockSimulateTransaction.mockResolvedValue({
       result: { retval: null },
@@ -3017,7 +3017,7 @@ describe('charge simulation event validation', () => {
       transactionData: new SorobanDataBuilder(),
     })
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -3044,7 +3044,7 @@ describe('charge simulation event validation', () => {
       transactionData: new SorobanDataBuilder(),
     })
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -3067,16 +3067,16 @@ describe('charge simulation event validation', () => {
     tx.sign(PAYER)
 
     const nonTransferEvent = {
-      event: () => ({
-        type: () => ({ name: 'contract' }),
-        contractId: () => null,
-        body: () => ({
-          v0: () => ({
-            topics: () => [{ sym: () => ({ toString: () => 'mint' }) }],
-            data: () => nativeToScVal(0n, { type: 'i128' }),
-          }),
-        }),
-      }),
+      event: {
+        type: xdr.ContractEventType.contract,
+        contractId: null,
+        body: {
+          v0: {
+            topics: [xdr.ScVal.scvSymbol('mint')],
+            data: nativeToScVal(0n, { type: 'i128' }),
+          },
+        },
+      },
     }
 
     mockSimulateTransaction.mockResolvedValueOnce({
@@ -3085,7 +3085,7 @@ describe('charge simulation event validation', () => {
       transactionData: new SorobanDataBuilder(),
     })
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -3112,16 +3112,16 @@ describe('charge simulation event validation', () => {
     const amountScVal = nativeToScVal(10000000n, { type: 'i128' })
 
     const eventWithNoContractId = {
-      event: () => ({
-        type: () => ({ name: 'contract' }),
-        contractId: () => null,
-        body: () => ({
-          v0: () => ({
-            topics: () => [{ sym: () => ({ toString: () => 'transfer' }) }, fromScVal, toScVal],
-            data: () => amountScVal,
-          }),
-        }),
-      }),
+      event: {
+        type: xdr.ContractEventType.contract,
+        contractId: null,
+        body: {
+          v0: {
+            topics: [xdr.ScVal.scvSymbol('transfer'), fromScVal, toScVal],
+            data: amountScVal,
+          },
+        },
+      },
     }
 
     mockSimulateTransaction.mockResolvedValueOnce({
@@ -3130,7 +3130,7 @@ describe('charge simulation event validation', () => {
       transactionData: new SorobanDataBuilder(),
     })
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -3162,7 +3162,7 @@ describe('charge simulation event validation', () => {
       transactionData: new SorobanDataBuilder(),
     })
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -3202,7 +3202,7 @@ describe('charge transaction structure validation', () => {
       .build()
     tx.sign(PAYER)
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -3233,7 +3233,7 @@ describe('charge transaction structure validation', () => {
       .build()
     tx.sign(PAYER)
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -3260,7 +3260,7 @@ describe('charge transaction structure validation', () => {
       .build()
     tx.sign(PAYER)
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -3292,7 +3292,7 @@ describe('charge SAC invocation validation (fail-closed)', () => {
       .build()
     tx.sign(PAYER)
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -3317,7 +3317,7 @@ describe('charge server signing address protection', () => {
     })
     tx.sign(PAYER)
 
-    const cred = Object.assign(makeTransactionCredential(tx.toXDR()), {
+    const cred = Object.assign(makeTransactionCredential(tx.toXdr()), {
       source: `did:pkh:stellar:testnet:${PAYER.publicKey()}`,
     })
 
@@ -3351,7 +3351,7 @@ describe('charge server signing address protection', () => {
     mockSendTransaction.mockResolvedValueOnce({ hash: 'ok-hash', status: 'PENDING' })
     mockGetTransaction.mockResolvedValueOnce({ status: 'SUCCESS' })
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -3372,7 +3372,7 @@ describe('charge sponsored path fee cap', () => {
 
     // Inflate the inclusion fee so the server has to cap it back down.
     const envelope = await buildSponsoredEnvelopeWithValidAuth({ fee: 2147483647 })
-    const bloatedXdr = envelope.toXDR('base64')
+    const bloatedXdr = envelope.toXdr('base64')
 
     mockGetAccount.mockResolvedValueOnce(new Account(signerKp.publicKey(), '100'))
     mockGetLatestLedger.mockResolvedValueOnce({ sequence: 1000 })
@@ -3424,7 +3424,7 @@ describe('charge sponsored path authorization enforcement', () => {
     const signerKp = Keypair.random()
 
     const envelope = await buildSponsoredEnvelopeWithValidAuth()
-    const txXdr = envelope.toXDR('base64')
+    const txXdr = envelope.toXdr('base64')
 
     mockGetAccount.mockResolvedValueOnce(new Account(signerKp.publicKey(), '100'))
     mockGetLatestLedger.mockResolvedValue({ sequence: 1000 })
@@ -3538,7 +3538,7 @@ describe('charge sponsored path expired challenge', () => {
     const cred = Object.assign(
       Credential.from({
         challenge,
-        payload: { type: 'transaction', transaction: tx.toXDR() },
+        payload: { type: 'transaction', transaction: tx.toXdr() },
       }),
       { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
     )
@@ -3584,7 +3584,7 @@ describe('charge sponsored path timeBounds', () => {
     const cred = Object.assign(
       Credential.from({
         challenge,
-        payload: { type: 'transaction', transaction: envelope.toXDR('base64') },
+        payload: { type: 'transaction', transaction: envelope.toXdr('base64') },
       }),
       { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
     )
@@ -3639,7 +3639,7 @@ describe('charge sponsored path timeBounds', () => {
     const cred = Object.assign(
       Credential.from({
         challenge,
-        payload: { type: 'transaction', transaction: envelope.toXDR('base64') },
+        payload: { type: 'transaction', transaction: envelope.toXdr('base64') },
       }),
       { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
     )
@@ -3688,15 +3688,13 @@ describe('charge validateAuthEntries (sponsored path)', () => {
       amount: opts.amount ?? 10000000n,
       currency: USDC_SAC_TESTNET,
     })
-    return tx
-      .toEnvelope()
-      .v1()
-      .tx()
-      .operations()[0]
-      .body()
-      .invokeHostFunctionOp()
-      .hostFunction()
-      .invokeContract()
+    const envelopeTx = xdr.expectUnionVariant(tx.toEnvelope(), 'envelopeTypeTx').v1.tx
+    const invokeOp = xdr.expectUnionVariant(
+      envelopeTx.operations[0].body,
+      'invokeHostFunction',
+    ).invokeHostFunctionOp
+    return xdr.expectUnionVariant(invokeOp.hostFunction, 'hostFunctionTypeInvokeContract')
+      .invokeContract
   }
 
   /** The root invocation an honest client authorizes: the requested transfer,
@@ -3778,8 +3776,13 @@ describe('charge validateAuthEntries (sponsored path)', () => {
       maxTimeSeconds,
     })
     const envelope = tx.toEnvelope()
-    envelope.v1().tx().operations()[0].body().invokeHostFunctionOp().auth(authEntries)
-    return envelope.toXDR('base64')
+    const envelopeTx = xdr.expectUnionVariant(envelope, 'envelopeTypeTx').v1.tx
+    const invokeOp = xdr.expectUnionVariant(
+      envelopeTx.operations[0].body,
+      'invokeHostFunction',
+    ).invokeHostFunctionOp
+    invokeOp.auth.splice(0, invokeOp.auth.length, ...authEntries)
+    return envelope.toXdr('base64')
   }
 
   /** Creates a sponsored-path credential (feePayer: true in methodDetails). */
@@ -3910,7 +3913,7 @@ describe('charge validateAuthEntries (sponsored path)', () => {
   it('accepts a CAP-71 V2 (address-bound) auth entry signed by the payer', async () => {
     // authorizeEntry keeps the V2 arm and signs the address-bound preimage.
     const authEntry = await makeSignedAuthEntry({ arm: 'addressV2' })
-    expect(authEntry.credentials().switch().name).toBe('sorobanCredentialsAddressV2')
+    expect(authEntry.credentials.type).toBe('sorobanCredentialsAddressV2')
 
     mockSuccessfulSettlement('valid-v2-auth-hash')
 
@@ -4024,7 +4027,7 @@ describe('charge validateAuthEntries (sponsored path)', () => {
     // non-numeric amount argument. Decoding it must count as "does not authorize
     // the transfer", not surface as an unexpected decode error.
     const args = transferContractArgs()
-    args.args([args.args()[0], args.args()[1], xdr.ScVal.scvString('not-a-number')])
+    args.args.splice(2, 1, xdr.ScVal.scvString('not-a-number'))
 
     mockGetLatestLedger.mockResolvedValueOnce({ sequence: 100 })
 
@@ -4055,12 +4058,10 @@ describe('charge operation-level source validation', () => {
     })
     // Inject the server signer address as the operation-level source via XDR
     const envelope = tx.toEnvelope()
-    envelope
-      .v1()
-      .tx()
-      .operations()[0]
-      .sourceAccount(xdr.MuxedAccount.keyTypeEd25519(serverKp.rawPublicKey()))
-    const txXdr = envelope.toXDR('base64')
+    Object.assign(xdr.expectUnionVariant(envelope, 'envelopeTypeTx').v1.tx.operations[0], {
+      sourceAccount: xdr.MuxedAccount.keyTypeEd25519(serverKp.rawPublicKey()),
+    })
+    const txXdr = envelope.toXdr('base64')
 
     tx.sign(PAYER)
 
@@ -4098,7 +4099,7 @@ describe('charge simulation multiple-event rejection', () => {
       transactionData: new SorobanDataBuilder(),
     })
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -4132,7 +4133,7 @@ describe('charge transfer argument count validation', () => {
       .build()
     tx.sign(PAYER)
 
-    const cred = makeTransactionCredential(tx.toXDR())
+    const cred = makeTransactionCredential(tx.toXdr())
     const method = charge({
       recipient: RECIPIENT,
       currency: USDC_SAC_TESTNET,
@@ -4181,7 +4182,7 @@ describe('charge push-mode FeeBump envelope', () => {
     // Return the FeeBump envelope as the on-chain result (base64 string)
     mockGetTransaction.mockResolvedValueOnce({
       status: 'SUCCESS',
-      envelopeXdr: feeBumpTx.toEnvelope().toXDR('base64'),
+      envelopeXdr: feeBumpTx.toEnvelope().toXdr('base64'),
     })
 
     const method = charge({
@@ -4371,7 +4372,7 @@ describe('charge receipt externalId', () => {
       },
     })
     const cred = Object.assign(
-      Credential.from({ challenge, payload: { type: 'transaction', transaction: tx.toXDR() } }),
+      Credential.from({ challenge, payload: { type: 'transaction', transaction: tx.toXdr() } }),
       { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
     )
 
@@ -4434,7 +4435,7 @@ describe('charge sponsored path sequence number', () => {
     const cred = Object.assign(
       Credential.from({
         challenge,
-        payload: { type: 'transaction', transaction: envelope.toXDR('base64') },
+        payload: { type: 'transaction', transaction: envelope.toXdr('base64') },
       }),
       { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
     )
@@ -4497,7 +4498,7 @@ describe('charge hash replay across instances sharing a store', () => {
             () =>
               r({
                 status: 'SUCCESS',
-                envelopeXdr: tx.toXDR(),
+                envelopeXdr: tx.toXdr(),
               }),
             50,
           ),
@@ -4595,7 +4596,7 @@ describe('charge hash replay across instances sharing a store', () => {
             () =>
               r({
                 status: 'SUCCESS',
-                envelopeXdr: txToReturn.toXDR(),
+                envelopeXdr: txToReturn.toXdr(),
               }),
             50,
           )
@@ -4773,12 +4774,12 @@ describe('charge fee-bump cross-mode dedup (canonical inner hash)', () => {
       transactionData: new SorobanDataBuilder(),
     })
     mockSendTransaction.mockResolvedValueOnce({
-      hash: feeBumpTx.hash().toString('hex'),
+      hash: Buffer.from(feeBumpTx.hash()).toString('hex'),
       status: 'PENDING',
     })
     mockGetTransaction.mockResolvedValueOnce({ status: 'SUCCESS' }) // poll
     const method = charge({ recipient: RECIPIENT, currency: USDC_SAC_TESTNET, store })
-    const pullCred = makeTransactionCredential(feeBumpTx.toEnvelope().toXDR('base64'))
+    const pullCred = makeTransactionCredential(feeBumpTx.toEnvelope().toXdr('base64'))
     const receipt = await method.verify({
       credential: pullCred as any,
       request: pullCred.challenge.request,
@@ -4789,14 +4790,14 @@ describe('charge fee-bump cross-mode dedup (canonical inner hash)', () => {
   it('rejects a signedHash push reusing the OUTER hash of a fee-bump already settled via pull', async () => {
     const store = Store.memory()
     const { feeBumpTx } = buildSignedFeeBump()
-    const outerHash = feeBumpTx.hash().toString('hex')
+    const outerHash = Buffer.from(feeBumpTx.hash()).toString('hex')
 
     await settleViaPull(store, feeBumpTx)
 
     // Push leg: fresh challenge, reuse the OUTER fee-bump hash the attacker controls.
     mockGetTransaction.mockResolvedValueOnce({
       status: 'SUCCESS',
-      envelopeXdr: feeBumpTx.toEnvelope().toXDR('base64'),
+      envelopeXdr: feeBumpTx.toEnvelope().toXdr('base64'),
     })
     const challengeB = makeFreshChallenge()
     const pushCred = Object.assign(
@@ -4822,13 +4823,13 @@ describe('charge fee-bump cross-mode dedup (canonical inner hash)', () => {
   it('rejects a legacy hash push reusing the OUTER hash of a fee-bump already settled via pull', async () => {
     const store = Store.memory()
     const { feeBumpTx } = buildSignedFeeBump()
-    const outerHash = feeBumpTx.hash().toString('hex')
+    const outerHash = Buffer.from(feeBumpTx.hash()).toString('hex')
 
     await settleViaPull(store, feeBumpTx)
 
     mockGetTransaction.mockResolvedValueOnce({
       status: 'SUCCESS',
-      envelopeXdr: feeBumpTx.toEnvelope().toXDR('base64'),
+      envelopeXdr: feeBumpTx.toEnvelope().toXdr('base64'),
     })
     const challengeB = makeFreshChallenge()
     const pushCred = Object.assign(
@@ -4853,11 +4854,11 @@ describe('charge fee-bump cross-mode dedup (canonical inner hash)', () => {
   it('still settles a standalone fee-bump push when the payment was not previously settled', async () => {
     const store = Store.memory()
     const { feeBumpTx } = buildSignedFeeBump()
-    const outerHash = feeBumpTx.hash().toString('hex')
+    const outerHash = Buffer.from(feeBumpTx.hash()).toString('hex')
 
     mockGetTransaction.mockResolvedValueOnce({
       status: 'SUCCESS',
-      envelopeXdr: feeBumpTx.toEnvelope().toXDR('base64'),
+      envelopeXdr: feeBumpTx.toEnvelope().toXdr('base64'),
     })
     const challenge = makeFreshChallenge()
     const pushCred = Object.assign(
@@ -4896,7 +4897,7 @@ describe('charge sponsored fee handling', () => {
   async function sponsoredTransferCredential(clientFee: string) {
     // A valid payer-signed auth entry plus the client's chosen inclusion fee.
     const envelope = await buildSponsoredEnvelopeWithValidAuth({ fee: Number(clientFee) })
-    const txXdr = envelope.toXDR('base64')
+    const txXdr = envelope.toXdr('base64')
     const challenge = Challenge.from({
       id: `test-${crypto.randomUUID()}`,
       realm: 'localhost',
@@ -5013,7 +5014,7 @@ describe('charge sponsored auth-entry expiration', () => {
       publicKey: PAYER.publicKey(),
       networkPassphrase: NETWORK_PASSPHRASE,
     })
-    transferOp.body().invokeHostFunctionOp().auth().push(auth)
+    transferOp.body.invokeHostFunctionOp.auth.push(auth)
     const tx = new TransactionBuilder(account, {
       fee: BASE_FEE,
       networkPassphrase: NETWORK_PASSPHRASE,
@@ -5034,7 +5035,7 @@ describe('charge sponsored auth-entry expiration', () => {
       },
     })
     return Object.assign(
-      Credential.from({ challenge, payload: { type: 'transaction', transaction: tx.toXDR() } }),
+      Credential.from({ challenge, payload: { type: 'transaction', transaction: tx.toXdr() } }),
       { source: `did:pkh:stellar:testnet:${PAYER.publicKey()}` },
     )
   }
@@ -5109,8 +5110,10 @@ describe('charge sponsored dedup key (canonical on-chain inner hash)', () => {
   it('dedups a sponsored settlement on the broadcast inner hash, not the client tx hash', async () => {
     const store = Store.memory()
     const clientEnvelope = await buildSponsoredEnvelopeWithValidAuth()
-    const clientXdr = clientEnvelope.toXDR('base64')
-    const clientTxHash = new Transaction(clientXdr, NETWORK_PASSPHRASE).hash().toString('hex')
+    const clientXdr = clientEnvelope.toXdr('base64')
+    const clientTxHash = Buffer.from(
+      new Transaction(clientXdr, NETWORK_PASSPHRASE).hash(),
+    ).toString('hex')
 
     mockGetLatestLedger.mockResolvedValue({ sequence: 100 })
     mockGetAccount.mockResolvedValue(new Account(envelopeKP.publicKey(), '5'))
@@ -5122,7 +5125,7 @@ describe('charge sponsored dedup key (canonical on-chain inner hash)', () => {
     let submittedInnerHash: string | undefined
     mockSendTransaction.mockImplementation((submitted: Transaction | FeeBumpTransaction) => {
       const inner = submitted instanceof FeeBumpTransaction ? submitted.innerTransaction : submitted
-      submittedInnerHash = inner.hash().toString('hex')
+      submittedInnerHash = Buffer.from(inner.hash()).toString('hex')
       return Promise.resolve({ hash: submittedInnerHash, status: 'PENDING' })
     })
     mockGetTransaction.mockResolvedValue({ status: 'SUCCESS' })
@@ -5252,7 +5255,7 @@ describe('charge challenge id uniqueness', () => {
       tx.sign(payer)
       mockGetTransaction.mockResolvedValueOnce({
         status: 'SUCCESS',
-        envelopeXdr: tx.toXDR(),
+        envelopeXdr: tx.toXdr(),
         createdAt: Math.floor(Date.now() / 1000),
       })
 
@@ -5438,7 +5441,7 @@ describe('charge push-mode challenge claim release', () => {
     tx.sign(PAYER)
     return {
       status: 'SUCCESS',
-      envelopeXdr: tx.toXDR(),
+      envelopeXdr: tx.toXdr(),
       createdAt: Math.floor(Date.now() / 1000),
     }
   }
@@ -5660,7 +5663,7 @@ describe('charge push-mode freshness with operator-set expiry', () => {
       currency: USDC_SAC_TESTNET,
     })
     tx.sign(PAYER)
-    return { status: 'SUCCESS', envelopeXdr: tx.toXDR(), createdAt }
+    return { status: 'SUCCESS', envelopeXdr: tx.toXdr(), createdAt }
   }
 
   it('accepts a fresh payment against a challenge with a one-day expiry', async () => {

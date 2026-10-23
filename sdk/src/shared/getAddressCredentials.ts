@@ -20,11 +20,11 @@ import { xdr } from '@stellar/stellar-sdk'
 export function getAddressCredentials(
   credentials: xdr.SorobanCredentials,
 ): xdr.SorobanAddressCredentials | undefined {
-  switch (credentials.switch().value) {
-    case xdr.SorobanCredentialsType.sorobanCredentialsAddress().value:
-      return credentials.address()
-    case xdr.SorobanCredentialsType.sorobanCredentialsAddressV2().value:
-      return credentials.addressV2()
+  switch (credentials.type) {
+    case 'sorobanCredentialsAddress':
+      return credentials.address
+    case 'sorobanCredentialsAddressV2':
+      return credentials.addressV2
     default:
       return undefined
   }

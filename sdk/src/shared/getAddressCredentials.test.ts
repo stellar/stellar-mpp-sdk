@@ -5,7 +5,7 @@ import { getAddressCredentials } from './getAddressCredentials.js'
 function addressCredentials(): xdr.SorobanAddressCredentials {
   return new xdr.SorobanAddressCredentials({
     address: new Address(Keypair.random().publicKey()).toScAddress(),
-    nonce: new xdr.Int64(7),
+    nonce: xdr.Int64(7),
     signatureExpirationLedger: 1000,
     signature: xdr.ScVal.scvVec([]),
   })

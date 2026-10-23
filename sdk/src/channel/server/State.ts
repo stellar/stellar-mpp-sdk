@@ -117,7 +117,7 @@ export async function getChannelState(
       `Failed to simulate refund_waiting_period on channel ${channelAddress}: missing return value`,
     )
   }
-  const refundWaitingPeriod = waitingPeriodVal.u32()
+  const refundWaitingPeriod = xdr.expectUnionVariant(waitingPeriodVal, 'scvU32').u32
   const token = Address.fromScVal(tokenVal!).toString()
   const from = Address.fromScVal(fromVal!).toString()
   const to = Address.fromScVal(toVal!).toString()
@@ -131,7 +131,9 @@ export async function getChannelState(
     'CloseEffectiveAtLedger',
   )
 
-  const closeEffectiveAtLedger = closeEntry ? closeEntry.u32() : null
+  const closeEffectiveAtLedger = closeEntry
+    ? xdr.expectUnionVariant(closeEntry, 'scvU32').u32
+    : null
 
   const latestLedger = await withTimeout(
     server.getLatestLedger(),

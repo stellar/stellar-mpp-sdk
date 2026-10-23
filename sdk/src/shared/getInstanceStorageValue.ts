@@ -23,7 +23,7 @@ export async function getInstanceStorageValue(
     new xdr.LedgerKeyContractData({
       contract: contractId.toScAddress(),
       key: xdr.ScVal.scvLedgerKeyContractInstance(),
-      durability: xdr.ContractDataDurability.persistent(),
+      durability: xdr.ContractDataDurability.persistent,
     }),
   )
 
@@ -38,21 +38,20 @@ export async function getInstanceStorageValue(
 
   const entry = response.entries[0]
   const ledgerData = entry.val
-  const contractData = ledgerData?.contractData?.()
+  const contractData = ledgerData.type === 'contractData' ? ledgerData.contractData : null
   if (!contractData) return null
-  const instance = contractData.val?.()?.instance?.()
+  const instance =
+    contractData.val.type === 'scvContractInstance' ? contractData.val.instance : null
   if (!instance) return null
-  const instanceStorage = instance.storage()
+  const instanceStorage = instance.storage
 
   if (!instanceStorage) return null
 
   // Search for the requested DataKey variant in the instance storage map.
   // Soroban encodes simple enum variants as ScVal::Vec([ScVal::Symbol(name)])
   for (const entry of instanceStorage) {
-    const entryKey = entry.key()
-    if (isEnumVariant(entryKey, key)) {
-      const val = entry.val()
-      return val
+    if (isEnumVariant(entry.key, key)) {
+      return entry.val
     }
   }
 
@@ -72,10 +71,10 @@ export async function getInstanceStorageValue(
  */
 function isEnumVariant(scVal: xdr.ScVal, name: string): boolean {
   try {
-    if (scVal.switch().value === xdr.ScValType.scvVec().value) {
-      const vec = scVal.vec()!
-      if (vec.length === 1 && vec[0].switch().value === xdr.ScValType.scvSymbol().value) {
-        return vec[0].sym().toString() === name
+    if (scVal.type === 'scvVec') {
+      const vec = scVal.vec!
+      if (vec.length === 1 && vec[0].type === 'scvSymbol') {
+        return vec[0].sym.toString() === name
       }
     }
   } catch {

@@ -7,6 +7,7 @@ import {
   nativeToScVal,
   StrKey,
   rpc,
+  xdr,
 } from '@stellar/stellar-sdk'
 import { Method, Receipt, Store } from 'mppx'
 import {
@@ -242,7 +243,7 @@ export function channel(parameters: channel.Parameters) {
         }
         let raw: Buffer
         try {
-          raw = Buffer.from(entry.bytes())
+          raw = Buffer.from(xdr.expectUnionVariant(entry, 'scvBytes').bytes.toBytes())
         } catch {
           throw new ChannelVerificationError(
             `${LOG_PREFIX} On-chain CommitmentKey is not a byte array.`,
@@ -771,7 +772,7 @@ export function channel(parameters: channel.Parameters) {
     logger.debug(`${LOG_PREFIX} Verifying commitment signature...`)
 
     const rawCommitmentKey = await resolveCommitmentKey()
-    if (!configuredCommitmentKP.rawPublicKey().equals(rawCommitmentKey)) {
+    if (!Buffer.from(configuredCommitmentKP.rawPublicKey()).equals(rawCommitmentKey)) {
       throw new ChannelVerificationError(
         `${LOG_PREFIX} Configured commitmentKey does not match the channel's on-chain CommitmentKey.`,
         {
@@ -1042,7 +1043,7 @@ function assertPreparedCloseIsSafe(preparedTx: Transaction, channelAddress: stri
       { expected: channelAddress, actual: contractAddress },
     )
   }
-  const functionName = invokeArgs.functionName().toString()
+  const functionName = invokeArgs.functionName.toString()
   if (functionName !== 'close') {
     throw new ChannelVerificationError(
       `${LOG_PREFIX} Prepared close invokes an unexpected function.`,
@@ -1050,7 +1051,7 @@ function assertPreparedCloseIsSafe(preparedTx: Transaction, channelAddress: stri
     )
   }
   for (const entry of authEntries) {
-    if (entry.rootInvocation().subInvocations().length > 0) {
+    if (entry.rootInvocation.subInvocations.length > 0) {
       throw new ChannelVerificationError(
         `${LOG_PREFIX} Prepared close authorization carries unexpected sub-invocations.`,
         {},

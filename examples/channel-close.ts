@@ -16,7 +16,14 @@
  *   npx tsx examples/channel-close.ts
  */
 
-import { Contract, Keypair, TransactionBuilder, nativeToScVal, rpc } from '@stellar/stellar-sdk'
+import {
+  Contract,
+  Keypair,
+  TransactionBuilder,
+  nativeToScVal,
+  rpc,
+  xdr,
+} from '@stellar/stellar-sdk'
 import { close } from '../sdk/src/channel/server/index.js'
 import { NETWORK_PASSPHRASE, SOROBAN_RPC_URLS } from '../sdk/src/constants.js'
 import {
@@ -60,7 +67,7 @@ if (!rpc.Api.isSimulationSuccess(simResult)) {
   process.exit(1)
 }
 
-const commitmentBytes = simResult.result!.retval.bytes()
+const commitmentBytes = xdr.expectUnionVariant(simResult.result!.retval, 'scvBytes').bytes.toBytes()
 console.log(`   Commitment: ${Buffer.from(commitmentBytes).toString('hex').slice(0, 40)}...`)
 
 // Step 2: Sign the commitment with the ed25519 key
