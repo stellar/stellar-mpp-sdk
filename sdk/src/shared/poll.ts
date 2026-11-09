@@ -9,6 +9,7 @@ import {
 } from './defaults.js'
 import { StellarMppError } from './errors.js'
 import type { Semaphore } from './semaphore.js'
+import { TimeoutError, withTimeout } from './timeout.js'
 
 export class PollTimeoutError extends Error {
   constructor(message: string) {
@@ -23,6 +24,9 @@ export class PollMaxAttemptsError extends Error {
     this.name = 'PollMaxAttemptsError'
   }
 }
+
+/** The transaction was included in a ledger and failed, leaving contract state unchanged. */
+export class TransactionFailedError extends StellarMppError {}
 
 export interface PollOptions {
   maxAttempts?: number
@@ -40,7 +44,7 @@ export interface PollOptions {
  *
  * Repeatedly calls `getTransaction` until the transaction reaches a terminal state (`SUCCESS` or
  * `FAILED`) or a timeout / max-attempts limit is hit. If the state is `FAILED`, it throws a
- * {@link StellarMppError}.
+ * {@link TransactionFailedError}.
  *
  * @param rpcServer - Any object exposing a Soroban-compatible `getTransaction` method.
  * @param hash - The hex-encoded transaction hash to poll for.
@@ -49,7 +53,8 @@ export interface PollOptions {
  * @param opts.delayMs - Base delay between attempts (before backoff).
  * @param opts.backoffMultiplier - Multiplier applied to `delayMs` on each successive attempt.
  * @param opts.jitterMs - Maximum random jitter added/subtracted from each delay.
- * @param opts.timeoutMs - Hard wall-clock timeout across all attempts.
+ * @param opts.timeoutMs - Hard wall-clock timeout across all attempts; a request that hangs is
+ *   abandoned when it runs out.
  * @param opts.semaphore - Optional concurrency limiter.
  * @returns The successful {@link rpc.Api.GetTransactionResponse} once the transaction confirms.
  * @throws {PollTimeoutError} If `timeoutMs` elapses before a terminal status.
@@ -74,19 +79,33 @@ export async function pollTransaction(
     const startTime = Date.now()
     let attempts = 0
 
-    while (true) {
-      if (Date.now() - startTime > timeoutMs) {
-        throw new PollTimeoutError(`Poll timed out after ${timeoutMs}ms for transaction ${hash}`)
-      }
+    const timedOut = () =>
+      new PollTimeoutError(`Poll timed out after ${timeoutMs}ms for transaction ${hash}`)
 
-      const result = await rpcServer.getTransaction(hash)
+    while (true) {
+      const remainingMs = timeoutMs - (Date.now() - startTime)
+      if (remainingMs <= 0) throw timedOut()
+
+      // Each request is bounded by the remaining budget, so a hung RPC call
+      // cannot keep the poll running past `timeoutMs`.
+      let result: rpc.Api.GetTransactionResponse
+      try {
+        result = await withTimeout(
+          rpcServer.getTransaction(hash),
+          remainingMs,
+          `getTransaction for ${hash}`,
+        )
+      } catch (error) {
+        if (error instanceof TimeoutError) throw timedOut()
+        throw error
+      }
 
       if (result.status === 'SUCCESS') {
         return result
       }
 
       if (result.status === 'FAILED') {
-        throw new StellarMppError(
+        throw new TransactionFailedError(
           `Transaction ${hash} failed: ${result.resultXdr ?? 'unknown error'}`,
         )
       }
@@ -100,7 +119,10 @@ export async function pollTransaction(
 
       const baseDelay = delayMs * Math.pow(backoffMultiplier, attempts - 1)
       const jitter = (Math.random() * 2 - 1) * jitterMs
-      const delay = Math.max(0, baseDelay + jitter)
+      // The sleep is capped by the remaining budget too, so the poll ends at
+      // `timeoutMs` and not one backoff later.
+      const remainingAfterRequest = timeoutMs - (Date.now() - startTime)
+      const delay = Math.max(0, Math.min(baseDelay + jitter, remainingAfterRequest))
       await new Promise((resolve) => setTimeout(resolve, delay))
     }
   } finally {
