@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Support Protocol 30 ledger headers by raising the `@stellar/stellar-sdk` peer dependency to `^17.4.0` (from `^17.2.1`); consumers must bump [#102](https://github.com/stellar/stellar-mpp-sdk/pull/102)
+  - Before 17.3.0, the SDK cannot decode a ledger header whose `scpValue.ext` uses the Protocol 30 arm, so `getLatestLedger()` throws `XdrError: LedgerHeader.scpValue.ext.v: unknown enum value 3`. This breaks the charge client and server, the channel watcher and channel state reads on networks that run Protocol 30, such as testnet
+  - Update `zod` to `^4.6.7`, and `body-parser`, `follow-redirects` and `qs` to patched releases, so `pnpm audit --audit-level high` passes
 - Validate the channel contract address format up front and surface a typed `StellarMppError`: on the client when the server advertises a malformed address in the challenge (previously an untyped `Error` from the `Address` constructor once commitment encoding became local), and on the server at construction so a misconfigured `channel` fails fast at startup [#64](https://github.com/stellar/stellar-mpp-sdk/pull/64)
 - Bump vulnerable transitive dependencies (`ip-address`, `proxy-addr`, `brace-expansion`, `qs`, `smol-toml`, `source-map-js`) to patched versions [#93](https://github.com/stellar/stellar-mpp-sdk/pull/93)
 - Answer rejected charge and channel credentials with HTTP 402 and a fresh challenge again, instead of the HTTP 500 they have returned since the `mppx@0.10.1` bump. The SDK's error classes now extend `mppx`'s `PaymentError`, so the response names the rejection reason while `details` stay server-side. Settlement failures (`SettlementError`) keep a generic HTTP 500 and are logged through the configured `logger` [#83](https://github.com/stellar/stellar-mpp-sdk/pull/83)

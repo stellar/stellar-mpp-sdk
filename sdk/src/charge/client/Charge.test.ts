@@ -99,7 +99,7 @@ function buildMockPreparedTx() {
   return buildTx(TEST_KEYPAIR.publicKey(), buildTransferOp())
 }
 
-function buildMockPrepareTxAuthEntry() {
+async function buildMockPrepareTxAuthEntry() {
   const account = new Account(ALL_ZEROS, '0')
   const contract = new Contract(USDC_SAC_TESTNET)
   const transferOp = contract.call(
@@ -108,7 +108,7 @@ function buildMockPrepareTxAuthEntry() {
     new Address(RECIPIENT).toScVal(),
     nativeToScVal(100000n, { type: 'i128' }),
   )
-  authorizeInvocation({
+  const auth = await authorizeInvocation({
     signer: TEST_KEYPAIR,
     validUntilLedgerSeq: 1000,
     authV2: false,
@@ -127,9 +127,8 @@ function buildMockPrepareTxAuthEntry() {
       subInvocations: [],
     }),
     networkPassphrase: NETWORK_PASSPHRASE[STELLAR_TESTNET],
-  }).then((auth) => {
-    transferOp.body.invokeHostFunctionOp.auth.push(auth)
   })
+  transferOp.body.invokeHostFunctionOp.auth.push(auth)
   return new TransactionBuilder(account, {
     fee: '100',
     networkPassphrase: 'Test SDF Network ; September 2015',
