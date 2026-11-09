@@ -1,4 +1,4 @@
-export { channel, close } from './Channel.js'
+export { channel, close, closeWithLatestCommitment, getLatestCommitment } from './Channel.js'
 export { getChannelState } from './State.js'
 export type { ChannelState } from './State.js'
 export { stellar } from './Methods.js'

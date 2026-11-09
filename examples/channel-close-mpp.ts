@@ -4,11 +4,11 @@
  * Unlike `channel-close.ts` (which calls the standalone operator `close()`
  * admin function directly), this drives the close through the MPP credential
  * path: the client sends an `action: 'close'` credential and the *server*
- * validates it, sets the per-channel `settling` marker, and broadcasts the
- * on-chain close using its configured `feePayer`.
+ * validates it, latches the channel as closing, and broadcasts the on-chain
+ * close using its configured `feePayer`.
  *
- * This exercises the server-side `doVerifyClose` path and the settling-window
- * protection that blocks new credentials during settlement.
+ * This exercises the server-side `doVerifyClose` path and the closing latch
+ * that rejects new credentials once a close is accepted.
  *
  * The server must be started with CHANNEL_ENVELOPE_SIGNER_SECRET set so it can
  * broadcast the close transaction.

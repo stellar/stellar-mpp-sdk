@@ -168,4 +168,59 @@ describe('channel rejection HTTP status (real mppx handler)', () => {
       challengeId: Challenge.fromHeaders(response.headers).id,
     })
   })
+
+  it('answers a close whose read times out before the send with 402 and a fresh challenge', async () => {
+    const commitmentKey = Keypair.random()
+    const envelopeSigner = Keypair.random()
+    const commitmentBytes = buildCommitmentMessage({
+      channel: CHANNEL_ADDRESS,
+      amount: 10_000_000n,
+      network: STELLAR_TESTNET,
+    })
+    mockGetLedgerEntries.mockResolvedValue(instanceWithCommitmentKey(commitmentKey))
+    // The source-account read never answers, so nothing is built or sent.
+    mockGetAccount.mockReturnValue(new Promise<never>(() => {}))
+
+    const mppx = Mppx.create({
+      secretKey: SECRET_KEY,
+      methods: [
+        serverChannel({
+          channel: CHANNEL_ADDRESS,
+          checkOnChainState: false,
+          commitmentKey: commitmentKey.publicKey(),
+          feePayer: { envelopeSigner },
+          simulationTimeoutMs: 1,
+          store: Store.memory(),
+        }),
+      ],
+    })
+    const handler = mppx.channel({ amount: '1' })
+
+    const first = await handler(new Request(URL))
+    expect(first.status).toBe(402)
+    const challenge = Challenge.fromResponse(first.challenge)
+    const authorization = Credential.serialize({
+      challenge,
+      payload: {
+        action: 'close',
+        amount: '10000000',
+        signature: Buffer.from(commitmentKey.sign(commitmentBytes)).toString('hex'),
+      },
+    })
+    const second = await handler(new Request(URL, { headers: { Authorization: authorization } }))
+    expect(second.status).toBe(402)
+    const response = second.challenge
+
+    expect(mockPrepareTransaction).toHaveBeenCalledTimes(0)
+    expect(mockSendTransaction).toHaveBeenCalledTimes(0)
+    const retry = Challenge.fromResponse(response)
+    expect(retry.intent).toBe('channel')
+    expect(await response.json()).toEqual({
+      type: 'https://paymentauth.org/problems/verification-failed',
+      title: 'Verification Failed',
+      status: 402,
+      detail: `[stellar:channel] getAccount for close on channel ${CHANNEL_ADDRESS} failed; nothing was sent.`,
+      challengeId: retry.id,
+    })
+  })
 })
