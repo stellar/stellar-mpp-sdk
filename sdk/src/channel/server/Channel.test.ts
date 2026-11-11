@@ -128,7 +128,7 @@ function makeCredential(opts: {
   })
 }
 
-/** Build a credential with a real ed25519 signature over `commitmentBytes`. */
+/** Build a credential signed over the locally built commitment message. */
 function makeSignedCredential(opts: {
   action?: 'voucher' | 'close'
   cumulativeAmount: bigint
@@ -169,18 +169,6 @@ function makeSignedCredential(opts: {
       signature: sigHex,
     },
   })
-}
-
-/** Create a successful simulation result returning given commitment bytes. */
-function successSimResult(commitmentBytes: Buffer) {
-  return {
-    result: {
-      retval: {
-        bytes: () => commitmentBytes,
-      },
-    },
-    transactionData: 'mock',
-  }
 }
 
 describe('stellar server channel', () => {
@@ -300,9 +288,6 @@ describe('stellar server channel', () => {
       currentLedger: 4000,
     })
 
-    const commitmentBytes = Buffer.from('default-check-bytes')
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
-
     const credential = makeSignedCredential({
       cumulativeAmount: 1000000n,
       challengeAmount: '1000000',
@@ -388,24 +373,18 @@ describe('stellar server channel', () => {
 
 describe('stellar server channel verification', () => {
   beforeEach(() => {
-    // Reset first to drop any queued mockResolvedValueOnce left unconsumed by a
-    // prior test: cheap monotonicity/coverage rejections now short-circuit before
-    // the signature-verify simulate, so a pre-loaded once-value would otherwise
-    // leak into the next test. The default is re-established immediately below.
     mockSimulateTransaction.mockReset()
-    // Default mock for verifyCommitmentSignature (called before cumulative checks)
-    mockSimulateTransaction.mockResolvedValue({
-      error: undefined,
-      result: { retval: xdr.ScVal.scvBytes(Buffer.from('test-commitment-bytes')) },
-      transactionData: new (require('@stellar/stellar-sdk').SorobanDataBuilder)(),
-      events: [],
-    })
   })
 
   it('rejects underpayment (commitment does not cover requested amount)', async () => {
     // Commitment = 500000, but challenge requests 1000000 → should reject
-    // Use a proper ed25519 signature for this to pass signature verification
-    const commitmentBytes = Buffer.from('test-commitment-500000')
+    // Sign the real commitment message so the signature itself is valid and the
+    // rejection can only come from the amount check.
+    const commitmentBytes = buildCommitmentMessage({
+      channel: CHANNEL_ADDRESS,
+      amount: 500000n,
+      network: STELLAR_TESTNET,
+    })
     const signature = COMMITMENT_KEY.sign(commitmentBytes)
     const credential = makeCredential({
       amount: '500000',
@@ -418,14 +397,6 @@ describe('stellar server channel verification', () => {
       checkOnChainState: false,
       commitmentKey: COMMITMENT_KEY,
       store: Store.memory(),
-    })
-
-    // Mock the simulate response to return commitment bytes that match our signature
-    mockSimulateTransaction.mockResolvedValueOnce({
-      error: undefined,
-      result: { retval: xdr.ScVal.scvBytes(commitmentBytes) },
-      transactionData: new (await import('@stellar/stellar-sdk')).SorobanDataBuilder().build(),
-      events: [],
     })
 
     await expect(
@@ -442,8 +413,13 @@ describe('stellar server channel verification', () => {
     await store.put(cumulativeKey, { amount: '5000000' })
 
     // Commitment = 3000000, previous cumulative = 5000000 → reject
-    // Use a proper ed25519 signature for this to pass signature verification
-    const commitmentBytes = Buffer.from('test-commitment-3000000')
+    // Sign the real commitment message so the signature itself is valid and the
+    // rejection can only come from the amount check.
+    const commitmentBytes = buildCommitmentMessage({
+      channel: CHANNEL_ADDRESS,
+      amount: 3000000n,
+      network: STELLAR_TESTNET,
+    })
     const signature = COMMITMENT_KEY.sign(commitmentBytes)
     const credential = makeCredential({
       amount: '3000000',
@@ -456,14 +432,6 @@ describe('stellar server channel verification', () => {
       checkOnChainState: false,
       commitmentKey: COMMITMENT_KEY,
       store,
-    })
-
-    // Mock the simulate response to return commitment bytes that match our signature
-    mockSimulateTransaction.mockResolvedValueOnce({
-      error: undefined,
-      result: { retval: xdr.ScVal.scvBytes(commitmentBytes) },
-      transactionData: new (await import('@stellar/stellar-sdk')).SorobanDataBuilder().build(),
-      events: [],
     })
 
     await expect(
@@ -501,8 +469,13 @@ describe('stellar server channel verification', () => {
     await store.put(cumulativeKey, { amount: '5000000' })
 
     // Commitment = 5000000, previous cumulative = 5000000 → reject (must be strictly greater)
-    // Use a proper ed25519 signature for this to pass signature verification
-    const commitmentBytes = Buffer.from('test-commitment-5000000')
+    // Sign the real commitment message so the signature itself is valid and the
+    // rejection can only come from the amount check.
+    const commitmentBytes = buildCommitmentMessage({
+      channel: CHANNEL_ADDRESS,
+      amount: 5000000n,
+      network: STELLAR_TESTNET,
+    })
     const signature = COMMITMENT_KEY.sign(commitmentBytes)
     const credential = makeCredential({
       amount: '5000000',
@@ -515,14 +488,6 @@ describe('stellar server channel verification', () => {
       checkOnChainState: false,
       commitmentKey: COMMITMENT_KEY,
       store,
-    })
-
-    // Mock the simulate response to return commitment bytes that match our signature
-    mockSimulateTransaction.mockResolvedValueOnce({
-      error: undefined,
-      result: { retval: xdr.ScVal.scvBytes(commitmentBytes) },
-      transactionData: new (await import('@stellar/stellar-sdk')).SorobanDataBuilder().build(),
-      events: [],
     })
 
     await expect(
@@ -578,9 +543,6 @@ describe('stellar server channel verification', () => {
   })
 
   it('rejects invalid ed25519 signature (bad sig, valid hex)', async () => {
-    const commitmentBytes = Buffer.from('test-commitment-data')
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
-
     // Use a valid-length hex string that is NOT a valid signature
     const credential = makeCredential({
       amount: '1000000',
@@ -617,8 +579,6 @@ describe('stellar server channel verification', () => {
       closeEffectiveAtLedger: null,
       currentLedger: 4000,
     })
-    const commitmentBytes = Buffer.from('amplification-guard-bytes')
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const credential = makeCredential({
       amount: '1000000',
@@ -677,9 +637,6 @@ describe('stellar server channel verification', () => {
   })
 
   it('accepts valid commitment and updates cumulative in store', async () => {
-    const commitmentBytes = Buffer.from('valid-commitment-bytes')
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
-
     const store = Store.memory()
     const cumulativeKey = `stellar:channel:cumulative:${CHANNEL_ADDRESS}`
 
@@ -737,9 +694,6 @@ describe('stellar server channel verification', () => {
   })
 
   it('rejects replay of same challenge ID', async () => {
-    const commitmentBytes = Buffer.from('replay-test-bytes')
-    mockSimulateTransaction.mockResolvedValue(successSimResult(commitmentBytes))
-
     const store = Store.memory()
 
     const credential = makeSignedCredential({
@@ -770,9 +724,6 @@ describe('stellar server channel verification', () => {
   })
 
   it('rejects close action when signer is not configured', async () => {
-    const commitmentBytes = Buffer.from('close-test-bytes')
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
-
     const credential = makeSignedCredential({
       action: 'close',
       cumulativeAmount: 1000000n,
@@ -795,10 +746,6 @@ describe('stellar server channel verification', () => {
   })
 
   it('does not brick a voucher-only channel when a close credential is rejected', async () => {
-    // Persistent simulate mock with shared bytes — both credentials sign these.
-    const commitmentBytes = Buffer.from('p25-voucher-only')
-    mockSimulateTransaction.mockResolvedValue(successSimResult(commitmentBytes))
-
     const store = Store.memory()
     const method = channel({
       channel: CHANNEL_ADDRESS,
@@ -834,8 +781,6 @@ describe('stellar server channel verification', () => {
   })
 
   it('rolls back settling markers when settlement fails before broadcast', async () => {
-    const commitmentBytes = Buffer.from('p25-rollback')
-    mockSimulateTransaction.mockResolvedValue(successSimResult(commitmentBytes))
     mockPrepareTransaction.mockReset()
     mockPrepareTransaction.mockRejectedValueOnce(new Error('pre-broadcast failure'))
 
@@ -878,8 +823,6 @@ describe('stellar server channel verification', () => {
 
   it('settles close on-chain and marks channel as closed in store', async () => {
     const signerKp = Keypair.random()
-    const commitmentBytes = Buffer.from('close-settle-bytes')
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
     mockGetAccount.mockResolvedValueOnce(new Account(signerKp.publicKey(), '50'))
     mockPrepareTransaction.mockImplementationOnce((tx: any) => tx)
     mockSendTransaction.mockResolvedValueOnce({ hash: 'close-settle-hash', status: 'PENDING' })
@@ -926,9 +869,7 @@ describe('stellar server channel verification', () => {
 
   it('rejects close with a logged SettlementError when sendTransaction returns non-PENDING status', async () => {
     const signerKp = Keypair.random()
-    const commitmentBytes = Buffer.from('close-reject-bytes')
     const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
     mockGetAccount.mockResolvedValueOnce(new Account(signerKp.publicKey(), '51'))
     mockPrepareTransaction.mockImplementationOnce((tx: any) => tx)
     mockSendTransaction.mockResolvedValueOnce({ hash: 'err-hash', status: 'ERROR' })
@@ -967,15 +908,12 @@ describe('stellar server channel verification', () => {
 
   it('rejects close with a SettlementError when sendTransaction throws', async () => {
     const signerKp = Keypair.random()
-    const commitmentBytes = Buffer.from('close-send-throws')
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
     mockGetAccount.mockResolvedValueOnce(new Account(signerKp.publicKey(), '51'))
     mockPrepareTransaction.mockImplementationOnce((tx: any) => tx)
     mockSendTransaction.mockRejectedValueOnce(new Error('RPC down'))
 
     const credential = makeSignedCredential({
       action: 'close',
-      commitmentBytes,
       cumulativeAmount: 5000000n,
       challengeAmount: '5000000',
     })
@@ -1004,8 +942,6 @@ describe('stellar server channel verification', () => {
 
   it('rejects close when sendTransaction returns TRY_AGAIN_LATER', async () => {
     const signerKp = Keypair.random()
-    const commitmentBytes = Buffer.from('close-tryagain-bytes')
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
     mockGetAccount.mockResolvedValueOnce(new Account(signerKp.publicKey(), '52'))
     mockPrepareTransaction.mockImplementationOnce((tx: any) => tx)
     mockSendTransaction.mockResolvedValueOnce({
@@ -1042,8 +978,6 @@ describe('stellar server channel verification', () => {
 
   it('rejects close with a SettlementError that keeps the poll failure out of the message', async () => {
     const signerKp = Keypair.random()
-    const commitmentBytes = Buffer.from('close-poll-fail')
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
     mockGetAccount.mockResolvedValueOnce(new Account(signerKp.publicKey(), '53'))
     mockPrepareTransaction.mockImplementationOnce((tx: any) => tx)
     mockSendTransaction.mockResolvedValueOnce({ hash: 'poll-fail-hash', status: 'PENDING' })
@@ -1083,8 +1017,6 @@ describe('stellar server channel verification', () => {
   it('wraps close tx in FeeBump when feeBumpSigner is set', async () => {
     const signerKp = Keypair.random()
     const bumpKp = Keypair.random()
-    const commitmentBytes = Buffer.from('close-bump-bytes')
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
     mockGetAccount.mockResolvedValueOnce(new Account(signerKp.publicKey(), '54'))
     mockPrepareTransaction.mockImplementationOnce((tx: any) => tx)
     mockWrapFeeBump.mockReturnValueOnce({ fake: 'fee-bump-tx' })
@@ -1121,8 +1053,6 @@ describe('stellar server channel verification', () => {
 
   it('does not mark channel as closed when broadcast fails', async () => {
     const signerKp = Keypair.random()
-    const commitmentBytes = Buffer.from('close-no-mark')
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
     mockGetAccount.mockResolvedValueOnce(new Account(signerKp.publicKey(), '55'))
     mockPrepareTransaction.mockImplementationOnce((tx: any) => tx)
     mockSendTransaction.mockResolvedValueOnce({ hash: 'no-mark-hash', status: 'ERROR' })
@@ -1178,9 +1108,6 @@ describe('stellar server channel dispute detection', () => {
       currentLedger: 5500, // past effective → closed
     })
 
-    const commitmentBytes = Buffer.from('closed-channel-bytes')
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
-
     const credential = makeSignedCredential({
       cumulativeAmount: 1000000n,
       challengeAmount: '1000000',
@@ -1214,9 +1141,6 @@ describe('stellar server channel dispute detection', () => {
     }
     mockGetChannelState.mockResolvedValueOnce(disputeState)
 
-    const commitmentBytes = Buffer.from('dispute-test-bytes')
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
-
     const onDisputeDetected = vi.fn()
 
     const credential = makeSignedCredential({
@@ -1246,9 +1170,6 @@ describe('stellar server channel dispute detection', () => {
 
   it('rejects voucher when on-chain check fails (network error)', async () => {
     mockGetChannelState.mockRejectedValueOnce(new Error('network timeout'))
-
-    const commitmentBytes = Buffer.from('network-error-bytes')
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const credential = makeSignedCredential({
       cumulativeAmount: 1000000n,
@@ -1283,9 +1204,6 @@ describe('stellar server channel dispute detection', () => {
       currentLedger: 4000,
     })
 
-    const commitmentBytes = Buffer.from('cache-test-bytes')
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
-
     const store = Store.memory()
 
     const credential = makeSignedCredential({
@@ -1317,9 +1235,6 @@ describe('stellar server channel dispute detection', () => {
 
   it('skips on-chain check when checkOnChainState is false', async () => {
     mockGetChannelState.mockClear()
-
-    const commitmentBytes = Buffer.from('skip-check-bytes')
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const credential = makeSignedCredential({
       cumulativeAmount: 1000000n,
@@ -1372,9 +1287,6 @@ describe('stellar server channel dispute detection', () => {
   it('wraps non-Error thrown by getChannelState in ChannelVerificationError', async () => {
     mockGetChannelState.mockRejectedValueOnce('raw string failure')
 
-    const commitmentBytes = Buffer.from('non-error-throw-bytes')
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
-
     const credential = makeSignedCredential({
       cumulativeAmount: 1000000n,
       challengeAmount: '1000000',
@@ -1406,9 +1318,6 @@ describe('stellar server channel dispute detection', () => {
       closeEffectiveAtLedger: null,
       currentLedger: 4000,
     })
-
-    const commitmentBytes = Buffer.from('no-dispute-bytes')
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const onDisputeDetected = vi.fn()
 
@@ -1446,9 +1355,6 @@ describe('stellar server channel dispute detection', () => {
       currentLedger: 4000,
     })
 
-    const commitmentBytes = Buffer.from('within-balance-bytes')
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
-
     const credential = makeSignedCredential({
       cumulativeAmount: 5000000n, // exactly at balance
       challengeAmount: '5000000',
@@ -1480,9 +1386,6 @@ describe('stellar server channel dispute detection', () => {
       closeEffectiveAtLedger: null,
       currentLedger: 4000,
     })
-
-    const commitmentBytes = Buffer.from('exceeds-balance-bytes')
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const credential = makeSignedCredential({
       cumulativeAmount: 1000000n,
@@ -1684,15 +1587,10 @@ describe('close()', () => {
 describe('channel challenge replay across instances sharing a store', () => {
   it('rejects the second concurrent verify when two instances share a store', async () => {
     // Simulate multi-process: two server instances with separate verifyLocks
-    // but sharing the same store. A slow RPC (simulateTransaction) widens the
-    // timing gap between the challenge check and the challenge mark.
+    // but sharing the same store. The challenge claim is one atomic
+    // store.update, so exactly one instance can claim it whatever the timing.
     const sharedStore = Store.memory()
-    const commitmentBytes = Buffer.from('shared-store-race-bytes')
 
-    // simulateTransaction returns slowly to widen the race window
-    mockSimulateTransaction.mockImplementation(
-      () => new Promise((r) => setTimeout(() => r(successSimResult(commitmentBytes)), 50)),
-    )
     mockGetChannelState.mockResolvedValue({
       balance: 9999999n,
       refundWaitingPeriod: 1000,
@@ -1741,11 +1639,6 @@ describe('channel challenge replay across instances sharing a store', () => {
     // Two instances race to update the cumulative amount with the same credential.
     // Only one should succeed; the other should see the updated cumulative.
     const sharedStore = Store.memory()
-    const commitmentBytes1 = Buffer.from('shared-store-cumulative-bytes')
-
-    mockSimulateTransaction.mockImplementation(
-      () => new Promise((r) => setTimeout(() => r(successSimResult(commitmentBytes1)), 50)),
-    )
 
     const method1 = channel({
       channel: CHANNEL_ADDRESS,
@@ -1829,11 +1722,6 @@ describe('channel vouchers during close settlement window', () => {
       },
     }
 
-    const closeBytes = Buffer.from('close-before-settling-marker')
-    const voucherBytes = Buffer.from('voucher-during-marker-gap')
-    mockSimulateTransaction
-      .mockResolvedValueOnce(successSimResult(closeBytes))
-      .mockResolvedValueOnce(successSimResult(voucherBytes))
     mockGetAccount.mockResolvedValueOnce(new Account(Keypair.random().publicKey(), '200'))
     mockPrepareTransaction.mockImplementationOnce((tx: any) => tx)
     mockSendTransaction.mockResolvedValueOnce({ hash: 'close-marker-gap-hash', status: 'PENDING' })
@@ -1898,9 +1786,6 @@ describe('channel vouchers during close settlement window', () => {
       settledAt: new Date().toISOString(),
     })
 
-    const commitmentBytes = Buffer.from('voucher-during-settling')
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
-
     const credential = makeSignedCredential({
       action: 'voucher',
       cumulativeAmount: 6000000n,
@@ -1933,9 +1818,6 @@ describe('channel vouchers during close settlement window', () => {
       settlingAmount: '5000000',
       settledAt: new Date().toISOString(),
     })
-
-    const commitmentBytes = Buffer.from('retry-close-during-settling')
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const credential = makeSignedCredential({
       action: 'close',
@@ -1982,8 +1864,6 @@ describe('channel vouchers during close settlement window', () => {
     })
 
     // 1. Voucher action should be rejected
-    const voucherBytes = Buffer.from('voucher-during-settling')
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(voucherBytes))
 
     const voucherCredential = makeCredential({
       action: 'voucher',
@@ -1999,8 +1879,6 @@ describe('channel vouchers during close settlement window', () => {
     ).rejects.toThrow('settling')
 
     // 2. Close action should be rejected
-    const closeBytes = Buffer.from('close-during-settling')
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(closeBytes))
 
     const closeCredential = makeCredential({
       action: 'close',
@@ -2028,9 +1906,6 @@ describe('channel vouchers during close settlement window', () => {
     // 4. The settling marker remains in the store with the committed amount
     // 5. A subsequent voucher is rejected with the "settling" error (channel locked)
     const signerKp = Keypair.random()
-    const commitmentBytes = Buffer.from('settlement-fail-test-bytes')
-    // First mock: prepare_commitment (for commitment signature verification)
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
     mockGetAccount.mockResolvedValueOnce(new Account(signerKp.publicKey(), '200'))
     mockPrepareTransaction.mockImplementationOnce((tx: any) => tx)
     mockSendTransaction.mockResolvedValueOnce({ hash: 'fail-settlement-hash', status: 'PENDING' })
@@ -2073,8 +1948,6 @@ describe('channel vouchers during close settlement window', () => {
     expect((settlingMarker as any).settledAt).toBeDefined()
 
     // Now attempt a voucher on the same channel — should be rejected with "settling" error
-    const voucherBytes = Buffer.from('voucher-after-failed-settlement')
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(voucherBytes))
 
     const voucherCredential = makeSignedCredential({
       action: 'voucher',
@@ -2098,15 +1971,6 @@ describe('channel vouchers during close settlement window', () => {
 
   it('enforces fee budget: rejects second close within window when budget exceeded', async () => {
     const signerKp = Keypair.random()
-    const bytes1 = Buffer.from('budget-test-bytes')
-    const bytes2 = Buffer.from('second-close-bytes')
-    // Mock simulate to return matching commitment bytes
-    let callCount = 0
-    mockSimulateTransaction.mockImplementation(() => {
-      callCount++
-      const bytes = callCount === 1 ? bytes1 : bytes2
-      return Promise.resolve(successSimResult(bytes))
-    })
     mockGetAccount.mockResolvedValue(new Account(signerKp.publicKey(), '100'))
     mockPrepareTransaction.mockImplementation((tx: any) => tx)
     mockWrapFeeBump.mockImplementation((tx) => tx)
@@ -2203,17 +2067,6 @@ describe('channel vouchers during close settlement window', () => {
     const windowMs = 60_000
 
     // Each settlement uses distinct commitment bytes; the cumulative must strictly increase.
-    const settlementBytes = [
-      Buffer.from('accumulate-close-1'),
-      Buffer.from('accumulate-close-2'),
-      Buffer.from('accumulate-close-3'),
-    ]
-    let callCount = 0
-    mockSimulateTransaction.mockImplementation(() => {
-      const bytes = settlementBytes[callCount] ?? settlementBytes[settlementBytes.length - 1]
-      callCount++
-      return Promise.resolve(successSimResult(bytes))
-    })
     mockGetAccount.mockResolvedValue(new Account(signerKp.publicKey(), '200'))
     mockPrepareTransaction.mockImplementation((tx: any) => tx)
     mockWrapFeeBump.mockImplementation((tx) => tx)
@@ -2283,14 +2136,6 @@ describe('channel vouchers during close settlement window', () => {
 
   it('allows new settlement after fee budget window elapses', async () => {
     const signerKp = Keypair.random()
-    const windowBytes1 = Buffer.from('window-elapsed-bytes')
-    const windowBytes2 = Buffer.from('post-window-bytes')
-    let callCount = 0
-    mockSimulateTransaction.mockImplementation(() => {
-      callCount++
-      const bytes = callCount === 1 ? windowBytes1 : windowBytes2
-      return Promise.resolve(successSimResult(bytes))
-    })
     mockGetAccount.mockResolvedValue(new Account(signerKp.publicKey(), '101'))
     mockPrepareTransaction.mockImplementation((tx: any) => tx)
     mockWrapFeeBump.mockImplementation((tx) => tx)
@@ -2377,14 +2222,6 @@ describe('channel vouchers during close settlement window', () => {
 
   it('allows many settlements when fee budget is not configured', async () => {
     const signerKp = Keypair.random()
-    const noBudgetBytes1 = Buffer.from('no-budget-bytes')
-    const noBudgetBytes2 = Buffer.from('second-no-budget-bytes')
-    let callCount = 0
-    mockSimulateTransaction.mockImplementation(() => {
-      callCount++
-      const bytes = callCount === 1 ? noBudgetBytes1 : noBudgetBytes2
-      return Promise.resolve(successSimResult(bytes))
-    })
     mockGetAccount.mockResolvedValue(new Account(signerKp.publicKey(), '103'))
     mockPrepareTransaction.mockImplementation((tx: any) => tx)
     mockWrapFeeBump.mockImplementation((tx) => tx)
@@ -2446,8 +2283,6 @@ describe('channel vouchers during close settlement window', () => {
   it('uses fee bump key as funder when feeBumpSigner is set', async () => {
     const signerKp = Keypair.random()
     const bumpKp = Keypair.random()
-    const commitmentBytes = Buffer.from('bump-funder-bytes')
-    mockSimulateTransaction.mockResolvedValue(successSimResult(commitmentBytes))
     mockGetAccount.mockResolvedValue(new Account(signerKp.publicKey(), '104'))
     mockPrepareTransaction.mockImplementation((tx: any) => tx)
     mockWrapFeeBump.mockImplementation((tx) => tx)
@@ -2573,25 +2408,11 @@ describe('atomic challenge replay protection (channel)', () => {
       { source: 'test-source' },
     )
 
-    mockSimulateTransaction.mockResolvedValueOnce({
-      error: undefined,
-      result: { retval: xdr.ScVal.scvBytes(Buffer.from('test-commitment-bytes')) },
-      transactionData: new (await import('@stellar/stellar-sdk')).SorobanDataBuilder().build(),
-      events: [],
-    })
-
     const result1 = await method.verify({
       credential: cred as any,
       request: cred.challenge.request,
     })
     expect(result1.status).toBe('success')
-
-    mockSimulateTransaction.mockResolvedValueOnce({
-      error: undefined,
-      result: { retval: xdr.ScVal.scvBytes(Buffer.from('test-commitment-bytes')) },
-      transactionData: new (await import('@stellar/stellar-sdk')).SorobanDataBuilder().build(),
-      events: [],
-    })
 
     // Second redemption of same challenge is rejected
     await expect(
@@ -2632,7 +2453,13 @@ describe('atomic challenge replay protection (channel)', () => {
     // Try commitment amount (100) that is not strictly greater than previous (100) — should fail
     const amountNotGreater = '100'
     const signatureNotGreater = Buffer.from(
-      COMMITMENT_KEY.sign(Buffer.from('test-commitment-bytes')),
+      COMMITMENT_KEY.sign(
+        buildCommitmentMessage({
+          channel: CHANNEL_ADDRESS,
+          amount: 100n,
+          network: STELLAR_TESTNET,
+        }),
+      ),
     ).toString('hex')
 
     const credNotGreater = Object.assign(
@@ -2643,14 +2470,7 @@ describe('atomic challenge replay protection (channel)', () => {
       { source: 'test-source' },
     )
 
-    mockSimulateTransaction.mockResolvedValueOnce({
-      error: undefined,
-      result: { retval: xdr.ScVal.scvBytes(Buffer.from('test-commitment-bytes')) },
-      transactionData: new (await import('@stellar/stellar-sdk')).SorobanDataBuilder().build(),
-      events: [],
-    })
-
-    // This should fail because 150 is not strictly greater than 100
+    // This should fail because 100 is not strictly greater than 100
     await expect(
       method.verify({
         credential: credNotGreater as any,
@@ -2689,7 +2509,13 @@ describe('atomic challenge replay protection (channel)', () => {
     // Commitment of 140 does not cover 100 + 50 = 150, should fail
     const amountInsufficient = '140'
     const signatureInsufficient = Buffer.from(
-      COMMITMENT_KEY.sign(Buffer.from('test-commitment-bytes')),
+      COMMITMENT_KEY.sign(
+        buildCommitmentMessage({
+          channel: CHANNEL_ADDRESS,
+          amount: 140n,
+          network: STELLAR_TESTNET,
+        }),
+      ),
     ).toString('hex')
 
     const credInsufficient = Object.assign(
@@ -2703,13 +2529,6 @@ describe('atomic challenge replay protection (channel)', () => {
       }),
       { source: 'test-source' },
     )
-
-    mockSimulateTransaction.mockResolvedValueOnce({
-      error: undefined,
-      result: { retval: xdr.ScVal.scvBytes(Buffer.from('test-commitment-bytes')) },
-      transactionData: new (await import('@stellar/stellar-sdk')).SorobanDataBuilder().build(),
-      events: [],
-    })
 
     await expect(
       method.verify({
@@ -2766,13 +2585,6 @@ describe('atomic challenge replay protection (channel)', () => {
       { source: 'test-source' },
     )
 
-    mockSimulateTransaction.mockResolvedValueOnce({
-      error: undefined,
-      result: { retval: xdr.ScVal.scvBytes(Buffer.from('test-commitment-bytes')) },
-      transactionData: new (await import('@stellar/stellar-sdk')).SorobanDataBuilder().build(),
-      events: [],
-    })
-
     const result = await method.verify({
       credential: cred as any,
       request: cred.challenge.request,
@@ -2809,8 +2621,6 @@ describe('channel server recipient pinning (on-chain payout address validation)'
 
   it('rejects a voucher when the on-chain payout address does not match the configured recipient', async () => {
     mockGetChannelState.mockResolvedValueOnce(mockChannelStateWithRecipient(unexpectedRecipient))
-    const commitmentBytes = Buffer.from('recipient-pin-mismatch')
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const credential = makeSignedCredential({
       cumulativeAmount: 1000000n,
@@ -2831,8 +2641,6 @@ describe('channel server recipient pinning (on-chain payout address validation)'
 
   it('accepts a voucher when the on-chain payout address matches the configured recipient', async () => {
     mockGetChannelState.mockResolvedValueOnce(mockChannelStateWithRecipient(configuredRecipient))
-    const commitmentBytes = Buffer.from('recipient-pin-match')
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const credential = makeSignedCredential({
       cumulativeAmount: 1000000n,
@@ -2890,8 +2698,6 @@ describe('channel server currency pinning (on-chain token validation)', () => {
 
   it('rejects a voucher when the on-chain token does not match the configured currency', async () => {
     mockGetChannelState.mockResolvedValueOnce(mockChannelStateWithToken(unexpectedToken))
-    const commitmentBytes = Buffer.from('currency-pin-mismatch')
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const credential = makeSignedCredential({
       cumulativeAmount: 1000000n,
@@ -2912,8 +2718,6 @@ describe('channel server currency pinning (on-chain token validation)', () => {
 
   it('accepts a voucher when the on-chain token matches the configured currency', async () => {
     mockGetChannelState.mockResolvedValueOnce(mockChannelStateWithToken(configuredCurrency))
-    const commitmentBytes = Buffer.from('currency-pin-match')
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
 
     const credential = makeSignedCredential({
       cumulativeAmount: 1000000n,
@@ -3000,8 +2804,6 @@ describe('channel server close transaction inspection (auth-tree injection)', ()
 
   it('rejects a verified close whose prepared auth tree carries injected sub-invocations', async () => {
     const signerKp = Keypair.random()
-    const commitmentBytes = Buffer.from('close-auth-inject')
-    mockSimulateTransaction.mockResolvedValueOnce(successSimResult(commitmentBytes))
     mockGetAccount.mockResolvedValueOnce(new Account(signerKp.publicKey(), '70'))
     mockPrepareTransaction.mockImplementationOnce((tx: Transaction) =>
       preparedCloseWithInjectedAuth(tx),
@@ -3055,7 +2857,6 @@ describe('channel verification runs RPC outside the cumulative lock', () => {
   // The server verifies commitment signatures against a message that it builds
   // locally. The on-chain state read is therefore the only RPC call that stays
   // in the verification path.
-  const COMMITMENT_BYTES = Buffer.from('unlocked-rpc-commitment-bytes')
 
   // These tests swap in delayed mock implementations. Mocks are not auto-cleared
   // in this file, so restore the module-level defaults rather than leaving a

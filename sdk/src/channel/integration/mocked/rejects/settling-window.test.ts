@@ -19,7 +19,6 @@ const ENVELOPE_KEY = Keypair.random()
 const CHANNEL_ADDRESS = 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526'
 
 // Hoisted mock stubs for use in the vi.mock factory.
-const mockSimulateTransaction = vi.fn()
 const mockGetAccount = vi.fn()
 const mockPrepareTransaction = vi.fn()
 const mockSendTransaction = vi.fn()
@@ -39,7 +38,6 @@ vi.mock('@stellar/stellar-sdk', async (importOriginal) => {
     rpc: {
       ...actual.rpc,
       Server: vi.fn().mockImplementation(function (this: Record<string, unknown>) {
-        this.simulateTransaction = mockSimulateTransaction
         this.getAccount = mockGetAccount
         this.prepareTransaction = mockPrepareTransaction
         this.sendTransaction = mockSendTransaction
@@ -58,10 +56,9 @@ const { channel: serverChannel } = await import('../../../server/Channel.js')
 // On-chain CommitmentKey matches the test signer.
 mockGetInstanceStorageValue.mockResolvedValue(xdr.ScVal.scvBytes(COMMITMENT_KEY.rawPublicKey()))
 
-/** Build a credential with a real ed25519 signature over `commitmentBytes`. */
+/** Build a credential signed over the locally built commitment message. */
 function makeSignedCredential(opts: {
   action: 'voucher' | 'close'
-  commitmentBytes: Buffer
   cumulativeAmount: bigint
   challengeAmount: string
   previousCumulative?: string
@@ -100,14 +97,8 @@ function makeSignedCredential(opts: {
   })
 }
 
-/** A successful prepare_commitment simulation returning the given bytes. */
-function successSimResult(commitmentBytes: Buffer) {
-  return { result: { retval: { bytes: () => commitmentBytes } }, transactionData: 'mock' }
-}
-
 describe('channel settling-window rejection — end-to-end', () => {
   beforeEach(() => {
-    mockSimulateTransaction.mockReset()
     mockGetAccount.mockReset()
     mockPrepareTransaction.mockReset()
     mockSendTransaction.mockReset()
@@ -115,15 +106,6 @@ describe('channel settling-window rejection — end-to-end', () => {
 
   it('rejects a higher-cumulative voucher after a real close has set the settling marker', async () => {
     const store = Store.memory()
-    const closeBytes = Buffer.from('close-commitment-bytes')
-    const voucherBytes = Buffer.from('voucher-commitment-bytes')
-
-    // verifyCommitmentSignature simulates prepare_commitment once per credential:
-    // first the close, then (only if the settling guard is bypassed) the voucher.
-    mockSimulateTransaction
-      .mockResolvedValueOnce(successSimResult(closeBytes))
-      .mockResolvedValueOnce(successSimResult(voucherBytes))
-
     // Let the close reach broadcast, then fail it so the settling marker remains
     // set (fail-closed) — the channel must not silently reopen to new vouchers.
     mockGetAccount.mockResolvedValue(new Account(ENVELOPE_KEY.publicKey(), '100'))
@@ -143,7 +125,6 @@ describe('channel settling-window rejection — end-to-end', () => {
     //    phase 2 broadcast fails, so verify() rejects and the marker remains.
     const closeCredential = makeSignedCredential({
       action: 'close',
-      commitmentBytes: closeBytes,
       cumulativeAmount: 5_000_000n,
       challengeAmount: '1000000',
     })
@@ -169,7 +150,6 @@ describe('channel settling-window rejection — end-to-end', () => {
     //    because the channel is settling.
     const voucherCredential = makeSignedCredential({
       action: 'voucher',
-      commitmentBytes: voucherBytes,
       cumulativeAmount: 7_000_000n,
       challengeAmount: '1000000',
       previousCumulative: '5000000',

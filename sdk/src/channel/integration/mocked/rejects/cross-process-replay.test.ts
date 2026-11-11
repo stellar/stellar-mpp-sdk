@@ -2,7 +2,7 @@ import { Keypair, xdr } from '@stellar/stellar-sdk'
 import { Challenge, Credential, Store } from 'mppx'
 import { STELLAR_TESTNET } from '../../../../constants.js'
 import { buildCommitmentMessage } from '../../../commitment.js'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 // Cross-process replay protection: two independent server
 // instances sharing one atomic store must not both accept the same credential.
@@ -11,7 +11,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const COMMITMENT_KEY = Keypair.random()
 const CHANNEL_ADDRESS = 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526'
 
-const mockSimulateTransaction = vi.fn()
 const mockGetInstanceStorageValue = vi.fn()
 
 vi.mock('@stellar/stellar-sdk', async (importOriginal) => {
@@ -27,9 +26,9 @@ vi.mock('@stellar/stellar-sdk', async (importOriginal) => {
     ),
     rpc: {
       ...actual.rpc,
-      Server: vi.fn().mockImplementation(function (this: Record<string, unknown>) {
-        this.simulateTransaction = mockSimulateTransaction
-      }),
+      // No RPC method is stubbed: with checkOnChainState off and the key read
+      // mocked, verification makes no RPC call, and any call would throw.
+      Server: vi.fn().mockImplementation(function () {}),
     },
   }
 })
@@ -45,7 +44,6 @@ mockGetInstanceStorageValue.mockResolvedValue(xdr.ScVal.scvBytes(COMMITMENT_KEY.
 
 function makeSignedCredential(opts: {
   action?: 'voucher' | 'close'
-  commitmentBytes: Buffer
   cumulativeAmount: bigint
   challengeAmount: string
   previousCumulative?: string
@@ -83,21 +81,9 @@ function makeSignedCredential(opts: {
   })
 }
 
-function successSimResult(commitmentBytes: Buffer) {
-  return { result: { retval: { bytes: () => commitmentBytes } }, transactionData: 'mock' }
-}
-
 describe('channel cross-process replay protection', () => {
-  beforeEach(() => {
-    mockSimulateTransaction.mockReset()
-  })
-
   it('rejects duplicate voucher when two independent instances race with same credential on atomic store', async () => {
     const sharedStore = Store.memory()
-    const commitmentBytes = Buffer.from('integration-race-bytes')
-
-    mockSimulateTransaction.mockResolvedValue(successSimResult(commitmentBytes))
-
     const method1 = serverChannel({
       channel: CHANNEL_ADDRESS,
       checkOnChainState: false,
@@ -112,7 +98,6 @@ describe('channel cross-process replay protection', () => {
     })
 
     const credential = makeSignedCredential({
-      commitmentBytes,
       cumulativeAmount: 5000000n,
       challengeAmount: '5000000',
     })
@@ -148,13 +133,6 @@ describe('channel cross-process replay protection', () => {
 
   it('enforces atomic monotonic check: two concurrent vouchers with different cumulative amounts', async () => {
     const sharedStore = Store.memory()
-    const commitmentBytes1 = Buffer.from('monotonic-race-bytes-1')
-    const commitmentBytes2 = Buffer.from('monotonic-race-bytes-2')
-
-    mockSimulateTransaction
-      .mockResolvedValueOnce(successSimResult(commitmentBytes1))
-      .mockResolvedValueOnce(successSimResult(commitmentBytes2))
-
     const method1 = serverChannel({
       channel: CHANNEL_ADDRESS,
       checkOnChainState: false,
@@ -169,12 +147,10 @@ describe('channel cross-process replay protection', () => {
     })
 
     const credential1 = makeSignedCredential({
-      commitmentBytes: commitmentBytes1,
       cumulativeAmount: 1000000n,
       challengeAmount: '1000000',
     })
     const credential2 = makeSignedCredential({
-      commitmentBytes: commitmentBytes2,
       cumulativeAmount: 2000000n,
       challengeAmount: '1000000',
     })
