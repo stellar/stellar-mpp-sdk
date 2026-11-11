@@ -50,7 +50,8 @@ Client (Funder)                 Server (Recipient)                Stellar
   |                               |                                  |
   |  [Channel opened on-chain     |                                  |
   |   with initial deposit]       |                                  |
-  |  (see "open" action below)    |                                  |
+  |  (deployed out of band, e.g.  |                                  |
+  |   with the stellar CLI)       |                                  |
   |                               |                                  |
   |  GET /resource                |                                  |
   |------------------------------>|                                  |
